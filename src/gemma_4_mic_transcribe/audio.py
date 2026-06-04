@@ -22,6 +22,16 @@ class InputDevice:
     default: bool = False
 
 
+@dataclass(frozen=True)
+class WavWindow:
+    """A valid WAV byte window plus source-frame bounds."""
+
+    wav_bytes: bytes
+    start_frame: int
+    end_frame: int
+    sample_rate: int
+
+
 class RollingPcmBuffer:
     """Thread-safe rolling mono PCM16 buffer."""
 
@@ -108,6 +118,71 @@ def pcm16_to_wav_bytes(pcm16: bytes, sample_rate: int) -> bytes:
         wav.setframerate(sample_rate)
         wav.writeframes(pcm16)
     return output.getvalue()
+
+
+def iter_wav_windows(
+    path: str,
+    window_seconds: float,
+    stride_seconds: float,
+    target_sample_rate: int = 16000,
+) -> list[WavWindow]:
+    """Split a PCM16 WAV file into valid mono WAV byte windows."""
+
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+    if stride_seconds <= 0:
+        raise ValueError("stride_seconds must be positive")
+    if target_sample_rate <= 0:
+        raise ValueError("target_sample_rate must be positive")
+
+    import numpy as np
+
+    with wave.open(path, "rb") as wav:
+        sample_rate = wav.getframerate()
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
+        frames = wav.getnframes()
+        pcm = wav.readframes(frames)
+
+    if sample_width != SAMPLE_WIDTH_BYTES:
+        raise ValueError(f"only PCM16 WAV files are supported, got sample width {sample_width}")
+    if channels <= 0:
+        raise ValueError("WAV file has no audio channels")
+
+    samples = np.frombuffer(pcm, dtype="<i2")
+    if channels > 1:
+        samples = samples.reshape(-1, channels).astype(np.int32).mean(axis=1).clip(-32768, 32767).astype("<i2")
+
+    if sample_rate != target_sample_rate and samples.size:
+        duration_seconds = samples.shape[0] / sample_rate
+        target_frames = max(1, int(round(duration_seconds * target_sample_rate)))
+        source_positions = np.linspace(0, samples.shape[0] - 1, num=target_frames)
+        samples = np.interp(source_positions, np.arange(samples.shape[0]), samples.astype(np.float32))
+        samples = samples.clip(-32768, 32767).astype("<i2")
+        sample_rate = target_sample_rate
+
+    total_frames = int(samples.shape[0])
+    window_frames = max(1, int(sample_rate * window_seconds))
+    stride_frames = max(1, int(sample_rate * stride_seconds))
+
+    windows: list[WavWindow] = []
+    start_frame = 0
+    while start_frame < total_frames:
+        end_frame = min(total_frames, start_frame + window_frames)
+        window_pcm = samples[start_frame:end_frame].astype("<i2", copy=False).tobytes()
+        windows.append(
+            WavWindow(
+                wav_bytes=pcm16_to_wav_bytes(window_pcm, sample_rate),
+                start_frame=start_frame,
+                end_frame=end_frame,
+                sample_rate=sample_rate,
+            )
+        )
+        if end_frame == total_frames:
+            break
+        start_frame += stride_frames
+
+    return windows
 
 
 def list_input_devices(sounddevice_module: object | None = None) -> list[InputDevice]:
