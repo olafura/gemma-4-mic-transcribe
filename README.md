@@ -38,13 +38,32 @@ uv run gemma-4-mic-transcribe \
   --stride-seconds 2.5
 ```
 
+Smoke-test a local WAV file with `Content.AudioBytes`:
+
+```bash
+uv run gemma-4-mic-transcribe \
+  --wav journal1.wav \
+  --window-seconds 2 \
+  --stride-seconds 2 \
+  --skip-windows 1 \
+  --max-windows 1 \
+  --system-message-file system-message-drive-thru.txt
+```
+
 Useful options:
 
 ```text
 --model PATH              model.litertlm path
+--wav PATH                split a WAV file into AudioBytes windows
+--skip-windows INT        skip leading WAV windows before transcribing
+--max-windows INT         stop after N selected WAV windows
 --window-seconds FLOAT    rolling audio window sent to Gemma
 --stride-seconds FLOAT    interval between transcription requests
 --sample-rate INT         requested microphone sample rate, default 16000
 --backend cpu|gpu         LiteRT-LM text backend, default gpu
---audio-backend cpu|gpu   LiteRT-LM audio backend, default cpu
+--audio-backend cpu|gpu   LiteRT-LM audio backend, default gpu
+--audio-position before|after
+                          place AudioBytes before or after the text prompt
+--request-timeout-seconds FLOAT
+                          kill a stuck LiteRT request after N seconds
 ```
