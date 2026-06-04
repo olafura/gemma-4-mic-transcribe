@@ -1,6 +1,5 @@
-def main():
-    print("Hello from gemma-4-mic-transcribe!")
+from gemma_4_mic_transcribe.cli import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
