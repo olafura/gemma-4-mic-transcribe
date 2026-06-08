@@ -132,6 +132,16 @@ The vendored XLA patches also avoid OpenXLA's hardcoded LLVM executable path.
 If you need to force a specific compiler, set `CLANG_COMPILER_PATH` or `CC`
 before compiling instead of editing distro-specific paths into the build.
 
+The ROCm build target list starts with MI200/MI300, RDNA2/RDNA3, and RDNA4
+targets, then appends local GPU targets reported by `rocm_agent_enumerator`.
+This catches Strix/Radeon 8060S `gfx1151`, which otherwise reaches XLA and can
+abort in ROCm while loading HIP code objects. See
+https://github.com/ROCm/rocm-jax/issues/234 for the same `gfx1151` failure mode.
+
+The CLI preflights `exla:rocm` before starting EXLA. If the installed GPU ISA is
+missing from the compiled `libxla_extension.so` offload bundles, it exits with a
+rebuild message instead of letting BEAM core dump.
+
 If your ROCm install is not under the default path, XLA may also need matching
 `ROCM_PATH` and `LD_LIBRARY_PATH` values before compiling/running.
 
@@ -142,9 +152,9 @@ install the ROCm profiler SDK package for your distro or point `ROCM_PATH` and
 If the ROCm XLA build fails with `xxd: command not found`, install `xxd` or the
 package that provides it for your distro and make sure it is on `PATH`.
 
-If EXLA detects CUDA but your CUDA libraries are incomplete, for example missing
-NCCL, either install the missing CUDA runtime pieces or force a CPU-only EXLA
-build with `EXLA_CPU_ONLY=1` before compiling EXLA.
+The vendored EXLA build disables EXLA's CUDA helper objects automatically when
+`XLA_TARGET=rocm`, even if `nvcc` is installed. ROCm support still comes from the
+locally built ROCm `libxla_extension`.
 
 Microphone input is intentionally not advertised yet. The CLI currently supports
 PCM WAV file input only.

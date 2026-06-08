@@ -5,6 +5,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.ModelCatalog
+  alias Gemma4MicTranscribe.RocmPreflight
   alias Gemma4MicTranscribe.Gemma4Unified.Prompt
 
   test "audio feature extractor chunks raw 16 kHz audio into 640-sample soft tokens" do
@@ -122,5 +123,18 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   test "model catalog resolves the friendly Gemma4 alias" do
     assert ModelCatalog.resolve("gemma4-12b-unified") == "google/gemma-4-12B-it"
     assert ModelCatalog.resolve("google/gemma-4-12B-it") == "google/gemma-4-12B-it"
+  end
+
+  test "ROCm preflight parses GPU targets from rocm_agent_enumerator output" do
+    assert RocmPreflight.parse_gfx_targets("gfx000\ngfx1151\n") == ["gfx1151"]
+  end
+
+  test "ROCm preflight parses XLA offload bundle targets" do
+    output = """
+    Extracting offload bundle: libxla_extension.so.0.hipv4-amdgcn-amd-amdhsa--gfx1100
+    Extracting offload bundle: libxla_extension.so.1.hipv4-amdgcn-amd-amdhsa--gfx1200
+    """
+
+    assert RocmPreflight.parse_offload_targets(output) == ["gfx1100", "gfx1200"]
   end
 end

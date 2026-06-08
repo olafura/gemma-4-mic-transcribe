@@ -17,4 +17,25 @@ while IFS= read -r ebin_dir; do
   code_path_args+=("-pa" "$ebin_dir")
 done < <(find "$BUILD_LIB_DIR" -mindepth 2 -maxdepth 2 -type d -name ebin | sort)
 
-exec elixir "${code_path_args[@]}" -e '{:ok, _} = Application.ensure_all_started(:gemma_4_mic_transcribe); Nx.global_default_backend(Torchx.Backend); System.halt(Gemma4MicTranscribe.CLI.main(System.argv()))' -- "$@"
+backend="torchx"
+prev=""
+for arg in "$@"; do
+  if [[ "$arg" == --backend=* ]]; then
+    backend="${arg#--backend=}"
+    break
+  fi
+
+  if [[ "$prev" == "--backend" ]]; then
+    backend="$arg"
+    break
+  fi
+
+  prev="$arg"
+done
+
+backend_setup='Nx.global_default_backend(Torchx.Backend)'
+if [[ "$backend" == exla* || "$backend" == "host" ]]; then
+  backend_setup=':ok'
+fi
+
+exec elixir "${code_path_args[@]}" -e "{:ok, _} = Application.ensure_all_started(:gemma_4_mic_transcribe); ${backend_setup}; System.halt(Gemma4MicTranscribe.CLI.main(System.argv()))" -- "$@"

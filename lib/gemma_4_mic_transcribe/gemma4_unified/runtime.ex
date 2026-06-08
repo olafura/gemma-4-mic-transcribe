@@ -6,6 +6,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.ModelCatalog
+  alias Gemma4MicTranscribe.RocmPreflight
 
   defstruct [
     :model_name,
@@ -282,6 +283,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp backend("torchx:cuda"), do: torchx_backend(:cuda)
 
   defp backend(other), do: {:error, "unsupported backend #{inspect(other)}"}
+
+  defp exla_backend(:rocm) do
+    with :ok <- RocmPreflight.check(),
+         :ok <- ensure_exla_available(),
+         {:ok, backend} <- exla_backend_for_client(:rocm) do
+      {:ok, backend}
+    end
+  end
 
   defp exla_backend(client) do
     with :ok <- ensure_exla_available(),
