@@ -107,12 +107,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         "runtime: prompt tokenized input_tokens=#{length(input_ids)} audio_tokens=#{input.audio.token_count}"
       end)
 
+      {input_features, input_features_mask} =
+        timed_debug(runtime, "runtime: prepare audio tensors", fn ->
+          prepare_audio_tensors(runtime, input.audio.input_features, input.audio.attention_mask)
+        end)
+
       token_ids =
         greedy_generate(
           runtime,
           input_ids,
-          input.audio.input_features,
-          input.audio.attention_mask,
+          input_features,
+          input_features_mask,
           []
         )
 
@@ -169,7 +174,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp predict_next_logits(runtime, input_ids, input_features, input_features_mask) do
     sequence_length = length(input_ids)
-    backend = runtime.backend || Nx.BinaryBackend
+    backend = runtime_backend(runtime)
 
     inputs =
       Nx.with_default_backend(backend, fn ->
@@ -177,9 +182,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           "input_ids" => Nx.tensor([input_ids], type: :s64),
           "attention_mask" => Nx.tensor([List.duplicate(1, sequence_length)], type: :s64),
           "position_ids" => Nx.tensor([Enum.to_list(0..(sequence_length - 1))], type: :s64),
-          "input_features" => input_features |> Nx.backend_transfer(backend) |> Nx.new_axis(0),
-          "input_features_mask" =>
-            input_features_mask |> Nx.backend_transfer(backend) |> Nx.new_axis(0)
+          "input_features" => Nx.new_axis(input_features, 0),
+          "input_features_mask" => Nx.new_axis(input_features_mask, 0)
         }
       end)
 
@@ -187,6 +191,18 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     logits[0][sequence_length - 1]
   end
+
+  defp prepare_audio_tensors(runtime, input_features, input_features_mask) do
+    backend = runtime_backend(runtime)
+
+    {
+      Nx.backend_copy(input_features, backend),
+      Nx.backend_copy(input_features_mask, backend)
+    }
+  end
+
+  defp runtime_backend(%__MODULE__{backend: nil}), do: Nx.BinaryBackend
+  defp runtime_backend(%__MODULE__{backend: backend}), do: backend
 
   defp next_token_id(logits, suppressed_token_ids) do
     logits =
