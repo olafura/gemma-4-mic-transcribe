@@ -15,6 +15,6 @@ echo "Default direct-audio model:"
 echo "  $MODEL_NAME"
 echo
 echo "Current runtime status:"
-echo "  Boombox audio normalization and Gemma 4 Unified input construction are implemented."
+echo "  PCM WAV normalization and Gemma 4 Unified input construction are implemented."
 echo "  Gemma4UnifiedForConditionalGeneration still needs a Bumblebee/Nx backbone implementation."
 echo "  Until that lands, inference fails clearly instead of falling back to Python, LiteRT, or Whisper."

@@ -2,10 +2,10 @@
 
 Elixir CLI for direct Gemma 4 12B Unified audio transcription.
 
-The app uses Boombox to normalize audio to mono 16 kHz float samples and builds
-Gemma 4 Unified audio inputs directly: raw 640-sample audio frames, `<boa>/<eoa>`
-prompt markers, and text prompts. It intentionally does not use Python, LiteRT,
-or Whisper as a fallback.
+The app reads PCM WAV audio, normalizes it to mono 16 kHz float samples, and
+builds Gemma 4 Unified audio inputs directly: raw 640-sample audio frames,
+`<boa>/<eoa>` prompt markers, and text prompts. It intentionally does not use
+Python, LiteRT, or Whisper as a fallback.
 
 The remaining runtime gap is Gemma4UnifiedForConditionalGeneration support in
 Bumblebee/Nx. Until that model backbone is implemented, inference exits with a
@@ -46,7 +46,7 @@ List supported model variants:
 mix run -e 'System.halt(Gemma4MicTranscribe.CLI.main(["--list-models"]))'
 ```
 
-Run against a WAV or any Boombox-readable audio/video file:
+Run against a PCM WAV file:
 
 ```bash
 mix run -e 'System.halt(Gemma4MicTranscribe.CLI.main([
@@ -69,7 +69,7 @@ Useful options:
 
 ```text
 --list-models                  show supported Gemma 4 12B model variants
---wav PATH                     read audio from a Boombox-readable file
+--wav PATH                     read PCM WAV audio from a file
 --skip-windows INT             skip leading windows
 --max-windows INT              stop after N selected windows
 --system-message TEXT          system instruction for every window
@@ -84,15 +84,15 @@ Useful options:
                                maximum seconds for one generation
 ```
 
-Microphone input is intentionally not advertised yet. Boombox examples cover file
-and WebRTC streams, but this CLI currently supports file input only.
+Microphone input is intentionally not advertised yet. The CLI currently supports
+PCM WAV file input only.
 
 ## Implementation Status
 
 Implemented:
 
 - Mix/escript CLI.
-- Boombox file audio normalization to mono 16 kHz `:f32le`.
+- PCM16 and float32 WAV normalization to mono 16 kHz samples.
 - Windowing, timestamps, prompt construction, and Gemma 4 Unified raw-audio features.
 - Explicit unsupported-runtime error at the Bumblebee model boundary.
 

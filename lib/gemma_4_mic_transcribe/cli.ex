@@ -83,7 +83,7 @@ defmodule Gemma4MicTranscribe.CLI do
   def run(%RunConfig{wav: nil}, _opts) do
     IO.puts(
       :stderr,
-      "error: microphone input is not supported by this Boombox CLI yet; use --wav PATH"
+      "error: microphone input is not supported yet; use --wav PATH"
     )
 
     2
@@ -223,7 +223,7 @@ defmodule Gemma4MicTranscribe.CLI do
       gemma_4_mic_transcribe --list-models
 
     Options:
-      --wav PATH                         Read audio from a file with Boombox
+      --wav PATH                         Read PCM WAV audio from a file
       --skip-windows INT                 Skip leading audio windows
       --max-windows INT                  Stop after N selected windows
       --system-message TEXT              System instruction for every window

@@ -25,4 +25,53 @@ defmodule Gemma4MicTranscribe.AudioTest do
 
     assert Audio.binary_to_f32_samples(binary) == [0.5, -1.0]
   end
+
+  test "decode_wav! skips metadata chunks before PCM data" do
+    wav =
+      wav_binary([
+        {"fmt ",
+         <<1::little-unsigned-integer-size(16), 2::little-unsigned-integer-size(16),
+           48_000::little-unsigned-integer-size(32), 192_000::little-unsigned-integer-size(32),
+           4::little-unsigned-integer-size(16), 16::little-unsigned-integer-size(16)>>},
+        {"LIST", "INFOx"},
+        {"data",
+         <<32767::little-signed-integer-size(16), 32767::little-signed-integer-size(16),
+           -32768::little-signed-integer-size(16), -32768::little-signed-integer-size(16)>>}
+      ])
+
+    samples = Audio.decode_wav!(wav, 48_000)
+
+    assert_in_delta Enum.at(samples, 0), 32767 / 32768.0, 0.000001
+    assert Enum.at(samples, 1) == -1.0
+  end
+
+  test "decode_wav! resamples PCM data to the target sample rate" do
+    wav =
+      wav_binary([
+        {"fmt ",
+         <<1::little-unsigned-integer-size(16), 1::little-unsigned-integer-size(16),
+           48_000::little-unsigned-integer-size(32), 96_000::little-unsigned-integer-size(32),
+           2::little-unsigned-integer-size(16), 16::little-unsigned-integer-size(16)>>},
+        {"data",
+         <<0::little-signed-integer-size(16), 4096::little-signed-integer-size(16),
+           8192::little-signed-integer-size(16)>>}
+      ])
+
+    assert Audio.decode_wav!(wav, 16_000) == [0.0]
+  end
+
+  defp wav_binary(chunks) do
+    chunks =
+      chunks
+      |> Enum.map(fn {id, payload} ->
+        padding = if rem(byte_size(payload), 2) == 1, do: <<0>>, else: <<>>
+
+        <<id::binary-size(4), byte_size(payload)::little-unsigned-integer-size(32),
+          payload::binary, padding::binary>>
+      end)
+      |> IO.iodata_to_binary()
+
+    <<"RIFF", byte_size("WAVE" <> chunks)::little-unsigned-integer-size(32), "WAVE",
+      chunks::binary>>
+  end
 end
