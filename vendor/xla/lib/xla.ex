@@ -27,6 +27,7 @@ defmodule XLA do
   ]
 
   @supported_xla_targets ["cpu", "cuda", "rocm", "tpu", "cuda12", "cuda13"]
+  @default_rocm_amdgpu_targets ~w(gfx90a gfx942 gfx1030 gfx1100 gfx1200 gfx1201)
 
   @doc """
   Returns path to the precompiled XLA archive.
@@ -98,6 +99,53 @@ defmodule XLA do
     else
       _ -> nil
     end
+  end
+
+  defp rocm_amdgpu_targets() do
+    configured_targets =
+      "TF_ROCM_AMDGPU_TARGETS"
+      |> System.get_env()
+      |> split_rocm_targets()
+
+    base_targets =
+      if configured_targets == [] do
+        @default_rocm_amdgpu_targets
+      else
+        configured_targets
+      end
+
+    (base_targets ++ detected_rocm_agent_targets())
+    |> Enum.uniq()
+    |> Enum.join(",")
+  end
+
+  defp split_rocm_targets(nil), do: []
+
+  defp split_rocm_targets(targets) do
+    targets
+    |> String.split([",", " ", "\n", "\t"], trim: true)
+    |> Enum.reject(&(&1 == "gfx000"))
+  end
+
+  defp detected_rocm_agent_targets() do
+    executable =
+      System.find_executable("rocm_agent_enumerator") ||
+        existing_path("/opt/rocm/bin/rocm_agent_enumerator")
+
+    if executable do
+      case System.cmd(executable, [], stderr_to_stdout: true) do
+        {output, 0} -> split_rocm_targets(output)
+        {_output, _status} -> []
+      end
+    else
+      []
+    end
+  rescue
+    _exception -> []
+  end
+
+  defp existing_path(path) do
+    if File.regular?(path), do: path
   end
 
   defp xla_cache_dir() do
@@ -359,10 +407,12 @@ defmodule XLA do
             ~s/--action_env=TF_ROCM_CLANG="1"/,
             ~s/--action_env=TF_HIPCC_CLANG="1"/,
             # See https://github.com/jax-ml/jax/blob/098e953afb2b83daf85e6456c89e896f9cfd483d/.bazelrc#L239
-            # GPU targets: MI200 (gfx90a), MI300 (gfx942), RDNA2 (gfx1030), RDNA3 (gfx1100), RDNA4 (gfx120x)
+            # Baseline GPU targets: MI200 (gfx90a), MI300 (gfx942), RDNA2 (gfx1030),
+            # RDNA3 (gfx1100), RDNA4 (gfx120x). Local ROCm agents, such as Strix
+            # gfx1151, are appended automatically when rocm_agent_enumerator is available.
             # Note: gfx900/906/908 (Vega, MI50/60, MI100) removed - deprecated in ROCm 7.x
             # Note: gfx940/941 removed - not valid LLVM targets, MI300 uses gfx942
-            ~s/--action_env=TF_ROCM_AMDGPU_TARGETS="gfx90a,gfx942,gfx1030,gfx1100,gfx1200,gfx1201"/
+            ~s/--action_env=TF_ROCM_AMDGPU_TARGETS="#{rocm_amdgpu_targets()}"/
           ]
 
         "tpu" <> _ ->
@@ -381,7 +431,8 @@ defmodule XLA do
       # See https://github.com/jax-ml/jax/blob/0842cc6f386a20aa20ed20691fb78a43f6c4a307/.bazelrc#L127-L138
       "--copt=-Wno-gnu-offsetof-extensions",
       "--copt=-Qunused-arguments",
-      "--copt=-Wno-error=c23-extensions"
+      "--copt=-Wno-error=c23-extensions",
+      "--copt=-Wno-error=incompatible-pointer-types-discards-qualifiers"
     ]
 
     # We need to set HOME for the build, otherwise one of the scripts
