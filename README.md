@@ -128,6 +128,10 @@ snapshot during package loading with `CcInfo symbol has been removed`. Use
 `BAZEL="$(mise which bazel)"` so the XLA build gets the pinned Bazel binary even
 when Bazel runs from the OpenXLA cache directory.
 
+The vendored XLA patches also avoid OpenXLA's hardcoded LLVM executable path.
+If you need to force a specific compiler, set `CLANG_COMPILER_PATH` or `CC`
+before compiling instead of editing distro-specific paths into the build.
+
 If your ROCm install is not under the default path, XLA may also need matching
 `ROCM_PATH` and `LD_LIBRARY_PATH` values before compiling/running.
 

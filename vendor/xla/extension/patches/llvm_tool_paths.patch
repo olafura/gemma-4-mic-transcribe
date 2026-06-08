@@ -1,0 +1,179 @@
+--- a/tools/toolchains/cross_compile/cc/BUILD
++++ b/tools/toolchains/cross_compile/cc/BUILD
+@@ -22,16 +22,21 @@
+ # relative to the binary. Without it, we run into "Library not loaded" error
+ # when trying run cross-compiled tests, see b/300002682.
+ filegroup(
++    name = "cc_wrapper",
++    srcs = ["cc_wrapper.sh"],
++)
++
++filegroup(
+     name = "cc_wrapper_and_macos_sysroot",
+-    srcs = ["cc_wrapper.sh"] + glob(["MacOSX.sdk/**"]),
++    srcs = [":cc_wrapper"] + glob(["MacOSX.sdk/**"]),
+ )
+ 
+ cc_toolchain(
+     name = "linux_x86_toolchain",
+-    all_files = ":empty",
+-    compiler_files = ":empty",
++    all_files = ":cc_wrapper",
++    compiler_files = ":cc_wrapper",
+     dwp_files = ":empty",
+-    linker_files = ":empty",
++    linker_files = ":cc_wrapper",
+     objcopy_files = ":empty",
+     strip_files = ":empty",
+     supports_param_files = 1,
+@@ -70,7 +75,7 @@
+     link_flags = [
+         "--target=x86_64-unknown-linux-gnu",
+         "-fuse-ld=lld",
+-        "--ld-path=/usr/lib/llvm-18/bin/ld.lld",
++        "--ld-path=ld.lld",
+         "-Wl,--undefined-version",
+     ],
+     link_libs = [
+@@ -90,14 +95,14 @@
+     target_libc = "",
+     target_system_name = "x86_64-unknown-linux-gnu",
+     tool_paths = {
+-        "gcc": "/usr/lib/llvm-18/bin/clang",
+-        "ld": "/usr/lib/llvm-18/bin/ld.lld",
+-        "ar": "/usr/lib/llvm-18/bin/llvm-ar",
+-        "cpp": "/usr/lib/llvm-18/bin/clang++",
+-        "llvm-cov": "/usr/lib/llvm-18/bin/llvm-cov",
+-        "nm": "/usr/lib/llvm-18/bin/llvm-nm",
+-        "objdump": "/usr/lib/llvm-18/bin/llvm-objdump",
+-        "strip": "/usr/lib/llvm-18/bin/llvm-strip",
++        "gcc": "cc_wrapper.sh",
++        "ld": "ld.lld",
++        "ar": "llvm-ar",
++        "cpp": "clang++",
++        "llvm-cov": "llvm-cov",
++        "nm": "llvm-nm",
++        "objdump": "llvm-objdump",
++        "strip": "llvm-strip",
+     },
+     toolchain_identifier = "linux_x86_toolchain",
+     unfiltered_compile_flags = [
+@@ -113,10 +118,10 @@
+ 
+ cc_toolchain(
+     name = "linux_aarch64_toolchain",
+-    all_files = ":empty",
+-    compiler_files = ":empty",
++    all_files = ":cc_wrapper",
++    compiler_files = ":cc_wrapper",
+     dwp_files = ":empty",
+-    linker_files = ":empty",
++    linker_files = ":cc_wrapper",
+     objcopy_files = ":empty",
+     strip_files = ":empty",
+     supports_param_files = 1,
+@@ -156,7 +161,7 @@
+     link_flags = [
+         "--target=aarch64-unknown-linux-gnu",
+         "-fuse-ld=lld",
+-        "--ld-path=/usr/lib/llvm-18/bin/ld.lld",
++        "--ld-path=ld.lld",
+         "-Wl,--undefined-version",
+     ],
+     link_libs = [
+@@ -176,14 +181,14 @@
+     target_libc = "",
+     target_system_name = "aarch64-unknown-linux-gnu",
+     tool_paths = {
+-        "gcc": "/usr/lib/llvm-18/bin/clang",
+-        "ld": "/usr/lib/llvm-18/bin/ld.lld",
+-        "ar": "/usr/lib/llvm-18/bin/llvm-ar",
+-        "cpp": "/usr/lib/llvm-18/bin/clang++",
+-        "llvm-cov": "/usr/lib/llvm-18/bin/llvm-cov",
+-        "nm": "/usr/lib/llvm-18/bin/llvm-nm",
+-        "objdump": "/usr/lib/llvm-18/bin/llvm-objdump",
+-        "strip": "/usr/lib/llvm-18/bin/llvm-strip",
++        "gcc": "cc_wrapper.sh",
++        "ld": "ld.lld",
++        "ar": "llvm-ar",
++        "cpp": "clang++",
++        "llvm-cov": "llvm-cov",
++        "nm": "llvm-nm",
++        "objdump": "llvm-objdump",
++        "strip": "llvm-strip",
+     },
+     toolchain_identifier = "linux_aarch64_toolchain",
+     unfiltered_compile_flags = [
+@@ -250,7 +255,7 @@
+         "--target=x86_64-apple-darwin",
+         "-lSystem",
+         "-fuse-ld=lld",
+-        "--ld-path=/usr/lib/llvm-18/bin/ld64.lld",
++        "--ld-path=ld64.lld",
+         "-headerpad_max_install_names",
+         "-Wl,-undefined,dynamic_lookup",
+         # Target Catalina as the minimum supported OS
+@@ -274,13 +279,13 @@
+     target_system_name = "x86_64-apple-macosx10.15",
+     tool_paths = {
+         "gcc": "cc_wrapper.sh",
+-        "ld": "/usr/lib/llvm-18/bin/ld64.lld",
+-        "ar": "/usr/lib/llvm-18/bin/llvm-libtool-darwin",
+-        "cpp": "/usr/lib/llvm-18/bin/clang++",
+-        "llvm-cov": "/usr/lib/llvm-18/bin/llvm-cov",
+-        "nm": "/usr/lib/llvm-18/bin/llvm-nm",
+-        "objdump": "/usr/lib/llvm-18/bin/llvm-objdump",
+-        "strip": "/usr/lib/llvm-18/bin/llvm-strip",
++        "ld": "ld64.lld",
++        "ar": "llvm-libtool-darwin",
++        "cpp": "clang++",
++        "llvm-cov": "llvm-cov",
++        "nm": "llvm-nm",
++        "objdump": "llvm-objdump",
++        "strip": "llvm-strip",
+     },
+     toolchain_identifier = "macos_x86_toolchain",
+     unfiltered_compile_flags = [
+--- a/tools/toolchains/cross_compile/cc/cc_wrapper.sh
++++ b/tools/toolchains/cross_compile/cc/cc_wrapper.sh
+@@ -27,6 +27,18 @@
+ #
+ set -eu
+ 
++function resolve_tool() {
++    local -r env_var="$1"
++    local -r default_tool="$2"
++    local -r configured_tool="${!env_var:-}"
++
++    if [[ -n "${configured_tool}" ]]; then
++        echo "${configured_tool}"
++    else
++        command -v "${default_tool}" 2>/dev/null || echo "${default_tool}"
++    fi
++}
++
+ LIBS=
+ LIB_DIRS=
+ RPATHS=
+@@ -61,7 +73,7 @@
+ done
+ 
+ # Call the C++ compiler
+-/usr/lib/llvm-18/bin/clang "$@"
++"$(resolve_tool CLANG_COMPILER_PATH "${CC:-clang}")" "$@"
+ 
+ function get_library_path() {
+     for libdir in ${LIB_DIRS}; do
+@@ -112,9 +124,9 @@
+         if [[ -n "${libname-}" ]]; then
+             libpath=$(get_library_path ${lib})
+             if [ -n "${libpath}" ]; then
+-                /usr/lib/llvm-18/bin/llvm-install-name-tool -change $(get_otool_path "${libpath}") \
++                "$(resolve_tool LLVM_INSTALL_NAME_TOOL llvm-install-name-tool)" -change $(get_otool_path "${libpath}") \
+                     "@loader_path/${rpath}/${libname}" "${OUTPUT}"
+             fi
+         fi
+     done
+-done
+\ No newline at end of file
++done
