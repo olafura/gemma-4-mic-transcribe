@@ -22,3 +22,4 @@ arch="$(uname -m)"
 # referenced threads.
 git apply $dir/cuda_ncrtc_builtins.patch
 git apply $dir/rules_pywrap_ccinfo.patch
+git apply $dir/rocm_flang_symlink.patch

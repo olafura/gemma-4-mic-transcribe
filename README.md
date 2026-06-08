@@ -118,13 +118,15 @@ To try EXLA on ROCm, build/install XLA for ROCm and select the ROCm client:
 
 ```bash
 mise install
-XLA_TARGET=rocm XLA_BUILD=true BAZEL="mise exec -- bazel" mix deps.clean xla --build
-XLA_TARGET=rocm XLA_BUILD=true BAZEL="mise exec -- bazel" mix deps.compile xla exla
+XLA_TARGET=rocm XLA_BUILD=true BAZEL="$(mise which bazel)" mix deps.clean xla --build
+XLA_TARGET=rocm XLA_BUILD=true BAZEL="$(mise which bazel)" mix deps.compile xla exla
 ./gemma_4_mic_transcribe --wav journal1.wav --backend exla:rocm --debug
 ```
 
 The vendored XLA build is pinned to Bazel 7.7.0. Bazel 9.x fails this OpenXLA
-snapshot during package loading with `CcInfo symbol has been removed`.
+snapshot during package loading with `CcInfo symbol has been removed`. Use
+`BAZEL="$(mise which bazel)"` so the XLA build gets the pinned Bazel binary even
+when Bazel runs from the OpenXLA cache directory.
 
 If your ROCm install is not under the default path, XLA may also need matching
 `ROCM_PATH` and `LD_LIBRARY_PATH` values before compiling/running.
@@ -132,6 +134,9 @@ If your ROCm install is not under the default path, XLA may also need matching
 If the ROCm XLA build fails with `Cannot find rocm library rocprofiler-sdk`,
 install the ROCm profiler SDK package for your distro or point `ROCM_PATH` and
 `LD_LIBRARY_PATH` at the ROCm installation that provides it.
+
+If the ROCm XLA build fails with `xxd: command not found`, install `xxd` or the
+package that provides it for your distro and make sure it is on `PATH`.
 
 If EXLA detects CUDA but your CUDA libraries are incomplete, for example missing
 NCCL, either install the missing CUDA runtime pieces or force a CPU-only EXLA

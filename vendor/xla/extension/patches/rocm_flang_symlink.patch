@@ -1,0 +1,31 @@
+--- a/third_party/gpus/rocm/BUILD.tpl
++++ b/third_party/gpus/rocm/BUILD.tpl
+@@ -635,7 +635,18 @@
+     name = "toolchain_data",
+     srcs = glob([
+         "%{rocm_root}/bin/hipcc",
+-        "%{rocm_root}/lib/llvm/**",
++        "%{rocm_root}/bin/amdclang*",
++        "%{rocm_root}/bin/amdlld",
++        "%{rocm_root}/lib/llvm/bin/amd*",
++        "%{rocm_root}/lib/llvm/bin/clang*",
++        "%{rocm_root}/lib/llvm/bin/ld.lld",
++        "%{rocm_root}/lib/llvm/bin/lld*",
++        "%{rocm_root}/lib/llvm/bin/llvm-*",
++        "%{rocm_root}/lib/llvm/bin/offload-*",
++        "%{rocm_root}/lib/llvm/include/**",
++        "%{rocm_root}/lib/llvm/lib/**",
++        "%{rocm_root}/lib/llvm/libexec/**",
++        "%{rocm_root}/lib/llvm/share/**",
+         "%{rocm_root}/share/hip/**",
+         "%{rocm_root}/amdgcn/**",
+         "%{rocm_root}/lib/rocm_sysdeps/lib/*.so*",
+@@ -647,7 +658,7 @@
+ 
+ filegroup(
+     name = "all_files",
+-    srcs = glob(["%{rocm_root}/**"]),
++    srcs = [":toolchain_data"],
+     visibility = ["//visibility:public"],
+ )
+ 
