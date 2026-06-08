@@ -25,7 +25,8 @@ defmodule Gemma4MicTranscribe.MixProject do
       {:ex_libsrt, path: "vendor/ex_libsrt", override: true},
       {:jason, "~> 1.4"},
       {:nx, "~> 0.12.0"},
-      {:torchx, "~> 0.12.0"}
+      {:torchx, "~> 0.12.0"},
+      {:xla, path: "vendor/xla", override: true, runtime: false}
     ]
   end
 end

@@ -9,3 +9,7 @@ __pycache__/
 
 # Local audio samples
 *.wav
+
+# Copied Hex metadata for vendored path dependencies
+/vendor/xla/.hex
+/vendor/xla/hex_metadata.config
