@@ -1,13 +1,12 @@
-# Python-generated files
+# Elixir-generated files
+/_build/
+/deps/
+/.elixir_ls/
+/gemma_4_mic_transcribe
+
+# Old/generated Python caches
 __pycache__/
 *.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
 
 # Local audio samples
 *.wav
