@@ -4,12 +4,14 @@ Elixir CLI for direct Gemma 4 12B Unified audio transcription.
 
 The app reads PCM WAV audio, normalizes it to mono 16 kHz float samples, and
 builds Gemma 4 Unified audio inputs directly: raw 640-sample audio frames,
-`<boa>/<eoa>` prompt markers, and text prompts. It intentionally does not use
-Python, LiteRT, or Whisper as a fallback.
+`<|audio>/<audio|>` prompt markers, repeated `<|audio|>` soft-token
+placeholders, and text prompts. It intentionally does not use Python, LiteRT, or
+Whisper as a fallback.
 
-The remaining runtime gap is Gemma4UnifiedForConditionalGeneration support in
-Bumblebee/Nx. Until that model backbone is implemented, inference exits with a
-clear unsupported-runtime error after the Elixir audio/prompt path is prepared.
+The runtime includes a local Bumblebee/Axon implementation of the audio-only
+Gemma4UnifiedForConditionalGeneration path. Generation currently runs a
+full-context greedy loop rather than a KV-cached loop, so it is expected to be
+slow for the 12B checkpoint.
 
 ## Setup
 
@@ -94,10 +96,10 @@ Implemented:
 - Mix/escript CLI.
 - PCM16 and float32 WAV normalization to mono 16 kHz samples.
 - Windowing, timestamps, prompt construction, and Gemma 4 Unified raw-audio features.
-- Explicit unsupported-runtime error at the Bumblebee model boundary.
+- Local Bumblebee/Axon Gemma4Unified audio model loader and full-context greedy generation.
 
 Not implemented yet:
 
-- Full Bumblebee/Nx Gemma4UnifiedForConditionalGeneration text backbone.
-- Multimodal embedding injection into the decoder token sequence.
+- KV-cached generation for Gemma 4's mixed sliding/full attention head sizes.
+- Vision/video inputs.
 - Live microphone/WebRTC CLI mode.

@@ -1,7 +1,9 @@
 defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   @moduledoc false
 
-  @audio_placeholder "<audio_soft_token>"
+  @audio_begin "<|audio>"
+  @audio_placeholder "<|audio|>"
+  @audio_end "<audio|>"
 
   def audio_placeholder, do: @audio_placeholder
 
@@ -12,14 +14,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
     audio_tokens = String.duplicate(@audio_placeholder, audio_token_count)
 
     user_content =
-      [system_message, "<boa>" <> audio_tokens <> "<eoa>", prompt]
+      [system_message, @audio_begin <> audio_tokens <> @audio_end, prompt]
       |> Enum.reject(&(&1 == ""))
       |> Enum.join("\n\n")
 
     """
-    <bos><start_of_turn>user
-    #{user_content}<end_of_turn>
-    <start_of_turn>model
+    <bos><|turn>user
+    #{user_content}<turn|>
+    <|turn>model
     """
     |> String.trim()
   end

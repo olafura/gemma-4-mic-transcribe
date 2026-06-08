@@ -8,7 +8,7 @@ defmodule Gemma4MicTranscribe.ModelCatalog do
       name: "gemma4-12b-unified",
       hf_repo: "google/gemma-4-12B-it",
       description: "Gemma 4 12B instruction-tuned Unified model with native audio input",
-      runtime: "Bumblebee/Nx Gemma4Unified support required"
+      runtime: "local Bumblebee/Axon Gemma4Unified audio runtime"
     },
     %{
       name: "gemma4-12b-qat-q4_0-gguf",
@@ -26,6 +26,13 @@ defmodule Gemma4MicTranscribe.ModelCatalog do
 
   def default_model_name, do: Config.default_model_name()
   def all, do: @models
+
+  def resolve(name) do
+    case Enum.find(@models, &(&1.name == name || &1.hf_repo == name)) do
+      nil -> name
+      model -> model.hf_repo
+    end
+  end
 
   def format do
     [
