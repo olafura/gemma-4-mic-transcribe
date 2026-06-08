@@ -1,6 +1,8 @@
 defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   @moduledoc false
 
+  require Logger
+
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.ModelCatalog
 
@@ -12,10 +14,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :model_info,
     :tokenizer,
     :generation_config,
-    :predict_fun
+    :predict_fun,
+    :debug
   ]
 
   def load(opts \\ []) do
+    debug? = Keyword.get(opts, :debug, false)
+
     with :ok <- verify_bumblebee_available(),
          {:ok, backend} <- backend(Keyword.get(opts, :backend, "host")) do
       model_name = Keyword.fetch!(opts, :model_name)
@@ -28,17 +33,46 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           architecture: :for_conditional_generation
         ] ++ if(backend, do: [backend: backend], else: [])
 
-      with {:ok, model_info} <- Bumblebee.load_model(repo, model_opts),
-           {:ok, tokenizer} <- Bumblebee.load_tokenizer(repo, type: :gemma),
-           {:ok, generation_config} <- Bumblebee.load_generation_config(repo, spec_module: Model) do
-        {_init_fun, predict_fun} = Axon.build(model_info.model)
-        model_info = %{model_info | params: Axon.ModelState.new(model_info.params)}
+      log_debug(debug?, fn ->
+        "runtime: resolved model #{inspect(model_name)} -> #{repo_id}; backend=#{inspect(backend)}"
+      end)
+
+      with {:ok, model_info} <-
+             timed_debug(
+               debug?,
+               "runtime: Bumblebee.load_model #{repo_id} (checkpoint download/load)",
+               fn ->
+                 Bumblebee.load_model(repo, model_opts)
+               end
+             ),
+           {:ok, tokenizer} <-
+             timed_debug(debug?, "runtime: Bumblebee.load_tokenizer #{repo_id}", fn ->
+               Bumblebee.load_tokenizer(repo, type: :gemma)
+             end),
+           {:ok, generation_config} <-
+             timed_debug(debug?, "runtime: Bumblebee.load_generation_config #{repo_id}", fn ->
+               Bumblebee.load_generation_config(repo, spec_module: Model)
+             end) do
+        {_init_fun, predict_fun} =
+          timed_debug(debug?, "runtime: Axon.build predict function", fn ->
+            Axon.build(model_info.model)
+          end)
+
+        model_info =
+          timed_debug(debug?, "runtime: wrap model params", fn ->
+            %{model_info | params: Axon.ModelState.new(model_info.params)}
+          end)
 
         generation_config =
           Bumblebee.configure(generation_config,
             max_new_tokens: Keyword.get(opts, :max_response_tokens, 512),
             strategy: %{type: :greedy_search}
           )
+
+        log_debug(debug?, fn ->
+          "runtime: loaded spec hidden_size=#{model_info.spec.hidden_size} layers=#{model_info.spec.num_blocks} " <>
+            "audio_token_id=#{model_info.spec.audio_token_id} max_new_tokens=#{generation_config.max_new_tokens}"
+        end)
 
         {:ok,
          %__MODULE__{
@@ -49,7 +83,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            model_info: model_info,
            tokenizer: tokenizer,
            generation_config: generation_config,
-           predict_fun: predict_fun
+           predict_fun: predict_fun,
+           debug: debug?
          }}
       end
     end
@@ -58,8 +93,19 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   def generate(%__MODULE__{} = runtime, input, _opts \\ []) do
-    with {:ok, input_ids} <- tokenize(runtime.tokenizer, input.prompt),
+    log_debug(runtime, fn ->
+      "runtime: generate start prompt_bytes=#{byte_size(input.prompt)} audio_tokens=#{input.audio.token_count}"
+    end)
+
+    with {:ok, input_ids} <-
+           timed_debug(runtime, "runtime: tokenize prompt", fn ->
+             tokenize(runtime.tokenizer, input.prompt)
+           end),
          :ok <- validate_audio_placeholders(runtime.tokenizer, input_ids, input.audio.token_count) do
+      log_debug(runtime, fn ->
+        "runtime: prompt tokenized input_tokens=#{length(input_ids)} audio_tokens=#{input.audio.token_count}"
+      end)
+
       token_ids =
         greedy_generate(
           runtime,
@@ -68,6 +114,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           input.audio.attention_mask,
           []
         )
+
+      log_debug(runtime, fn ->
+        "runtime: generation finished generated_tokens=#{length(token_ids)}"
+      end)
 
       {:ok, Bumblebee.Tokenizer.decode(runtime.tokenizer, token_ids)}
     end
@@ -78,13 +128,31 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp greedy_generate(runtime, input_ids, input_features, input_features_mask, generated) do
     cond do
       length(generated) >= runtime.max_response_tokens ->
+        log_debug(runtime, fn ->
+          "runtime: generation reached max_response_tokens=#{runtime.max_response_tokens}"
+        end)
+
         generated
 
       true ->
+        step = length(generated) + 1
+
+        log_debug(runtime, fn ->
+          "runtime: generation step #{step}/#{runtime.max_response_tokens} start context_tokens=#{length(input_ids)}"
+        end)
+
+        started_at = System.monotonic_time(:millisecond)
         logits = predict_next_logits(runtime, input_ids, input_features, input_features_mask)
         token_id = next_token_id(logits, runtime.generation_config.suppressed_token_ids)
+        eos? = eos?(token_id, runtime.generation_config.eos_token_id)
+        elapsed_ms = System.monotonic_time(:millisecond) - started_at
 
-        if eos?(token_id, runtime.generation_config.eos_token_id) do
+        log_debug(runtime, fn ->
+          "runtime: generation step #{step}/#{runtime.max_response_tokens} token_id=#{token_id} " <>
+            "eos=#{eos?} elapsed_ms=#{elapsed_ms}"
+        end)
+
+        if eos? do
           generated
         else
           greedy_generate(
@@ -154,6 +222,33 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
+
+  defp timed_debug(%__MODULE__{debug: debug?}, label, fun), do: timed_debug(debug?, label, fun)
+
+  defp timed_debug(true, label, fun) do
+    started_at = System.monotonic_time(:millisecond)
+    Logger.debug("#{label}: start")
+
+    result = fun.()
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+    case result do
+      {:error, reason} ->
+        Logger.debug("#{label}: error after #{elapsed_ms}ms reason=#{inspect(reason)}")
+
+      _ ->
+        Logger.debug("#{label}: done in #{elapsed_ms}ms")
+    end
+
+    result
+  end
+
+  defp timed_debug(false, _label, fun), do: fun.()
+
+  defp log_debug(%__MODULE__{debug: debug?}, message_fun), do: log_debug(debug?, message_fun)
+  defp log_debug(true, message_fun), do: Logger.debug(message_fun)
+  defp log_debug(false, _message_fun), do: :ok
 
   defp backend("host"), do: {:ok, Nx.BinaryBackend}
   defp backend(nil), do: {:ok, Nx.BinaryBackend}

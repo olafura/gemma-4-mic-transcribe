@@ -82,9 +82,13 @@ Useful options:
 --sample-rate INT              target sample rate, default 16000
 --model-name NAME              Hugging Face or local model name, default google/gemma-4-12B-it
 --max-response-tokens INT      maximum generated tokens, default 512
+--debug                        emit progress logs to stderr
 --request-timeout-seconds FLOAT
                                maximum seconds for one generation
 ```
+
+For a long first run, add `--debug` to see whether the process is loading the
+checkpoint, building the Axon graph, tokenizing, or generating a specific token.
 
 Microphone input is intentionally not advertised yet. The CLI currently supports
 PCM WAV file input only.

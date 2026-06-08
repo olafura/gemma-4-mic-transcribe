@@ -1,6 +1,8 @@
 defmodule Gemma4MicTranscribe.CLI do
   @moduledoc false
 
+  require Logger
+
   alias Gemma4MicTranscribe.Audio
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.ModelCatalog
@@ -19,7 +21,8 @@ defmodule Gemma4MicTranscribe.CLI do
               request_timeout_seconds: Config.request_timeout_seconds(),
               model_name: Config.default_model_name(),
               max_response_tokens: Config.max_response_tokens(),
-              backend: Config.backend()
+              backend: Config.backend(),
+              debug: false
   end
 
   @switches [
@@ -37,7 +40,8 @@ defmodule Gemma4MicTranscribe.CLI do
     request_timeout_seconds: :float,
     model_name: :string,
     max_response_tokens: :integer,
-    backend: :string
+    backend: :string,
+    debug: :boolean
   ]
 
   @aliases [h: :help]
@@ -90,7 +94,15 @@ defmodule Gemma4MicTranscribe.CLI do
   end
 
   def run(%RunConfig{} = config, opts) do
+    configure_logger(config)
+
     runtime_module = Keyword.get(opts, :runtime_module)
+
+    debug(config, fn ->
+      "cli: preparing WAV windows path=#{inspect(config.wav)} sample_rate=#{config.sample_rate} " <>
+        "window_seconds=#{config.window_seconds} stride_seconds=#{config.stride_seconds} " <>
+        "skip_windows=#{config.skip_windows} max_windows=#{inspect(config.max_windows)}"
+    end)
 
     with {:ok, windows} <- wav_windows(config),
          {:ok, results} <-
@@ -101,6 +113,7 @@ defmodule Gemma4MicTranscribe.CLI do
              prompt: config.prompt,
              system_message: config.system_message,
              request_timeout_seconds: config.request_timeout_seconds,
+             debug: config.debug,
              runtime_module: runtime_module || Gemma4MicTranscribe.Gemma4Unified.Runtime
            ) do
       Enum.each(results, fn {:ok, window, text} ->
@@ -140,7 +153,8 @@ defmodule Gemma4MicTranscribe.CLI do
         Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
       model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
-      backend: Keyword.get(opts, :backend, Config.backend())
+      backend: Keyword.get(opts, :backend, Config.backend()),
+      debug: Keyword.get(opts, :debug, false)
     }
 
     with :ok <- validate_positive(config.window_seconds, "--window-seconds"),
@@ -171,6 +185,7 @@ defmodule Gemma4MicTranscribe.CLI do
     if windows == [] do
       {:error, :no_wav_windows}
     else
+      debug(config, fn -> "cli: selected #{length(windows)} WAV window(s)" end)
       {:ok, windows}
     end
   rescue
@@ -206,6 +221,16 @@ defmodule Gemma4MicTranscribe.CLI do
   defp maybe_take(windows, nil), do: windows
   defp maybe_take(windows, count), do: Enum.take(windows, count)
 
+  defp configure_logger(%RunConfig{debug: true}) do
+    Logger.configure(level: :debug)
+    Logger.debug("cli: debug logging enabled")
+  end
+
+  defp configure_logger(%RunConfig{}), do: :ok
+
+  defp debug(%RunConfig{debug: true}, message_fun), do: Logger.debug(message_fun)
+  defp debug(%RunConfig{}, _message_fun), do: :ok
+
   defp format_invalid(invalid) do
     invalid
     |> Enum.map(fn {option, value} -> "#{option}=#{inspect(value)}" end)
@@ -236,6 +261,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --model-name NAME                  Hugging Face or local model name
       --max-response-tokens INT          Maximum generated tokens
       --backend host|exla|torchx         Nx/Bumblebee backend label
+      --debug                            Emit progress logs to stderr
     """
   end
 end

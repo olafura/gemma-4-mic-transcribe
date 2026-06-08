@@ -19,6 +19,11 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert output =~ "qat-q4_0-gguf"
   end
 
+  test "parses debug logging flag" do
+    assert {:ok, %RunConfig{} = config} = CLI.parse(["--debug"])
+    assert config.debug
+  end
+
   test "rejects removed litert options" do
     assert {:error, message} = CLI.parse(["--backend", "gpu", "--audio-backend", "gpu"])
     assert message =~ "--audio-backend"
