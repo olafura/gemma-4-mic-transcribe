@@ -2,7 +2,6 @@
 /_build/
 /deps/
 /.elixir_ls/
-/gemma_4_mic_transcribe
 
 # Old/generated Python caches
 __pycache__/

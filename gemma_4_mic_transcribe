@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+MIX_ENV="${MIX_ENV:-dev}"
+BUILD_LIB_DIR="_build/${MIX_ENV}/lib"
+
+if [[ ! -d "$BUILD_LIB_DIR/gemma_4_mic_transcribe/ebin" ]]; then
+  echo "error: compiled app not found; run scripts/setup.sh or mix compile first" >&2
+  exit 1
+fi
+
+code_path_args=()
+while IFS= read -r ebin_dir; do
+  code_path_args+=("-pa" "$ebin_dir")
+done < <(find "$BUILD_LIB_DIR" -mindepth 2 -maxdepth 2 -type d -name ebin | sort)
+
+exec elixir "${code_path_args[@]}" -e '{:ok, _} = Application.ensure_all_started(:gemma_4_mic_transcribe); Nx.global_default_backend(Torchx.Backend); System.halt(Gemma4MicTranscribe.CLI.main(System.argv()))' -- "$@"

@@ -24,7 +24,7 @@ Or run the steps directly:
 ```bash
 mix deps.get
 mix test
-mix escript.build
+mix compile
 ```
 
 The default model is:
@@ -61,7 +61,7 @@ mix run -e 'System.halt(Gemma4MicTranscribe.CLI.main([
 ]))'
 ```
 
-After `mix escript.build`:
+After `scripts/setup.sh` or `mix compile`:
 
 ```bash
 ./gemma_4_mic_transcribe --wav journal1.wav --max-windows 1
@@ -98,7 +98,7 @@ PCM WAV file input only.
 
 Implemented:
 
-- Mix/escript CLI.
+- Mix CLI with a local launcher script.
 - PCM16 and float32 WAV normalization to mono 16 kHz samples.
 - Windowing, timestamps, prompt construction, and Gemma 4 Unified raw-audio features.
 - Local Bumblebee/Axon Gemma4Unified audio model loader and full-context greedy generation.

@@ -7,8 +7,8 @@ echo "Installing Elixir dependencies..."
 mix deps.get
 
 echo
-echo "Building CLI escript..."
-mix escript.build
+echo "Compiling Elixir app and native dependencies..."
+mix compile
 
 echo
 echo "Default direct-audio model:"
