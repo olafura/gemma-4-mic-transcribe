@@ -24,7 +24,8 @@ defmodule Gemma4MicTranscribe.MixProject do
       {:bumblebee, "~> 0.7.0"},
       {:ex_libsrt, path: "vendor/ex_libsrt", override: true},
       {:jason, "~> 1.4"},
-      {:nx, "~> 0.12.0"}
+      {:nx, "~> 0.12.0"},
+      {:torchx, "~> 0.12.0"}
     ]
   end
 end

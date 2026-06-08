@@ -3,6 +3,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   require Logger
 
+  alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.ModelCatalog
 
@@ -22,7 +23,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     debug? = Keyword.get(opts, :debug, false)
 
     with :ok <- verify_bumblebee_available(),
-         {:ok, backend} <- backend(Keyword.get(opts, :backend, "host")) do
+         {:ok, backend} <- backend(Keyword.get(opts, :backend, Config.backend())) do
       model_name = Keyword.fetch!(opts, :model_name)
       repo_id = ModelCatalog.resolve(model_name)
       repo = {:hf, repo_id}
@@ -251,7 +252,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp log_debug(false, _message_fun), do: :ok
 
   defp backend("host"), do: {:ok, Nx.BinaryBackend}
-  defp backend(nil), do: {:ok, Nx.BinaryBackend}
+  defp backend(nil), do: backend(Config.backend())
 
   defp backend("exla") do
     if Code.ensure_loaded?(EXLA.Backend),

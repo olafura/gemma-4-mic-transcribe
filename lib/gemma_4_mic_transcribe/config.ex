@@ -16,7 +16,7 @@ defmodule Gemma4MicTranscribe.Config do
   end
 
   def backend do
-    env("GEMMA_BACKEND", "host")
+    env("GEMMA_BACKEND", "torchx")
   end
 
   def model_cache_dir do

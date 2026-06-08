@@ -11,6 +11,7 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert config.sample_rate == 16_000
     assert config.skip_windows == 0
     assert config.model_name == "google/gemma-4-12B-it"
+    assert config.backend == "torchx"
   end
 
   test "parses list models" do
