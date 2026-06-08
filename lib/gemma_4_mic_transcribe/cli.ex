@@ -260,7 +260,8 @@ defmodule Gemma4MicTranscribe.CLI do
       --request-timeout-seconds FLOAT    Maximum seconds for one generation
       --model-name NAME                  Hugging Face or local model name
       --max-response-tokens INT          Maximum generated tokens
-      --backend host|torchx|exla         Nx/Bumblebee backend label, default torchx
+      --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
+                                        Nx/Bumblebee backend label, default torchx
       --debug                            Emit progress logs to stderr
     """
   end

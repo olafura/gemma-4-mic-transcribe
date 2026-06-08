@@ -21,6 +21,7 @@ defmodule Gemma4MicTranscribe.MixProject do
     [
       {:boombox, "~> 0.2.11", runtime: false},
       {:bumblebee, "~> 0.7.0"},
+      {:exla, "~> 0.12.0", runtime: false},
       {:ex_libsrt, path: "vendor/ex_libsrt", override: true},
       {:jason, "~> 1.4"},
       {:nx, "~> 0.12.0"},

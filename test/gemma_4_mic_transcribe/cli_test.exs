@@ -25,6 +25,16 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert config.debug
   end
 
+  test "parses explicit Torchx CUDA backend" do
+    assert {:ok, %RunConfig{} = config} = CLI.parse(["--backend", "torchx:cuda"])
+    assert config.backend == "torchx:cuda"
+  end
+
+  test "parses explicit EXLA ROCm backend" do
+    assert {:ok, %RunConfig{} = config} = CLI.parse(["--backend", "exla:rocm"])
+    assert config.backend == "exla:rocm"
+  end
+
   test "rejects removed litert options" do
     assert {:error, message} = CLI.parse(["--backend", "gpu", "--audio-backend", "gpu"])
     assert message =~ "--audio-backend"

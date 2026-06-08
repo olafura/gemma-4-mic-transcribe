@@ -13,6 +13,12 @@ Gemma4UnifiedForConditionalGeneration path. Generation currently runs a
 full-context greedy loop rather than a KV-cached loop, so it is expected to be
 slow for the 12B checkpoint.
 
+This is local model inference, not a hosted API call. The app does not base64
+encode audio and send it to Gemma; it injects raw audio frame tensors into the
+local model graph. Torchx downloads CPU LibTorch by default, so CUDA execution
+requires compiling Torchx with a CUDA LibTorch target. ROCm users should try the
+EXLA backend, which is backed by XLA.
+
 ## Setup
 
 ```bash
@@ -82,7 +88,8 @@ Useful options:
 --sample-rate INT              target sample rate, default 16000
 --model-name NAME              Hugging Face or local model name, default google/gemma-4-12B-it
 --max-response-tokens INT      maximum generated tokens, default 512
---backend host|torchx|exla     Nx/Bumblebee backend label, default torchx
+--backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
+                               Nx/Bumblebee backend label, default torchx
 --debug                        emit progress logs to stderr
 --request-timeout-seconds FLOAT
                                maximum seconds for one generation
@@ -90,6 +97,37 @@ Useful options:
 
 For a long first run, add `--debug` to see whether the process is loading the
 checkpoint, building the Axon graph, tokenizing, or generating a specific token.
+It also logs the selected Torchx device and CUDA availability, or the selected
+EXLA client and `XLA_TARGET`.
+
+To force CUDA and fail fast if Torchx cannot see a GPU:
+
+```bash
+./gemma_4_mic_transcribe --wav journal1.wav --backend torchx:cuda --debug
+```
+
+To install a CUDA LibTorch build, recompile Torchx with the CUDA target matching
+your local driver/runtime, for example:
+
+```bash
+LIBTORCH_TARGET=cu129 mix deps.clean torchx
+LIBTORCH_TARGET=cu129 mix deps.compile torchx
+```
+
+To try EXLA on ROCm, build/install XLA for ROCm and select the ROCm client:
+
+```bash
+XLA_TARGET=rocm XLA_BUILD=true mix deps.clean xla --build
+XLA_TARGET=rocm XLA_BUILD=true mix deps.compile xla exla
+./gemma_4_mic_transcribe --wav journal1.wav --backend exla:rocm --debug
+```
+
+If your ROCm install is not under the default path, XLA may also need matching
+`ROCM_PATH` and `LD_LIBRARY_PATH` values before compiling/running.
+
+If EXLA detects CUDA but your CUDA libraries are incomplete, for example missing
+NCCL, either install the missing CUDA runtime pieces or force a CPU-only EXLA
+build with `EXLA_CPU_ONLY=1` before compiling EXLA.
 
 Microphone input is intentionally not advertised yet. The CLI currently supports
 PCM WAV file input only.

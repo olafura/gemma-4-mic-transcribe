@@ -38,6 +38,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         "runtime: resolved model #{inspect(model_name)} -> #{repo_id}; backend=#{inspect(backend)}"
       end)
 
+      log_backend_details(debug?, backend)
+
       with {:ok, model_info} <-
              timed_debug(
                debug?,
@@ -270,19 +272,101 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp backend("host"), do: {:ok, Nx.BinaryBackend}
   defp backend(nil), do: backend(Config.backend())
 
-  defp backend("exla") do
-    if Code.ensure_loaded?(EXLA.Backend),
-      do: {:ok, EXLA.Backend},
-      else: {:error, "EXLA backend requested, but EXLA is not installed"}
-  end
+  defp backend("exla"), do: exla_backend(:auto)
+  defp backend("exla:host"), do: exla_backend(:host)
+  defp backend("exla:cuda"), do: exla_backend(:cuda)
+  defp backend("exla:rocm"), do: exla_backend(:rocm)
 
-  defp backend("torchx") do
-    if Code.ensure_loaded?(Torchx.Backend),
-      do: {:ok, Torchx.Backend},
-      else: {:error, "Torchx backend requested, but Torchx is not installed"}
-  end
+  defp backend("torchx"), do: torchx_backend(:auto)
+  defp backend("torchx:cpu"), do: torchx_backend(:cpu)
+  defp backend("torchx:cuda"), do: torchx_backend(:cuda)
 
   defp backend(other), do: {:error, "unsupported backend #{inspect(other)}"}
+
+  defp exla_backend(client) do
+    with :ok <- ensure_exla_available(),
+         {:ok, backend} <- exla_backend_for_client(client) do
+      {:ok, backend}
+    end
+  end
+
+  defp ensure_exla_available do
+    if Code.ensure_loaded?(EXLA.Backend) do
+      case Application.ensure_all_started(:exla) do
+        {:ok, _started} ->
+          :ok
+
+        {:error, {app, reason}} ->
+          {:error,
+           "EXLA backend requested, but failed to start #{inspect(app)}: #{inspect(reason)}"}
+      end
+    else
+      {:error, "EXLA backend requested, but EXLA is not installed"}
+    end
+  end
+
+  defp exla_backend_for_client(:auto), do: {:ok, EXLA.Backend}
+
+  defp exla_backend_for_client(client) when client in [:host, :cuda, :rocm],
+    do: {:ok, {EXLA.Backend, client: client}}
+
+  defp torchx_backend(device) do
+    with :ok <- ensure_torchx_available(),
+         {:ok, device} <- torchx_device(device) do
+      {:ok, {Torchx.Backend, device: device}}
+    end
+  end
+
+  defp ensure_torchx_available do
+    if Code.ensure_loaded?(Torchx.Backend) and Code.ensure_loaded?(Torchx) do
+      :ok
+    else
+      {:error, "Torchx backend requested, but Torchx is not installed"}
+    end
+  end
+
+  defp torchx_device(:auto), do: {:ok, Torchx.default_device()}
+  defp torchx_device(:cpu), do: {:ok, :cpu}
+
+  defp torchx_device(:cuda) do
+    if Torchx.device_available?(:cuda) do
+      {:ok, :cuda}
+    else
+      {:error,
+       "Torchx CUDA device requested, but CUDA is not available. This install is likely using CPU LibTorch; recompile Torchx with LIBTORCH_TARGET=cu129, cu128, or cu126 for your CUDA stack."}
+    end
+  end
+
+  defp log_backend_details(false, _backend), do: :ok
+
+  defp log_backend_details(true, Nx.BinaryBackend),
+    do: Logger.debug("runtime: using Nx.BinaryBackend")
+
+  defp log_backend_details(true, EXLA.Backend) do
+    Logger.debug(fn ->
+      "runtime: exla selected_client=:auto xla_target=#{inspect(System.get_env("XLA_TARGET"))}"
+    end)
+  end
+
+  defp log_backend_details(true, {EXLA.Backend, opts}) do
+    Logger.debug(fn ->
+      "runtime: exla selected_client=#{inspect(opts[:client])} " <>
+        "device_id=#{inspect(opts[:device_id])} xla_target=#{inspect(System.get_env("XLA_TARGET"))}"
+    end)
+  end
+
+  defp log_backend_details(true, {Torchx.Backend, opts}) do
+    Logger.debug(fn ->
+      cuda_available? = Torchx.device_available?(:cuda)
+      cuda_count = if cuda_available?, do: Torchx.device_count(:cuda), else: 0
+
+      "runtime: torchx default_device=#{inspect(Torchx.default_device())} " <>
+        "selected_device=#{inspect(opts[:device])} cuda_available=#{cuda_available?} cuda_count=#{cuda_count}"
+    end)
+  end
+
+  defp log_backend_details(true, backend),
+    do: Logger.debug("runtime: using backend #{inspect(backend)}")
 
   defp verify_bumblebee_available do
     if Code.ensure_loaded?(Bumblebee) do
