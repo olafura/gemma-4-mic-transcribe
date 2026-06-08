@@ -13,3 +13,6 @@ __pycache__/
 # Copied Hex metadata for vendored path dependencies
 /vendor/xla/.hex
 /vendor/xla/hex_metadata.config
+/vendor/exla/.hex
+/vendor/exla/cache/
+/vendor/exla/hex_metadata.config
