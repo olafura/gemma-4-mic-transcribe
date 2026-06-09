@@ -17,6 +17,22 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert features.input_features[1][1] |> Nx.to_number() == 0.0
   end
 
+  test "audio feature extractor matches LiteRT-LM skip-mel raw PCM framing" do
+    samples = Enum.map(1..1281, &(&1 / 1000))
+    features = AudioFeatureExtractor.extract(samples)
+
+    assert features.samples_per_token == 640
+    assert features.token_count == 3
+    assert Nx.shape(features.input_features) == {3, 640}
+
+    assert_in_delta features.input_features[0][0] |> Nx.to_number(), 0.001, 1.0e-6
+    assert_in_delta features.input_features[0][639] |> Nx.to_number(), 0.64, 1.0e-6
+    assert_in_delta features.input_features[1][0] |> Nx.to_number(), 0.641, 1.0e-6
+    assert_in_delta features.input_features[1][639] |> Nx.to_number(), 1.28, 1.0e-6
+    assert_in_delta features.input_features[2][0] |> Nx.to_number(), 1.281, 1.0e-6
+    assert features.input_features[2][1] |> Nx.to_number() == 0.0
+  end
+
   test "audio feature extractor truncates at max token count" do
     features = AudioFeatureExtractor.extract(List.duplicate(0.0, 2_000), max_tokens: 2)
 

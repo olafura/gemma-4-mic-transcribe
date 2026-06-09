@@ -106,9 +106,18 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            timed_debug(runtime, "runtime: tokenize prompt", fn ->
              tokenize(runtime.tokenizer, input.prompt)
            end),
-         :ok <- validate_audio_tokens(runtime, input_ids, input.audio.token_count) do
+         {:ok, audio_tokens} <-
+           validate_audio_tokens(runtime, input_ids, input.audio.token_count) do
       log_debug(runtime, fn ->
-        "runtime: prompt tokenized input_tokens=#{length(input_ids)} audio_tokens=#{input.audio.token_count}"
+        "runtime: prompt tokenized input_tokens=#{length(input_ids)} " <>
+          "audio_tokens=#{audio_tokens.audio} text_control_tokens=#{audio_tokens.text_control} " <>
+          "boa=#{audio_tokens.begin} eoa=#{audio_tokens.end}"
+      end)
+
+      log_debug(runtime, fn ->
+        "runtime: audio features shape=#{inspect(Nx.shape(input.audio.input_features))} " <>
+          "mask_shape=#{inspect(Nx.shape(input.audio.attention_mask))} " <>
+          "samples_per_token=#{input.audio.samples_per_token}"
       end)
 
       {input_features, input_features_mask} =
@@ -254,7 +263,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         {:error, "prompt has #{end_count} audio end tokens, expected 1"}
 
       true ->
-        :ok
+        {:ok,
+         %{
+           begin: begin_count,
+           audio: actual_count,
+           end: end_count,
+           text_control: length(input_ids) - actual_count
+         }}
     end
   end
 
