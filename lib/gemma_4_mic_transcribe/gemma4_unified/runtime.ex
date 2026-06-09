@@ -16,6 +16,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :model_info,
     :tokenizer,
     :generation_config,
+    :suppressed_token_ids,
     :predict_fun,
     :debug
   ]
@@ -73,10 +74,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             strategy: %{type: :greedy_search}
           )
 
+        suppressed_token_ids = transcription_suppressed_token_ids(tokenizer, generation_config)
+
         log_debug(debug?, fn ->
           "runtime: loaded spec hidden_size=#{model_info.spec.hidden_size} layers=#{model_info.spec.num_blocks} " <>
             "boa_token_id=#{model_info.spec.boa_token_id} audio_token_id=#{model_info.spec.audio_token_id} " <>
             "eoa_token_id=#{model_info.spec.eoa_token_id} max_new_tokens=#{generation_config.max_new_tokens}"
+        end)
+
+        log_debug(debug?, fn ->
+          "runtime: suppressed token ids=#{inspect(suppressed_token_ids)}"
         end)
 
         {:ok,
@@ -88,6 +95,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            model_info: model_info,
            tokenizer: tokenizer,
            generation_config: generation_config,
+           suppressed_token_ids: suppressed_token_ids,
            predict_fun: predict_fun,
            debug: debug?
          }}
@@ -171,7 +179,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {logits, cache} =
       predict_prefill_next_logits(runtime, input_ids, input_features, input_features_mask, cache)
 
-    token_id = next_token_id(logits, runtime.generation_config.suppressed_token_ids)
+    token_id = next_token_id(logits, runtime.suppressed_token_ids)
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
     elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -212,7 +220,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         {logits, cache} =
           predict_decode_next_logits(runtime, previous_token_id, previous_token_position, cache)
 
-        token_id = next_token_id(logits, runtime.generation_config.suppressed_token_ids)
+        token_id = next_token_id(logits, runtime.suppressed_token_ids)
         eos? = eos?(token_id, runtime.generation_config.eos_token_id)
         pad? = token_id == runtime.model_info.spec.pad_token_id
         elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -357,6 +365,26 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp token_id(tokenizer, token, fallback) do
     Bumblebee.Tokenizer.token_to_id(tokenizer, token) || fallback
+  end
+
+  defp transcription_suppressed_token_ids(tokenizer, generation_config) do
+    control_tokens = [
+      "<|think|>",
+      "<|channel>",
+      "<channel|>",
+      "<|tool>",
+      "<tool|>",
+      "<|tool_call>",
+      "<tool_call|>",
+      "<|tool_response>",
+      "<tool_response|>"
+    ]
+
+    generation_config.suppressed_token_ids
+    |> List.wrap()
+    |> Kernel.++(Enum.map(control_tokens, &Bumblebee.Tokenizer.token_to_id(tokenizer, &1)))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   end
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
