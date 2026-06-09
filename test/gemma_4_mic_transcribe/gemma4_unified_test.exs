@@ -5,6 +5,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
+  alias Gemma4MicTranscribe.Gemma4Unified.Transcript
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.RocmPreflight
   alias Gemma4MicTranscribe.Gemma4Unified.Prompt
@@ -74,6 +75,11 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     logits = Nx.tensor([0.0, 2.0, 4.0, 100.0, 3.0])
 
     assert TokenSelection.top_tokens(logits, suppression_mask, 2) == [{2, 4.0}, {4, 3.0}]
+  end
+
+  test "transcript cleaning removes leaked channel labels" do
+    assert Transcript.clean("thought\nthought\n\nI enjoyed it.\n") == "I enjoyed it."
+    assert Transcript.clean("final:\nI enjoyed it.\n```") == "I enjoyed it."
   end
 
   test "KV cache uses Gemma4 per-layer attention head sizes" do

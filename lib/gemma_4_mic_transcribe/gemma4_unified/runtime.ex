@@ -6,6 +6,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
+  alias Gemma4MicTranscribe.Gemma4Unified.Transcript
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.RocmPreflight
 
@@ -159,7 +160,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         "runtime: generation finished generated_tokens=#{length(token_ids)}"
       end)
 
-      {:ok, Bumblebee.Tokenizer.decode(runtime.tokenizer, token_ids)}
+      transcript =
+        runtime.tokenizer
+        |> Bumblebee.Tokenizer.decode(token_ids)
+        |> Transcript.clean()
+
+      {:ok, transcript}
     end
   rescue
     exception -> {:error, Exception.message(exception)}
@@ -429,8 +435,27 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     generation_config.suppressed_token_ids
     |> List.wrap()
     |> Kernel.++(Enum.map(control_tokens, &Bumblebee.Tokenizer.token_to_id(tokenizer, &1)))
+    |> Kernel.++(transcription_suppressed_text_token_ids(tokenizer))
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
+  end
+
+  defp transcription_suppressed_text_token_ids(tokenizer) do
+    [
+      "thought",
+      "Thought",
+      "thinking",
+      "Thinking",
+      "analysis",
+      "Analysis",
+      "final",
+      "Final",
+      "```"
+    ]
+    |> Enum.flat_map(fn text ->
+      {:ok, token_ids} = tokenize(tokenizer, text)
+      token_ids
+    end)
   end
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
