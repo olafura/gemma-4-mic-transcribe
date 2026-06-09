@@ -193,6 +193,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert "decoder.blocks.0.self_attention.key.kernel" in paths
     assert "decoder.blocks.0.self_attention.key_norm.weight" in paths
+    assert "decoder.blocks.0.layer_scalar.layer_scalar" in paths
     refute "decoder.blocks.0.self_attention.value.kernel" in paths
   end
 
@@ -205,6 +206,12 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
       )
 
     assert "decoder.blocks.0.self_attention.value.kernel" in param_paths(params)
+  end
+
+  test "params mapping loads Gemma4 layer scalar buffers" do
+    mapping = Bumblebee.HuggingFace.Transformers.Model.params_mapping(%Model{})
+
+    assert mapping["decoder.blocks.{n}.layer_scalar"] == "model.language_model.layers.{n}"
   end
 
   test "model config loads Gemma4Unified composite config fields" do

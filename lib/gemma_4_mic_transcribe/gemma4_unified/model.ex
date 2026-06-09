@@ -235,7 +235,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         epsilon: spec.layer_norm_epsilon
       )
 
-    Axon.add(shortcut, hidden_state)
+    shortcut
+    |> Axon.add(hidden_state)
+    |> layer_scalar(name: join(name, "layer_scalar"))
   end
 
   defp self_attention(hidden_state, position_ids, attention_mask, layer_type, spec, opts) do
@@ -389,6 +391,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       |> Nx.multiply(norm)
       |> Nx.as_type(Nx.type(input))
     end)
+  end
+
+  defp layer_scalar(input, opts) do
+    Axon.layer(
+      fn input, scalar, _opts ->
+        Nx.multiply(input, scalar)
+      end,
+      [input, Axon.param("layer_scalar", {1}, initializer: Axon.Initializers.ones())],
+      name: opts[:name],
+      op_name: :gemma4_layer_scalar
+    )
   end
 
   defp gated_ffn(hidden_state, intermediate_size, output_size, opts) do
@@ -580,6 +593,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
           "model.language_model.layers.{n}.pre_feedforward_layernorm",
         "decoder.blocks.{n}.post_ffn_norm" =>
           "model.language_model.layers.{n}.post_feedforward_layernorm",
+        "decoder.blocks.{n}.layer_scalar" => "model.language_model.layers.{n}",
         "decoder.blocks.{n}.ffn.gate" => "model.language_model.layers.{n}.mlp.gate_proj",
         "decoder.blocks.{n}.ffn.intermediate" => "model.language_model.layers.{n}.mlp.up_proj",
         "decoder.blocks.{n}.ffn.output" => "model.language_model.layers.{n}.mlp.down_proj",
