@@ -14,6 +14,10 @@ defmodule Gemma4MicTranscribe.TranscriberTest do
     end
   end
 
+  defmodule FailingRuntime do
+    def load(_opts), do: raise("runtime should not load")
+  end
+
   test "transcribes windows through an injected runtime" do
     windows = [
       %Window{
@@ -28,7 +32,44 @@ defmodule Gemma4MicTranscribe.TranscriberTest do
              Transcriber.transcribe_windows(windows,
                model_name: "google/gemma-4-12B-it",
                prompt: "Transcribe.",
+               speech_gate: false,
                runtime_module: FakeRuntime
+             )
+  end
+
+  test "skips too-short windows before loading the runtime" do
+    windows = [
+      %Window{
+        samples: List.duplicate(0.2, 160),
+        start_frame: 0,
+        end_frame: 160,
+        sample_rate: 16_000
+      }
+    ]
+
+    assert {:ok, []} =
+             Transcriber.transcribe_windows(windows,
+               model_name: "google/gemma-4-12B-it",
+               prompt: "Transcribe.",
+               runtime_module: FailingRuntime
+             )
+  end
+
+  test "skips silent windows before loading the runtime" do
+    windows = [
+      %Window{
+        samples: List.duplicate(0.0, 16_000),
+        start_frame: 0,
+        end_frame: 16_000,
+        sample_rate: 16_000
+      }
+    ]
+
+    assert {:ok, []} =
+             Transcriber.transcribe_windows(windows,
+               model_name: "google/gemma-4-12B-it",
+               prompt: "Transcribe.",
+               runtime_module: FailingRuntime
              )
   end
 
@@ -55,6 +96,7 @@ defmodule Gemma4MicTranscribe.TranscriberTest do
                model_name: "google/gemma-4-12B-it",
                prompt: "Transcribe.",
                runtime_module: FakeRuntime,
+               speech_gate: false,
                on_window_result: fn {:ok, window, text} ->
                  send(test_pid, {:window_result, window.start_frame, text})
                end

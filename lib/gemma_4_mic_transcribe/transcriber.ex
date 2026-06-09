@@ -5,36 +5,75 @@ defmodule Gemma4MicTranscribe.Transcriber do
 
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
+  alias Gemma4MicTranscribe.SpeechGate
 
   def transcribe_windows(windows, opts \\ []) do
     runtime_module = Keyword.get(opts, :runtime_module, Runtime)
     total_windows = length(windows)
+    selected_windows = speech_windows(windows, opts)
 
     debug(opts, fn ->
       "transcriber: loading runtime module=#{inspect(runtime_module)} model=#{inspect(Keyword.get(opts, :model_name))} " <>
-        "backend=#{inspect(Keyword.get(opts, :backend))} windows=#{total_windows}"
+        "backend=#{inspect(Keyword.get(opts, :backend))} windows=#{length(selected_windows)}/#{total_windows}"
     end)
 
-    with {:ok, runtime} <-
-           timed_debug(opts, "transcriber: runtime load", fn -> runtime_module.load(opts) end) do
-      results =
-        windows
-        |> Enum.with_index(1)
-        |> Enum.reduce_while([], fn {window, index}, acc ->
-          case transcribe_window(runtime_module, runtime, window, index, total_windows, opts) do
-            {:ok, _window, _text} = result ->
-              emit_window_result(result, opts)
-              {:cont, [result | acc]}
+    case selected_windows do
+      [] ->
+        debug(opts, fn -> "transcriber: speech gate selected no windows; runtime load skipped" end)
 
-            {:error, reason} ->
-              {:halt, {:error, reason}}
+        {:ok, []}
+
+      selected_windows ->
+        with {:ok, runtime} <-
+               timed_debug(opts, "transcriber: runtime load", fn -> runtime_module.load(opts) end) do
+          results =
+            selected_windows
+            |> Enum.reduce_while([], fn {window, index}, acc ->
+              case transcribe_window(runtime_module, runtime, window, index, total_windows, opts) do
+                {:ok, _window, _text} = result ->
+                  emit_window_result(result, opts)
+                  {:cont, [result | acc]}
+
+                {:error, reason} ->
+                  {:halt, {:error, reason}}
+              end
+            end)
+
+          case results do
+            {:error, reason} -> {:error, reason}
+            results -> {:ok, Enum.reverse(results)}
           end
-        end)
+        end
+    end
+  end
 
-      case results do
-        {:error, reason} -> {:error, reason}
-        results -> {:ok, Enum.reverse(results)}
-      end
+  defp speech_windows(windows, opts) do
+    windows
+    |> Enum.with_index(1)
+    |> Enum.filter(fn {window, index} -> speech_window?(window, index, length(windows), opts) end)
+  end
+
+  defp speech_window?(window, index, total_windows, opts) do
+    if Keyword.get(opts, :speech_gate, true) do
+      analysis =
+        SpeechGate.analyze(window.samples,
+          sample_rate: window.sample_rate,
+          min_speech_seconds: Keyword.get(opts, :min_speech_seconds, 0.25),
+          threshold: Keyword.get(opts, :speech_threshold, 0.01),
+          min_active_ratio: Keyword.get(opts, :speech_min_active_ratio, 0.2),
+          max_zero_crossing_rate: Keyword.get(opts, :speech_max_zero_crossing_rate, 0.35)
+        )
+
+      debug(opts, fn ->
+        "transcriber: window #{index}/#{total_windows} speech_gate=#{if analysis.speech?, do: "pass", else: "skip"} " <>
+          "reason=#{analysis.reason} samples=#{analysis.sample_count} min_samples=#{analysis.min_samples} " <>
+          "rms=#{format_float(analysis.rms)} peak=#{format_float(analysis.peak)} " <>
+          "active_ratio=#{format_float(analysis.active_ratio)} zcr=#{format_float(analysis.zero_crossing_rate)}"
+      end)
+
+      analysis.speech?
+    else
+      true
     end
   end
 
@@ -108,5 +147,9 @@ defmodule Gemma4MicTranscribe.Transcriber do
     if Keyword.get(opts, :debug, false) do
       Logger.debug(message_fun)
     end
+  end
+
+  defp format_float(value) do
+    :io_lib.format("~.5f", [value]) |> IO.iodata_to_binary()
   end
 end

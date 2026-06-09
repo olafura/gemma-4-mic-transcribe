@@ -22,6 +22,11 @@ defmodule Gemma4MicTranscribe.CLI do
               model_name: Config.default_model_name(),
               max_response_tokens: Config.max_response_tokens(),
               backend: Config.backend(),
+              speech_gate: Config.speech_gate?(),
+              min_speech_seconds: Config.min_speech_seconds(),
+              speech_threshold: Config.speech_threshold(),
+              speech_min_active_ratio: Config.speech_min_active_ratio(),
+              speech_max_zero_crossing_rate: Config.speech_max_zero_crossing_rate(),
               debug: false
   end
 
@@ -41,6 +46,11 @@ defmodule Gemma4MicTranscribe.CLI do
     model_name: :string,
     max_response_tokens: :integer,
     backend: :string,
+    speech_gate: :boolean,
+    min_speech_seconds: :float,
+    speech_threshold: :float,
+    speech_min_active_ratio: :float,
+    speech_max_zero_crossing_rate: :float,
     debug: :boolean
   ]
 
@@ -104,6 +114,12 @@ defmodule Gemma4MicTranscribe.CLI do
         "skip_windows=#{config.skip_windows} max_windows=#{inspect(config.max_windows)}"
     end)
 
+    debug(config, fn ->
+      "cli: speech_gate=#{config.speech_gate} min_speech_seconds=#{config.min_speech_seconds} " <>
+        "speech_threshold=#{config.speech_threshold} speech_min_active_ratio=#{config.speech_min_active_ratio} " <>
+        "speech_max_zero_crossing_rate=#{config.speech_max_zero_crossing_rate}"
+    end)
+
     with {:ok, windows} <- wav_windows(config),
          {:ok, results} <-
            Transcriber.transcribe_windows(windows,
@@ -114,6 +130,11 @@ defmodule Gemma4MicTranscribe.CLI do
              system_message: config.system_message,
              request_timeout_seconds: config.request_timeout_seconds,
              debug: config.debug,
+             speech_gate: config.speech_gate,
+             min_speech_seconds: config.min_speech_seconds,
+             speech_threshold: config.speech_threshold,
+             speech_min_active_ratio: config.speech_min_active_ratio,
+             speech_max_zero_crossing_rate: config.speech_max_zero_crossing_rate,
              runtime_module: runtime_module || Gemma4MicTranscribe.Gemma4Unified.Runtime,
              on_window_result: &print_window_result/1
            ) do
@@ -148,6 +169,17 @@ defmodule Gemma4MicTranscribe.CLI do
       model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
       backend: Keyword.get(opts, :backend, Config.backend()),
+      speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
+      min_speech_seconds: Keyword.get(opts, :min_speech_seconds, Config.min_speech_seconds()),
+      speech_threshold: Keyword.get(opts, :speech_threshold, Config.speech_threshold()),
+      speech_min_active_ratio:
+        Keyword.get(opts, :speech_min_active_ratio, Config.speech_min_active_ratio()),
+      speech_max_zero_crossing_rate:
+        Keyword.get(
+          opts,
+          :speech_max_zero_crossing_rate,
+          Config.speech_max_zero_crossing_rate()
+        ),
       debug: Keyword.get(opts, :debug, false)
     }
 
@@ -156,6 +188,14 @@ defmodule Gemma4MicTranscribe.CLI do
          :ok <- validate_positive(config.sample_rate, "--sample-rate"),
          :ok <- validate_positive(config.request_timeout_seconds, "--request-timeout-seconds"),
          :ok <- validate_positive(config.max_response_tokens, "--max-response-tokens"),
+         :ok <- validate_positive(config.min_speech_seconds, "--min-speech-seconds"),
+         :ok <- validate_positive(config.speech_threshold, "--speech-threshold"),
+         :ok <- validate_ratio(config.speech_min_active_ratio, "--speech-min-active-ratio"),
+         :ok <-
+           validate_ratio(
+             config.speech_max_zero_crossing_rate,
+             "--speech-max-zero-crossing-rate"
+           ),
          :ok <- validate_non_negative(config.skip_windows, "--skip-windows"),
          :ok <- validate_optional_positive(config.max_windows, "--max-windows"),
          {:ok, system_message} <-
@@ -173,8 +213,9 @@ defmodule Gemma4MicTranscribe.CLI do
         config.window_seconds,
         config.stride_seconds
       )
-      |> Enum.drop(config.skip_windows)
+      |> Stream.drop(config.skip_windows)
       |> maybe_take(config.max_windows)
+      |> Enum.to_list()
 
     if windows == [] do
       {:error, :no_wav_windows}
@@ -208,18 +249,24 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_positive(_value, name), do: {:error, "#{name} must be positive"}
   defp validate_non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
   defp validate_non_negative(_value, name), do: {:error, "#{name} must be zero or positive"}
+
+  defp validate_ratio(value, _name) when is_number(value) and value >= 0.0 and value <= 1.0,
+    do: :ok
+
+  defp validate_ratio(_value, name), do: {:error, "#{name} must be between 0 and 1"}
   defp validate_optional_positive(nil, _name), do: :ok
   defp validate_optional_positive(value, _name) when is_integer(value) and value > 0, do: :ok
   defp validate_optional_positive(_value, name), do: {:error, "#{name} must be positive"}
 
   defp maybe_take(windows, nil), do: windows
-  defp maybe_take(windows, count), do: Enum.take(windows, count)
+  defp maybe_take(windows, count), do: Stream.take(windows, count)
 
   defp print_window_result({:ok, window, text}) do
-    start = Audio.frames_to_timestamp(window.start_frame, window.sample_rate)
-    finish = Audio.frames_to_timestamp(window.end_frame, window.sample_rate)
-    transcript = if text == "", do: "<no transcript>", else: text
-    IO.puts("[#{start}-#{finish}] #{transcript}")
+    if text != "" do
+      start = Audio.frames_to_timestamp(window.start_frame, window.sample_rate)
+      finish = Audio.frames_to_timestamp(window.end_frame, window.sample_rate)
+      IO.puts("[#{start}-#{finish}] #{text}")
+    end
   end
 
   defp configure_logger(%RunConfig{debug: true}) do
@@ -263,6 +310,12 @@ defmodule Gemma4MicTranscribe.CLI do
       --max-response-tokens INT          Maximum generated text tokens per window, default 512
       --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                         Nx/Bumblebee backend label, default torchx
+      --no-speech-gate                  Disable cheap local speech gating before model generation
+      --min-speech-seconds FLOAT        Minimum likely speech duration before generation, default 0.25
+      --speech-threshold FLOAT          RMS threshold for active audio frames, default 0.01
+      --speech-min-active-ratio FLOAT   Required active-frame ratio per window, default 0.2
+      --speech-max-zero-crossing-rate FLOAT
+                                        Reject very noisy windows above this zero-crossing ratio, default 0.35
       --debug                            Emit progress logs to stderr
     """
   end

@@ -7,6 +7,12 @@ defmodule Gemma4MicTranscribe.Audio do
   end
 
   def windows_from_samples(samples, sample_rate, window_seconds, stride_seconds) do
+    samples
+    |> stream_windows_from_samples(sample_rate, window_seconds, stride_seconds)
+    |> Enum.to_list()
+  end
+
+  def stream_windows_from_samples(samples, sample_rate, window_seconds, stride_seconds) do
     validate_positive!(sample_rate, "sample_rate")
     validate_positive!(window_seconds, "window_seconds")
     validate_positive!(stride_seconds, "stride_seconds")
@@ -16,13 +22,39 @@ defmodule Gemma4MicTranscribe.Audio do
     window_frames = max(1, trunc(sample_rate * window_seconds))
     stride_frames = max(1, trunc(sample_rate * stride_seconds))
 
-    do_windows(samples, total_frames, sample_rate, window_frames, stride_frames, 0, [])
+    if total_frames == 0 do
+      []
+    else
+      Stream.unfold(0, fn
+        start_frame when start_frame < total_frames ->
+          end_frame = min(total_frames, start_frame + window_frames)
+
+          window = %Window{
+            samples: Enum.slice(samples, start_frame, end_frame - start_frame),
+            start_frame: start_frame,
+            end_frame: end_frame,
+            sample_rate: sample_rate
+          }
+
+          next_start_frame =
+            if end_frame == total_frames do
+              total_frames
+            else
+              start_frame + stride_frames
+            end
+
+          {window, next_start_frame}
+
+        _start_frame ->
+          nil
+      end)
+    end
   end
 
   def stream_wav_windows(path, sample_rate, window_seconds, stride_seconds) do
     path
     |> read_wav_samples!(sample_rate)
-    |> windows_from_samples(sample_rate, window_seconds, stride_seconds)
+    |> stream_windows_from_samples(sample_rate, window_seconds, stride_seconds)
   end
 
   def read_wav_samples!(path, target_sample_rate) do
@@ -78,57 +110,6 @@ defmodule Gemma4MicTranscribe.Audio do
       |> String.pad_leading(4, "0")
 
     String.pad_leading(Integer.to_string(minutes), 2, "0") <> ":" <> seconds_text
-  end
-
-  defp do_windows(_samples, 0, _sample_rate, _window_frames, _stride_frames, _start_frame, []),
-    do: []
-
-  defp do_windows(
-         samples,
-         total_frames,
-         sample_rate,
-         window_frames,
-         stride_frames,
-         start_frame,
-         acc
-       )
-       when start_frame < total_frames do
-    end_frame = min(total_frames, start_frame + window_frames)
-
-    window = %Window{
-      samples: Enum.slice(samples, start_frame, end_frame - start_frame),
-      start_frame: start_frame,
-      end_frame: end_frame,
-      sample_rate: sample_rate
-    }
-
-    if end_frame == total_frames do
-      Enum.reverse([window | acc])
-    else
-      do_windows(
-        samples,
-        total_frames,
-        sample_rate,
-        window_frames,
-        stride_frames,
-        start_frame + stride_frames,
-        [
-          window | acc
-        ]
-      )
-    end
-  end
-
-  defp do_windows(
-         _samples,
-         _total_frames,
-         _sample_rate,
-         _window_frames,
-         _stride_frames,
-         _start_frame,
-         acc
-       ) do
-    Enum.reverse(acc)
   end
 
   defp validate_positive!(value, _name) when is_number(value) and value > 0, do: :ok

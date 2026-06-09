@@ -15,6 +15,15 @@ defmodule Gemma4MicTranscribe.AudioTest do
            ]
   end
 
+  test "stream_windows_from_samples can take an early prefix" do
+    windows =
+      0..10_000
+      |> Audio.stream_windows_from_samples(4, 1.0, 0.5)
+      |> Enum.take(2)
+
+    assert Enum.map(windows, &{&1.start_frame, &1.end_frame}) == [{0, 4}, {2, 6}]
+  end
+
   test "frames_to_timestamp formats minute and fractional seconds" do
     assert Audio.frames_to_timestamp(100, 10) == "00:10.0"
     assert Audio.frames_to_timestamp(650, 10) == "01:05.0"

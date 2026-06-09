@@ -13,6 +13,13 @@ Gemma4UnifiedForConditionalGeneration path. Generation currently runs a
 full-context greedy loop rather than a KV-cached loop, so it is expected to be
 slow for the 12B checkpoint.
 
+The CLI gates windows with a cheap local speech detector before loading or
+running the model. This is intentionally separate from the Gemma prompt: silent,
+too-short, or high-noise windows are skipped without generation, and empty
+transcripts are not printed. Very small windows such as 10 ms are not useful
+transcription units; Gemma 4 Unified consumes 640-sample raw PCM audio tokens
+at 16 kHz, so one audio token already spans 40 ms before any text decoding cost.
+
 This is local model inference, not a hosted API call. The app does not base64
 encode audio and send it to Gemma; it injects raw audio frame tensors into the
 local model graph. Torchx downloads CPU LibTorch by default, so CUDA execution
@@ -90,6 +97,13 @@ Useful options:
 --max-response-tokens INT      maximum generated tokens, default 512
 --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                Nx/Bumblebee backend label, default torchx
+--no-speech-gate               disable cheap local speech gating before model generation
+--min-speech-seconds FLOAT     minimum likely speech duration before generation, default 0.25
+--speech-threshold FLOAT       RMS threshold for active audio frames, default 0.01
+--speech-min-active-ratio FLOAT
+                               required active-frame ratio per window, default 0.2
+--speech-max-zero-crossing-rate FLOAT
+                               reject very noisy windows above this zero-crossing ratio, default 0.35
 --debug                        emit progress logs to stderr
 --request-timeout-seconds FLOAT
                                maximum seconds for one generation

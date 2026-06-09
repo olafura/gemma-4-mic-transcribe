@@ -12,6 +12,8 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert config.skip_windows == 0
     assert config.model_name == "google/gemma-4-12B-it"
     assert config.backend == "torchx"
+    assert config.speech_gate
+    assert config.min_speech_seconds == 0.25
   end
 
   test "parses list models" do
@@ -23,6 +25,27 @@ defmodule Gemma4MicTranscribe.CLITest do
   test "parses debug logging flag" do
     assert {:ok, %RunConfig{} = config} = CLI.parse(["--debug"])
     assert config.debug
+  end
+
+  test "parses speech gate controls" do
+    assert {:ok, %RunConfig{} = config} =
+             CLI.parse([
+               "--no-speech-gate",
+               "--min-speech-seconds",
+               "0.5",
+               "--speech-threshold",
+               "0.02",
+               "--speech-min-active-ratio",
+               "0.4",
+               "--speech-max-zero-crossing-rate",
+               "0.25"
+             ])
+
+    refute config.speech_gate
+    assert config.min_speech_seconds == 0.5
+    assert config.speech_threshold == 0.02
+    assert config.speech_min_active_ratio == 0.4
+    assert config.speech_max_zero_crossing_rate == 0.25
   end
 
   test "parses explicit Torchx CUDA backend" do
