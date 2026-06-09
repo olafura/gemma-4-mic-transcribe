@@ -38,4 +38,56 @@ if [[ "$backend" == exla* || "$backend" == "host" ]]; then
   backend_setup=':ok'
 fi
 
+if [[ "$backend" == "exla:rocm" ]]; then
+  export GEMMA_EXLA_MEMORY_FRACTION="${GEMMA_EXLA_MEMORY_FRACTION:-0.55}"
+
+  min_free_gb="${GEMMA_ROCM_MIN_FREE_GB:-24}"
+  rocm_smi="${ROCM_SMI:-}"
+  if [[ -z "$rocm_smi" ]]; then
+    rocm_smi="$(command -v rocm-smi || true)"
+  fi
+  if [[ -z "$rocm_smi" && -x /opt/rocm/bin/rocm-smi ]]; then
+    rocm_smi="/opt/rocm/bin/rocm-smi"
+  fi
+
+  if [[ -n "$rocm_smi" ]]; then
+    mem_json="$("$rocm_smi" --showmeminfo vram --json 2>/dev/null || true)"
+    total_bytes="$(printf '%s\n' "$mem_json" | sed -n 's/.*"VRAM Total Memory (B)"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' | head -n 1)"
+    used_bytes="$(printf '%s\n' "$mem_json" | sed -n 's/.*"VRAM Total Used Memory (B)"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' | head -n 1)"
+
+    if [[ -n "$total_bytes" && -n "$used_bytes" ]]; then
+      min_free_bytes="$(awk -v gb="$min_free_gb" 'BEGIN { printf "%.0f", gb * 1024 * 1024 * 1024 }')"
+      free_bytes=$((total_bytes - used_bytes))
+
+      if ((free_bytes < min_free_bytes)); then
+        awk \
+          -v total="$total_bytes" \
+          -v used="$used_bytes" \
+          -v free="$free_bytes" \
+          -v min_free="$min_free_bytes" \
+          'BEGIN {
+            printf "error: EXLA ROCm backend cannot start safely: GPU VRAM headroom is too low. Total=%.2fGiB used=%.2fGiB free=%.2fGiB; requires at least %.2fGiB free before loading Gemma.\n", total/1024/1024/1024, used/1024/1024/1024, free/1024/1024/1024, min_free/1024/1024/1024 > "/dev/stderr"
+          }'
+        exit 1
+      fi
+    fi
+  fi
+
+  rocm_agent_enumerator="${ROCM_AGENT_ENUMERATOR:-}"
+  if [[ -z "$rocm_agent_enumerator" ]]; then
+    rocm_agent_enumerator="$(command -v rocm_agent_enumerator || true)"
+  fi
+  if [[ -z "$rocm_agent_enumerator" && -x /opt/rocm/bin/rocm_agent_enumerator ]]; then
+    rocm_agent_enumerator="/opt/rocm/bin/rocm_agent_enumerator"
+  fi
+
+  if [[ -n "$rocm_agent_enumerator" ]]; then
+    rocm_agents="$("$rocm_agent_enumerator" 2>/dev/null || true)"
+    if [[ "$rocm_agents" == *gfx1151* && "${XLA_FLAGS:-}" != *"--xla_gpu_autotune_level"* ]]; then
+      export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_autotune_level=0"
+      echo "warning: applied ROCm gfx1151 XLA workaround before VM startup: --xla_gpu_autotune_level=0" >&2
+    fi
+  fi
+fi
+
 exec elixir "${code_path_args[@]}" -e "{:ok, _} = Application.ensure_all_started(:gemma_4_mic_transcribe); ${backend_setup}; System.halt(Gemma4MicTranscribe.CLI.main(System.argv()))" -- "$@"
