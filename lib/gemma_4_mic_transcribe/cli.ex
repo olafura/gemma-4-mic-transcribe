@@ -114,15 +114,9 @@ defmodule Gemma4MicTranscribe.CLI do
              system_message: config.system_message,
              request_timeout_seconds: config.request_timeout_seconds,
              debug: config.debug,
-             runtime_module: runtime_module || Gemma4MicTranscribe.Gemma4Unified.Runtime
+             runtime_module: runtime_module || Gemma4MicTranscribe.Gemma4Unified.Runtime,
+             on_window_result: &print_window_result/1
            ) do
-      Enum.each(results, fn {:ok, window, text} ->
-        start = Audio.frames_to_timestamp(window.start_frame, window.sample_rate)
-        finish = Audio.frames_to_timestamp(window.end_frame, window.sample_rate)
-        transcript = if text == "", do: "<no transcript>", else: text
-        IO.puts("[#{start}-#{finish}] #{transcript}")
-      end)
-
       if Enum.any?(results, fn {:ok, _window, text} -> text != "" end), do: 0, else: 3
     else
       {:error, {:unsupported_runtime, message, _runtime}} ->
@@ -221,6 +215,13 @@ defmodule Gemma4MicTranscribe.CLI do
   defp maybe_take(windows, nil), do: windows
   defp maybe_take(windows, count), do: Enum.take(windows, count)
 
+  defp print_window_result({:ok, window, text}) do
+    start = Audio.frames_to_timestamp(window.start_frame, window.sample_rate)
+    finish = Audio.frames_to_timestamp(window.end_frame, window.sample_rate)
+    transcript = if text == "", do: "<no transcript>", else: text
+    IO.puts("[#{start}-#{finish}] #{transcript}")
+  end
+
   defp configure_logger(%RunConfig{debug: true}) do
     Logger.configure(level: :debug)
     Logger.debug("cli: debug logging enabled")
@@ -250,7 +251,7 @@ defmodule Gemma4MicTranscribe.CLI do
     Options:
       --wav PATH                         Read PCM WAV audio from a file
       --skip-windows INT                 Skip leading audio windows
-      --max-windows INT                  Stop after N selected windows
+      --max-windows INT                  Stop after N selected rolling audio windows, not audio tokens
       --system-message TEXT              System instruction for every window
       --system-message-file PATH         Read system instruction from a file
       --prompt TEXT                      User prompt paired with every audio window
@@ -259,7 +260,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --sample-rate INT                  Target sample rate, default 16000
       --request-timeout-seconds FLOAT    Maximum seconds for one generation
       --model-name NAME                  Hugging Face or local model name
-      --max-response-tokens INT          Maximum generated tokens
+      --max-response-tokens INT          Maximum generated text tokens per window, default 64
       --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                         Nx/Bumblebee backend label, default torchx
       --debug                            Emit progress logs to stderr

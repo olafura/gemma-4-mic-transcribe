@@ -8,7 +8,7 @@ defmodule Gemma4MicTranscribe.Config do
   def default_prompt, do: @default_prompt
 
   def max_response_tokens do
-    positive_int_env("MAX_RESPONSE_TOKENS", 512)
+    positive_int_env("MAX_RESPONSE_TOKENS", 64)
   end
 
   def request_timeout_seconds do

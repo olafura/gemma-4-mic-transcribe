@@ -31,4 +31,36 @@ defmodule Gemma4MicTranscribe.TranscriberTest do
                runtime_module: FakeRuntime
              )
   end
+
+  test "emits each window result as soon as it is generated" do
+    test_pid = self()
+
+    windows = [
+      %Window{
+        samples: List.duplicate(0.0, 640),
+        start_frame: 0,
+        end_frame: 640,
+        sample_rate: 16_000
+      },
+      %Window{
+        samples: List.duplicate(0.0, 640),
+        start_frame: 640,
+        end_frame: 1280,
+        sample_rate: 16_000
+      }
+    ]
+
+    assert {:ok, [{:ok, _, "hallo"}, {:ok, _, "hallo"}]} =
+             Transcriber.transcribe_windows(windows,
+               model_name: "google/gemma-4-12B-it",
+               prompt: "Transcribe.",
+               runtime_module: FakeRuntime,
+               on_window_result: fn {:ok, window, text} ->
+                 send(test_pid, {:window_result, window.start_frame, text})
+               end
+             )
+
+    assert_received {:window_result, 0, "hallo"}
+    assert_received {:window_result, 640, "hallo"}
+  end
 end

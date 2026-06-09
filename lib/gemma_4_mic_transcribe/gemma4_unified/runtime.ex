@@ -154,14 +154,15 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         logits = predict_next_logits(runtime, input_ids, input_features, input_features_mask)
         token_id = next_token_id(logits, runtime.generation_config.suppressed_token_ids)
         eos? = eos?(token_id, runtime.generation_config.eos_token_id)
+        pad? = token_id == runtime.model_info.spec.pad_token_id
         elapsed_ms = System.monotonic_time(:millisecond) - started_at
 
         log_debug(runtime, fn ->
           "runtime: generation step #{step}/#{runtime.max_response_tokens} token_id=#{token_id} " <>
-            "eos=#{eos?} elapsed_ms=#{elapsed_ms}"
+            "eos=#{eos?} pad=#{pad?} elapsed_ms=#{elapsed_ms}"
         end)
 
-        if eos? do
+        if eos? or pad? do
           generated
         else
           greedy_generate(

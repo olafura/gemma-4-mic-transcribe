@@ -17,44 +17,67 @@ defmodule Gemma4MicTranscribe.Transcriber do
 
     with {:ok, runtime} <-
            timed_debug(opts, "transcriber: runtime load", fn -> runtime_module.load(opts) end) do
-      windows
-      |> Enum.with_index(1)
-      |> Enum.map(fn {window, index} ->
-        debug(opts, fn ->
-          "transcriber: window #{index}/#{total_windows} samples=#{length(window.samples)} " <>
-            "frames=#{window.start_frame}..#{window.end_frame}"
+      results =
+        windows
+        |> Enum.with_index(1)
+        |> Enum.reduce_while([], fn {window, index}, acc ->
+          case transcribe_window(runtime_module, runtime, window, index, total_windows, opts) do
+            {:ok, _window, _text} = result ->
+              emit_window_result(result, opts)
+              {:cont, [result | acc]}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
         end)
 
-        input =
-          timed_debug(opts, "transcriber: window #{index}/#{total_windows} input build", fn ->
-            Input.build(window.samples,
-              prompt: Keyword.fetch!(opts, :prompt),
-              system_message: Keyword.get(opts, :system_message)
-            )
-          end)
+      case results do
+        {:error, reason} -> {:error, reason}
+        results -> {:ok, Enum.reverse(results)}
+      end
+    end
+  end
 
-        debug(opts, fn ->
-          "transcriber: window #{index}/#{total_windows} prompt_bytes=#{byte_size(input.prompt)} " <>
-            "audio_tokens=#{input.audio.token_count}"
-        end)
+  defp transcribe_window(runtime_module, runtime, window, index, total_windows, opts) do
+    debug(opts, fn ->
+      "transcriber: window #{index}/#{total_windows} samples=#{length(window.samples)} " <>
+        "frames=#{window.start_frame}..#{window.end_frame}"
+    end)
 
-        case timed_debug(opts, "transcriber: window #{index}/#{total_windows} generate", fn ->
-               runtime_module.generate(runtime, input,
-                 timeout_seconds: Keyword.get(opts, :request_timeout_seconds)
-               )
-             end) do
-          {:ok, text} ->
-            debug(opts, fn ->
-              "transcriber: window #{index}/#{total_windows} transcript_bytes=#{byte_size(text)}"
-            end)
-
-            {:ok, window, String.trim(text)}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+    input =
+      timed_debug(opts, "transcriber: window #{index}/#{total_windows} input build", fn ->
+        Input.build(window.samples,
+          prompt: Keyword.fetch!(opts, :prompt),
+          system_message: Keyword.get(opts, :system_message)
+        )
       end)
-      |> collect_results()
+
+    debug(opts, fn ->
+      "transcriber: window #{index}/#{total_windows} prompt_bytes=#{byte_size(input.prompt)} " <>
+        "audio_tokens=#{input.audio.token_count}"
+    end)
+
+    case timed_debug(opts, "transcriber: window #{index}/#{total_windows} generate", fn ->
+           runtime_module.generate(runtime, input,
+             timeout_seconds: Keyword.get(opts, :request_timeout_seconds)
+           )
+         end) do
+      {:ok, text} ->
+        debug(opts, fn ->
+          "transcriber: window #{index}/#{total_windows} transcript_bytes=#{byte_size(text)}"
+        end)
+
+        {:ok, window, String.trim(text)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp emit_window_result({:ok, _window, _text} = result, opts) do
+    case Keyword.get(opts, :on_window_result) do
+      callback when is_function(callback, 1) -> callback.(result)
+      _other -> :ok
     end
   end
 
@@ -84,13 +107,6 @@ defmodule Gemma4MicTranscribe.Transcriber do
   defp debug(opts, message_fun) do
     if Keyword.get(opts, :debug, false) do
       Logger.debug(message_fun)
-    end
-  end
-
-  defp collect_results(results) do
-    case Enum.find(results, &match?({:error, _reason}, &1)) do
-      nil -> {:ok, results}
-      {:error, reason} -> {:error, reason}
     end
   end
 end
