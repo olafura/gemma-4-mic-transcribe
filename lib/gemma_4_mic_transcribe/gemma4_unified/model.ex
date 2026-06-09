@@ -34,7 +34,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             pad_token_id: 0,
             bos_token_id: 2,
             eos_token_id: [1, 106],
+            boa_token_id: 256_000,
             audio_token_id: 258_881,
+            eoa_token_id: 258_883,
             audio_embed_dim: 640,
             audio_rms_norm_epsilon: 1.0e-6
 
@@ -529,7 +531,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         pad_token_id: Map.get(text_config, "pad_token_id", spec.pad_token_id),
         bos_token_id: Map.get(text_config, "bos_token_id", spec.bos_token_id),
         eos_token_id: Map.get(data, "eos_token_id", spec.eos_token_id),
+        boa_token_id: Map.get(data, "boa_token_id", spec.boa_token_id),
         audio_token_id: Map.get(data, "audio_token_id", spec.audio_token_id),
+        eoa_token_id: Map.get(data, "eoa_token_index", spec.eoa_token_id),
         audio_embed_dim: get_number(audio_config, "audio_embed_dim", spec.audio_embed_dim),
         audio_rms_norm_epsilon:
           get_number(audio_config, "rms_norm_eps", spec.audio_rms_norm_epsilon)

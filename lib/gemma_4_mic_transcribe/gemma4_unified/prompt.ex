@@ -2,28 +2,34 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   @moduledoc false
 
   @audio_begin "<|audio>"
-  @audio_placeholder "<|audio|>"
+  @audio_token "<|audio|>"
   @audio_end "<audio|>"
 
-  def audio_placeholder, do: @audio_placeholder
+  def audio_begin, do: @audio_begin
+  def audio_token, do: @audio_token
+  def audio_end, do: @audio_end
+  def audio_placeholder, do: @audio_token
 
   def build(system_message, prompt, audio_token_count)
       when is_integer(audio_token_count) and audio_token_count >= 0 do
     system_message = normalize_text(system_message)
     prompt = normalize_text(prompt)
-    audio_tokens = String.duplicate(@audio_placeholder, audio_token_count)
+    audio_block = @audio_begin <> String.duplicate(@audio_token, audio_token_count) <> @audio_end
 
-    user_content =
-      [system_message, @audio_begin <> audio_tokens <> @audio_end, prompt]
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.join("\n\n")
+    system_turn =
+      if system_message == "" do
+        ""
+      else
+        "<|turn>system\n#{system_message}<turn|>\n"
+      end
 
-    """
-    <bos><|turn>user
-    #{user_content}<turn|>
-    <|turn>model
-    """
-    |> String.trim()
+    "<bos>" <>
+      system_turn <>
+      "<|turn>user\n" <>
+      audio_block <>
+      prompt <>
+      "<turn|>\n" <>
+      "<|turn>model\n"
   end
 
   defp normalize_text(nil), do: ""

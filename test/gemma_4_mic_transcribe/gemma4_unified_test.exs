@@ -24,23 +24,24 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Nx.shape(features.input_features) == {2, 640}
   end
 
-  test "prompt inserts one audio placeholder per audio token" do
+  test "prompt expands Gemma4 audio marker like LiteRT-LM input data" do
     prompt = Prompt.build("System", "Transcribe.", 3)
 
-    assert prompt =~ "<|audio>"
-    assert prompt =~ "<audio|>"
-    assert prompt =~ "<|turn>user"
-    assert prompt =~ "<|turn>model"
-    assert prompt =~ "System"
-    assert prompt =~ "Transcribe."
-    assert prompt |> String.split(Prompt.audio_placeholder()) |> length() == 4
+    assert prompt ==
+             "<bos><|turn>system\nSystem<turn|>\n" <>
+               "<|turn>user\n" <>
+               Prompt.audio_begin() <>
+               String.duplicate(Prompt.audio_token(), 3) <>
+               Prompt.audio_end() <>
+               "Transcribe.<turn|>\n" <>
+               "<|turn>model\n"
   end
 
   test "input builder combines prompt and audio features" do
     input = Input.build(List.duplicate(0.0, 640), prompt: "Transcribe.")
 
     assert input.audio.token_count == 1
-    assert input.prompt =~ Prompt.audio_placeholder()
+    assert input.prompt =~ Prompt.audio_begin() <> Prompt.audio_token() <> Prompt.audio_end()
   end
 
   test "local Gemma4Unified model graph runs with a tiny config" do
@@ -58,7 +59,9 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
         global_attention_head_size: 4,
         attention_window_size: 4,
         layer_types: [:sliding_attention, :full_attention],
+        boa_token_id: 5,
         audio_token_id: 7,
+        eoa_token_id: 9,
         audio_embed_dim: 4,
         final_logit_softcapping: nil
       )
@@ -84,6 +87,8 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     spec =
       Bumblebee.HuggingFace.Transformers.Config.load(%Model{}, %{
         "audio_token_id" => 12,
+        "boa_token_id" => 11,
+        "eoa_token_index" => 13,
         "eos_token_id" => [1, 50],
         "initializer_range" => 0.01,
         "audio_config" => %{"audio_embed_dim" => 4, "rms_norm_eps" => 1.0e-5},
@@ -115,7 +120,9 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert spec.vocab_size == 32
     assert spec.hidden_size == 8
+    assert spec.boa_token_id == 11
     assert spec.audio_token_id == 12
+    assert spec.eoa_token_id == 13
     assert spec.audio_embed_dim == 4
     assert spec.layer_types == [:sliding_attention, :full_attention]
   end

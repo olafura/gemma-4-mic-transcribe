@@ -75,7 +75,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
         log_debug(debug?, fn ->
           "runtime: loaded spec hidden_size=#{model_info.spec.hidden_size} layers=#{model_info.spec.num_blocks} " <>
-            "audio_token_id=#{model_info.spec.audio_token_id} max_new_tokens=#{generation_config.max_new_tokens}"
+            "boa_token_id=#{model_info.spec.boa_token_id} audio_token_id=#{model_info.spec.audio_token_id} " <>
+            "eoa_token_id=#{model_info.spec.eoa_token_id} max_new_tokens=#{generation_config.max_new_tokens}"
         end)
 
         {:ok,
@@ -105,7 +106,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            timed_debug(runtime, "runtime: tokenize prompt", fn ->
              tokenize(runtime.tokenizer, input.prompt)
            end),
-         :ok <- validate_audio_placeholders(runtime.tokenizer, input_ids, input.audio.token_count) do
+         :ok <- validate_audio_tokens(runtime, input_ids, input.audio.token_count) do
       log_debug(runtime, fn ->
         "runtime: prompt tokenized input_tokens=#{length(input_ids)} audio_tokens=#{input.audio.token_count}"
       end)
@@ -229,17 +230,36 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {:ok, Nx.to_flat_list(inputs["input_ids"])}
   end
 
-  defp validate_audio_placeholders(tokenizer, input_ids, expected_count) do
-    audio_token_id = Bumblebee.Tokenizer.token_to_id(tokenizer, "<|audio|>")
+  defp validate_audio_tokens(runtime, input_ids, expected_count) do
+    spec = runtime.model_info.spec
+    tokenizer = runtime.tokenizer
 
+    boa_token_id = token_id(tokenizer, "<|audio>", spec.boa_token_id)
+    audio_token_id = token_id(tokenizer, "<|audio|>", spec.audio_token_id)
+    eoa_token_id = token_id(tokenizer, "<audio|>", spec.eoa_token_id)
+
+    begin_count = Enum.count(input_ids, &(&1 == boa_token_id))
     actual_count = Enum.count(input_ids, &(&1 == audio_token_id))
+    end_count = Enum.count(input_ids, &(&1 == eoa_token_id))
 
-    if actual_count == expected_count do
-      :ok
-    else
-      {:error,
-       "prompt has #{actual_count} audio placeholder tokens, but audio features contain #{expected_count} tokens"}
+    cond do
+      begin_count != 1 ->
+        {:error, "prompt has #{begin_count} audio begin tokens, expected 1"}
+
+      actual_count != expected_count ->
+        {:error,
+         "prompt has #{actual_count} audio soft tokens, but audio features contain #{expected_count} tokens"}
+
+      end_count != 1 ->
+        {:error, "prompt has #{end_count} audio end tokens, expected 1"}
+
+      true ->
+        :ok
     end
+  end
+
+  defp token_id(tokenizer, token, fallback) do
+    Bumblebee.Tokenizer.token_to_id(tokenizer, token) || fallback
   end
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
