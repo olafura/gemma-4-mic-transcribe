@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   require Logger
 
   alias Gemma4MicTranscribe.Config
+  alias Gemma4MicTranscribe.Gemma4Unified.DecodeState
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.RocmPreflight
@@ -128,7 +129,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       token_ids =
         greedy_generate(
           runtime,
-          input_ids,
+          DecodeState.new(
+            input_ids,
+            runtime.max_response_tokens,
+            runtime.model_info.spec.pad_token_id
+          ),
           input_features,
           input_features_mask,
           []
@@ -144,7 +149,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     exception -> {:error, Exception.message(exception)}
   end
 
-  defp greedy_generate(runtime, input_ids, input_features, input_features_mask, generated) do
+  defp greedy_generate(
+         runtime,
+         %DecodeState{} = decode_state,
+         input_features,
+         input_features_mask,
+         generated
+       ) do
     cond do
       length(generated) >= runtime.max_response_tokens ->
         log_debug(runtime, fn ->
@@ -155,13 +166,24 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
       true ->
         step = length(generated) + 1
+        context_length = DecodeState.context_length(decode_state, length(generated))
 
         log_debug(runtime, fn ->
-          "runtime: generation step #{step}/#{runtime.max_response_tokens} start context_tokens=#{length(input_ids)}"
+          "runtime: generation step #{step}/#{runtime.max_response_tokens} start " <>
+            "context_tokens=#{context_length} fixed_sequence_tokens=#{decode_state.max_sequence_length}"
         end)
 
         started_at = System.monotonic_time(:millisecond)
-        logits = predict_next_logits(runtime, input_ids, input_features, input_features_mask)
+
+        logits =
+          predict_next_logits(
+            runtime,
+            decode_state,
+            context_length,
+            input_features,
+            input_features_mask
+          )
+
         token_id = next_token_id(logits, runtime.generation_config.suppressed_token_ids)
         eos? = eos?(token_id, runtime.generation_config.eos_token_id)
         pad? = token_id == runtime.model_info.spec.pad_token_id
@@ -175,9 +197,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         if eos? or pad? do
           generated
         else
+          decode_state = DecodeState.append(decode_state, length(generated), token_id)
+
           greedy_generate(
             runtime,
-            input_ids ++ [token_id],
+            decode_state,
             input_features,
             input_features_mask,
             generated ++ [token_id]
@@ -186,16 +210,21 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     end
   end
 
-  defp predict_next_logits(runtime, input_ids, input_features, input_features_mask) do
-    sequence_length = length(input_ids)
+  defp predict_next_logits(
+         runtime,
+         %DecodeState{} = decode_state,
+         context_length,
+         input_features,
+         input_features_mask
+       ) do
     backend = runtime_backend(runtime)
 
     inputs =
       Nx.with_default_backend(backend, fn ->
         %{
-          "input_ids" => Nx.tensor([input_ids], type: :s64),
-          "attention_mask" => Nx.tensor([List.duplicate(1, sequence_length)], type: :s64),
-          "position_ids" => Nx.tensor([Enum.to_list(0..(sequence_length - 1))], type: :s64),
+          "input_ids" => Nx.tensor([decode_state.input_ids], type: :s64),
+          "attention_mask" => Nx.tensor([decode_state.attention_mask], type: :s64),
+          "position_ids" => Nx.tensor([decode_state.position_ids], type: :s64),
           "input_features" => Nx.new_axis(input_features, 0),
           "input_features_mask" => Nx.new_axis(input_features_mask, 0)
         }
@@ -203,7 +232,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     %{logits: logits} = runtime.predict_fun.(runtime.model_info.params, inputs)
 
-    logits[0][sequence_length - 1]
+    logits[0][context_length - 1]
   end
 
   defp prepare_audio_tensors(runtime, input_features, input_features_mask) do

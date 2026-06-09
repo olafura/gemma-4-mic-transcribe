@@ -2,6 +2,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   use ExUnit.Case, async: true
 
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
+  alias Gemma4MicTranscribe.Gemma4Unified.DecodeState
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.ModelCatalog
@@ -58,6 +59,32 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert input.audio.token_count == 1
     assert input.prompt =~ Prompt.audio_begin() <> Prompt.audio_token() <> Prompt.audio_end()
+  end
+
+  test "decode state keeps tensor shapes fixed while generated tokens are appended" do
+    state = DecodeState.new([10, 11, 12], 2, 0)
+
+    assert state.prompt_length == 3
+    assert state.max_sequence_length == 5
+    assert state.input_ids == [10, 11, 12, 0, 0]
+    assert state.attention_mask == [1, 1, 1, 0, 0]
+    assert state.position_ids == [0, 1, 2, 3, 4]
+    assert DecodeState.context_length(state, 0) == 3
+
+    state = DecodeState.append(state, 0, 99)
+
+    assert state.input_ids == [10, 11, 12, 99, 0]
+    assert state.attention_mask == [1, 1, 1, 1, 0]
+    assert length(state.input_ids) == 5
+    assert length(state.attention_mask) == 5
+    assert DecodeState.context_length(state, 1) == 4
+
+    state = DecodeState.append(state, 1, 100)
+
+    assert state.input_ids == [10, 11, 12, 99, 100]
+    assert state.attention_mask == [1, 1, 1, 1, 1]
+    assert length(state.input_ids) == 5
+    assert length(state.attention_mask) == 5
   end
 
   test "local Gemma4Unified model graph runs with a tiny config" do

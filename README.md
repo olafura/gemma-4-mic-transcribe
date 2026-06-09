@@ -10,8 +10,9 @@ Whisper as a fallback.
 
 The runtime includes a local Bumblebee/Axon implementation of the audio-only
 Gemma4UnifiedForConditionalGeneration path. Generation currently runs a
-full-context greedy loop rather than a KV-cached loop, so it is expected to be
-slow for the 12B checkpoint.
+static-shape full-context greedy loop rather than a KV-cached loop. This avoids
+per-token EXLA recompilation, but still reruns the 12B checkpoint over the whole
+fixed context for every generated token.
 
 The CLI gates windows with a cheap local speech detector before loading or
 running the model. This is intentionally separate from the Gemma prompt: silent,
@@ -188,7 +189,7 @@ Implemented:
 - Mix CLI with a local launcher script.
 - PCM16 and float32 WAV normalization to mono 16 kHz samples.
 - Windowing, timestamps, prompt construction, and Gemma 4 Unified raw-audio features.
-- Local Bumblebee/Axon Gemma4Unified audio model loader and full-context greedy generation.
+- Local Bumblebee/Axon Gemma4Unified audio model loader and static-shape full-context greedy generation.
 
 Not implemented yet:
 
