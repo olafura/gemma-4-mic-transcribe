@@ -20,7 +20,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :suppressed_token_ids,
     :suppression_mask,
     :predict_fun,
-    :debug
+    :debug,
+    :debug_top_k
   ]
 
   def load(opts \\ []) do
@@ -107,7 +108,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            suppressed_token_ids: suppressed_token_ids,
            suppression_mask: suppression_mask,
            predict_fun: predict_fun,
-           debug: debug?
+           debug: debug?,
+           debug_top_k: Keyword.get(opts, :debug_top_k, 0)
          }}
       end
     end
@@ -129,7 +131,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       log_debug(runtime, fn ->
         "runtime: prompt tokenized input_tokens=#{length(input_ids)} " <>
           "audio_tokens=#{audio_tokens.audio} text_control_tokens=#{audio_tokens.text_control} " <>
-          "boa=#{audio_tokens.begin} eoa=#{audio_tokens.end}"
+          "boa=#{audio_tokens.begin} eoa=#{audio_tokens.end} " <>
+          "boa_index=#{audio_tokens.begin_index} audio_span=#{format_span(audio_tokens)} " <>
+          "eoa_index=#{audio_tokens.end_index}"
       end)
 
       log_debug(runtime, fn ->
@@ -189,6 +193,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {logits, cache} =
       predict_prefill_next_logits(runtime, input_ids, input_features, input_features_mask, cache)
 
+    log_top_token_candidates(runtime, "runtime: prefill", logits)
+
     token_id = TokenSelection.next_token_id(logits, runtime.suppression_mask)
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
@@ -229,6 +235,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
         {logits, cache} =
           predict_decode_next_logits(runtime, previous_token_id, previous_token_position, cache)
+
+        log_top_token_candidates(runtime, "runtime: generation step #{step}", logits)
 
         token_id = TokenSelection.next_token_id(logits, runtime.suppression_mask)
         eos? = eos?(token_id, runtime.generation_config.eos_token_id)
@@ -340,6 +348,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     begin_count = Enum.count(input_ids, &(&1 == boa_token_id))
     actual_count = Enum.count(input_ids, &(&1 == audio_token_id))
     end_count = Enum.count(input_ids, &(&1 == eoa_token_id))
+    begin_index = Enum.find_index(input_ids, &(&1 == boa_token_id))
+    end_index = Enum.find_index(input_ids, &(&1 == eoa_token_id))
+
+    audio_indices =
+      input_ids
+      |> Enum.with_index()
+      |> Enum.flat_map(fn
+        {^audio_token_id, index} -> [index]
+        _other -> []
+      end)
 
     cond do
       begin_count != 1 ->
@@ -352,15 +370,43 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       end_count != 1 ->
         {:error, "prompt has #{end_count} audio end tokens, expected 1"}
 
+      expected_count > 0 and not contiguous?(audio_indices) ->
+        {:error, "audio soft tokens are not contiguous in the tokenized prompt"}
+
+      expected_count > 0 and begin_index + 1 != List.first(audio_indices) ->
+        {:error, "audio soft tokens must immediately follow the audio begin token"}
+
+      expected_count > 0 and end_index != List.last(audio_indices) + 1 ->
+        {:error, "audio end token must immediately follow the audio soft tokens"}
+
+      expected_count == 0 and end_index != begin_index + 1 ->
+        {:error, "audio end token must immediately follow the audio begin token"}
+
       true ->
         {:ok,
          %{
            begin: begin_count,
            audio: actual_count,
            end: end_count,
-           text_control: length(input_ids) - actual_count
+           text_control: length(input_ids) - actual_count,
+           begin_index: begin_index,
+           audio_start_index: List.first(audio_indices),
+           audio_end_index: List.last(audio_indices),
+           end_index: end_index
          }}
     end
+  end
+
+  defp contiguous?([]), do: true
+
+  defp contiguous?(indices) do
+    indices == Enum.to_list(List.first(indices)..List.last(indices))
+  end
+
+  defp format_span(%{audio: 0}), do: "none"
+
+  defp format_span(audio_tokens) do
+    "#{audio_tokens.audio_start_index}..#{audio_tokens.audio_end_index}"
   end
 
   defp token_id(tokenizer, token, fallback) do
@@ -388,6 +434,64 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
+
+  defp log_top_token_candidates(%__MODULE__{debug_top_k: count}, _label, _logits)
+       when not is_integer(count) or count <= 0,
+       do: :ok
+
+  defp log_top_token_candidates(%__MODULE__{} = runtime, label, logits) do
+    top_tokens = TokenSelection.top_tokens(logits, runtime.suppression_mask, runtime.debug_top_k)
+
+    log_debug(runtime, fn ->
+      candidates =
+        top_tokens
+        |> Enum.map(fn {token_id, score} ->
+          "#{token_id}=#{format_score(score)}:#{token_debug_label(runtime, token_id)}"
+        end)
+        |> Enum.join(", ")
+
+      "#{label} top#{runtime.debug_top_k} after_suppression=[#{candidates}]"
+    end)
+  end
+
+  defp token_debug_label(runtime, token_id) do
+    case Map.get(special_token_labels(runtime), token_id) do
+      nil ->
+        runtime.tokenizer
+        |> Bumblebee.Tokenizer.decode([token_id])
+        |> inspect()
+
+      label ->
+        label
+    end
+  end
+
+  defp special_token_labels(runtime) do
+    spec = runtime.model_info.spec
+
+    eos_labels = Enum.map(List.wrap(runtime.generation_config.eos_token_id), &{&1, "<eos>"})
+
+    (eos_labels ++
+       [
+         {spec.pad_token_id, "<pad>"},
+         {spec.bos_token_id, "<bos>"},
+         {spec.boa_token_id, "<|audio>"},
+         {spec.audio_token_id, "<|audio|>"},
+         {spec.eoa_token_id, "<audio|>"},
+         {token_id(runtime.tokenizer, "<|turn>", nil), "<|turn>"},
+         {token_id(runtime.tokenizer, "<turn|>", nil), "<turn|>"},
+         {token_id(runtime.tokenizer, "<|channel>", nil), "<|channel>"},
+         {token_id(runtime.tokenizer, "<channel|>", nil), "<channel|>"}
+       ])
+    |> Enum.reject(fn {token_id, _label} -> is_nil(token_id) end)
+    |> Map.new()
+  end
+
+  defp format_score(score) when is_float(score) do
+    :io_lib.format("~.4f", [score]) |> IO.iodata_to_binary()
+  end
+
+  defp format_score(score), do: inspect(score)
 
   defp timed_debug(%__MODULE__{debug: debug?}, label, fun), do: timed_debug(debug?, label, fun)
 

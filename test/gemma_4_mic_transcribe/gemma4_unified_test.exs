@@ -46,10 +46,11 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert prompt ==
              "<bos><|turn>system\nSystem<turn|>\n" <>
-               "<|turn>user\n" <>
+               "<|turn>user\n\n\n" <>
                Prompt.audio_begin() <>
                String.duplicate(Prompt.audio_token(), 3) <>
                Prompt.audio_end() <>
+               "\n\n" <>
                "Transcribe.<turn|>\n" <>
                "<|turn>model\n"
   end
@@ -66,6 +67,13 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     logits = Nx.tensor([0.0, 99.0, 2.0, 100.0, 4.0])
 
     assert TokenSelection.next_token_id(logits, suppression_mask) == 4
+  end
+
+  test "token selection reports top tokens after suppression" do
+    suppression_mask = TokenSelection.suppression_mask([3], 5, Nx.BinaryBackend)
+    logits = Nx.tensor([0.0, 2.0, 4.0, 100.0, 3.0])
+
+    assert TokenSelection.top_tokens(logits, suppression_mask, 2) == [{2, 4.0}, {4, 3.0}]
   end
 
   test "KV cache uses Gemma4 per-layer attention head sizes" do

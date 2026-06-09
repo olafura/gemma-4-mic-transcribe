@@ -27,7 +27,8 @@ defmodule Gemma4MicTranscribe.CLI do
               speech_threshold: Config.speech_threshold(),
               speech_min_active_ratio: Config.speech_min_active_ratio(),
               speech_max_zero_crossing_rate: Config.speech_max_zero_crossing_rate(),
-              debug: false
+              debug: false,
+              debug_top_k: 0
   end
 
   @switches [
@@ -51,7 +52,8 @@ defmodule Gemma4MicTranscribe.CLI do
     speech_threshold: :float,
     speech_min_active_ratio: :float,
     speech_max_zero_crossing_rate: :float,
-    debug: :boolean
+    debug: :boolean,
+    debug_top_k: :integer
   ]
 
   @aliases [h: :help]
@@ -135,6 +137,7 @@ defmodule Gemma4MicTranscribe.CLI do
              speech_threshold: config.speech_threshold,
              speech_min_active_ratio: config.speech_min_active_ratio,
              speech_max_zero_crossing_rate: config.speech_max_zero_crossing_rate,
+             debug_top_k: config.debug_top_k,
              runtime_module: runtime_module || Gemma4MicTranscribe.Gemma4Unified.Runtime,
              on_window_result: &print_window_result/1
            ) do
@@ -180,7 +183,8 @@ defmodule Gemma4MicTranscribe.CLI do
           :speech_max_zero_crossing_rate,
           Config.speech_max_zero_crossing_rate()
         ),
-      debug: Keyword.get(opts, :debug, false)
+      debug: Keyword.get(opts, :debug, false),
+      debug_top_k: Keyword.get(opts, :debug_top_k, 0)
     }
 
     with :ok <- validate_positive(config.window_seconds, "--window-seconds"),
@@ -198,6 +202,7 @@ defmodule Gemma4MicTranscribe.CLI do
            ),
          :ok <- validate_non_negative(config.skip_windows, "--skip-windows"),
          :ok <- validate_optional_positive(config.max_windows, "--max-windows"),
+         :ok <- validate_non_negative(config.debug_top_k, "--debug-top-k"),
          {:ok, system_message} <-
            read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
          :ok <- validate_wav(config.wav) do
@@ -317,6 +322,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --speech-max-zero-crossing-rate FLOAT
                                         Reject very noisy windows above this zero-crossing ratio, default 0.35
       --debug                            Emit progress logs to stderr
+      --debug-top-k INT                  Log top prefill token candidates after suppression, default 0
     """
   end
 end
