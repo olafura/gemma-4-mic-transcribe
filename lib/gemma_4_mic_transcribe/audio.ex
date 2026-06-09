@@ -145,7 +145,7 @@ defmodule Gemma4MicTranscribe.Audio do
          chunks
        )
        when byte_size(rest) >= chunk_size do
-    <<payload::binary-size(chunk_size), tail::binary>> = rest
+    <<payload::binary-size(^chunk_size), tail::binary>> = rest
 
     chunks =
       case chunk_id do
@@ -190,7 +190,7 @@ defmodule Gemma4MicTranscribe.Audio do
          channels: channels,
          block_align: block_align
        }) do
-    for <<frame::binary-size(block_align) <- data>> do
+    for <<frame::binary-size(^block_align) <- data>> do
       frame
       |> pcm16_frame_to_samples()
       |> average_channels(channels)
@@ -203,7 +203,7 @@ defmodule Gemma4MicTranscribe.Audio do
          channels: channels,
          block_align: block_align
        }) do
-    for <<frame::binary-size(block_align) <- data>> do
+    for <<frame::binary-size(^block_align) <- data>> do
       frame
       |> binary_to_f32_samples()
       |> average_channels(channels)
