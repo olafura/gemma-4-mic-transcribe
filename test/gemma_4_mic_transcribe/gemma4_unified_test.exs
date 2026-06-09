@@ -137,4 +137,46 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert RocmPreflight.parse_offload_targets(output) == ["gfx1100", "gfx1200"]
   end
+
+  test "ROCm preflight adds gfx1151 XLA autotune workaround" do
+    assert RocmPreflight.runtime_workaround_flags(["gfx1151"], nil) ==
+             {"--xla_gpu_autotune_level=0", true}
+
+    assert RocmPreflight.runtime_workaround_flags(["gfx1151"], "--xla_dump_to=/tmp/xla") ==
+             {"--xla_dump_to=/tmp/xla --xla_gpu_autotune_level=0", true}
+  end
+
+  test "ROCm preflight preserves explicit XLA autotune settings" do
+    assert RocmPreflight.runtime_workaround_flags(["gfx1151"], "--xla_gpu_autotune_level=2") ==
+             {"--xla_gpu_autotune_level=2", false}
+
+    assert RocmPreflight.runtime_workaround_flags(["gfx1100"], nil) == {nil, false}
+  end
+
+  test "ROCm preflight parses rocm-smi JSON memory output" do
+    output = """
+    WARNING: AMD GPU device(s) is/are in a low-power state.
+    {"card0": {"VRAM Total Memory (B)": "68719476736", "VRAM Total Used Memory (B)": "1523736576"}}
+    """
+
+    assert {:ok, info} = RocmPreflight.parse_memory_info(output)
+    assert info.total == 68_719_476_736
+    assert info.used == 1_523_736_576
+    assert info.free == 67_195_740_160
+  end
+
+  test "ROCm preflight rejects low VRAM headroom" do
+    output = """
+    {"card0": {"VRAM Total Memory (B)": "68719476736", "VRAM Total Used Memory (B)": "60129542144"}}
+    """
+
+    assert {:error, message} =
+             RocmPreflight.memory_budget(
+               rocm_smi: System.find_executable("printf"),
+               min_free_bytes: 24 * 1024 * 1024 * 1024,
+               rocm_smi_output: output
+             )
+
+    assert message =~ "GPU VRAM headroom is too low"
+  end
 end

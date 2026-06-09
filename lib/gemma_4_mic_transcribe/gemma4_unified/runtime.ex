@@ -286,6 +286,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp exla_backend(:rocm) do
     with :ok <- RocmPreflight.check(),
+         :ok <- apply_rocm_runtime_workarounds(),
+         :ok <- configure_exla_gpu_client(:rocm),
          :ok <- ensure_exla_available(),
          {:ok, backend} <- exla_backend_for_client(:rocm) do
       {:ok, backend}
@@ -293,9 +295,53 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   defp exla_backend(client) do
-    with :ok <- ensure_exla_available(),
+    with :ok <- configure_exla_gpu_client(client),
+         :ok <- ensure_exla_available(),
          {:ok, backend} <- exla_backend_for_client(client) do
       {:ok, backend}
+    end
+  end
+
+  defp configure_exla_gpu_client(client) when client in [:cuda, :rocm] do
+    memory_fraction = exla_memory_fraction()
+    clients = Application.get_env(:exla, :clients, [])
+
+    config =
+      clients
+      |> Keyword.get(client, [])
+      |> Keyword.merge(platform: client, preallocate: false, memory_fraction: memory_fraction)
+
+    Application.put_env(:exla, :clients, Keyword.put(clients, client, config))
+    Application.delete_env(:exla, :default_client)
+    :ok
+  end
+
+  defp configure_exla_gpu_client(_client), do: :ok
+
+  defp exla_memory_fraction do
+    case System.get_env("GEMMA_EXLA_MEMORY_FRACTION") do
+      nil ->
+        0.55
+
+      value ->
+        case Float.parse(value) do
+          {fraction, ""} when fraction > 0.0 and fraction <= 0.9 -> fraction
+          _ -> 0.55
+        end
+    end
+  end
+
+  defp apply_rocm_runtime_workarounds do
+    case RocmPreflight.apply_runtime_workarounds() do
+      {:ok, true} ->
+        Logger.warning(
+          "runtime: applied ROCm gfx1151 XLA workaround: appended --xla_gpu_autotune_level=0"
+        )
+
+        :ok
+
+      {:ok, false} ->
+        :ok
     end
   end
 

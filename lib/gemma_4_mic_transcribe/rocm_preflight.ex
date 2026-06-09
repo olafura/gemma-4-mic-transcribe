@@ -2,6 +2,9 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
   @moduledoc false
 
   @gfx_regex ~r/\bgfx[0-9a-f]+\b/
+  @gfx1151_autotune_flag "--xla_gpu_autotune_level=0"
+  @gfx1151_autotune_flag_name "--xla_gpu_autotune_level"
+  @default_min_free_bytes 24 * 1024 * 1024 * 1024
 
   def check(opts \\ []) do
     with {:ok, gpu_targets} <- gpu_targets(opts),
@@ -18,7 +21,7 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
            "EXLA ROCm backend cannot start safely: unable to inspect compiled XLA extension ROCm offload bundles with llvm-objdump."}
 
         missing == [] ->
-          :ok
+          memory_budget(opts)
 
         true ->
           {:error, incompatible_message(missing, xla_targets)}
@@ -62,6 +65,72 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
     |> Enum.sort()
   end
 
+  def apply_runtime_workarounds(opts \\ []) do
+    with {:ok, gpu_targets} <- gpu_targets(opts) do
+      {xla_flags, changed?} =
+        runtime_workaround_flags(gpu_targets, System.get_env("XLA_FLAGS"))
+
+      if changed? do
+        System.put_env("XLA_FLAGS", xla_flags)
+      end
+
+      {:ok, changed?}
+    end
+  end
+
+  def runtime_workaround_flags(gpu_targets, xla_flags \\ nil) when is_list(gpu_targets) do
+    flags = String.trim(xla_flags || "")
+
+    cond do
+      "gfx1151" not in gpu_targets ->
+        {xla_flags, false}
+
+      xla_autotune_configured?(flags) ->
+        {xla_flags, false}
+
+      flags == "" ->
+        {@gfx1151_autotune_flag, true}
+
+      true ->
+        {"#{flags} #{@gfx1151_autotune_flag}", true}
+    end
+  end
+
+  def memory_info(opts \\ []) do
+    with {:ok, output} <- rocm_smi_memory_output(opts) do
+      parse_memory_info(output)
+    end
+  end
+
+  def parse_memory_info(output) when is_binary(output) do
+    with {:ok, json} <- extract_json_object(output),
+         {:ok, decoded} <- Jason.decode(json),
+         {_card, info} <- Enum.find(decoded, fn {_card, info} -> is_map(info) end),
+         {:ok, total_text} <- Map.fetch(info, "VRAM Total Memory (B)"),
+         {:ok, used_text} <- Map.fetch(info, "VRAM Total Used Memory (B)"),
+         {total, ""} <- Integer.parse(total_text),
+         {used, ""} <- Integer.parse(used_text) do
+      {:ok, %{total: total, used: used, free: max(total - used, 0)}}
+    else
+      _ -> {:ok, nil}
+    end
+  end
+
+  def memory_budget(opts \\ []) do
+    min_free_bytes = Keyword.get(opts, :min_free_bytes, min_free_bytes())
+
+    case memory_info(opts) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, %{total: total, free: free}} when free >= min_free_bytes and total > 0 ->
+        :ok
+
+      {:ok, %{total: total, used: used, free: free}} ->
+        {:error, memory_budget_message(total, used, free, min_free_bytes)}
+    end
+  end
+
   defp rocm_agent_output(opts) do
     executable =
       Keyword.get(opts, :rocm_agent_enumerator) ||
@@ -98,6 +167,30 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
     _exception -> {:ok, ""}
   end
 
+  defp rocm_smi_memory_output(opts) do
+    case Keyword.fetch(opts, :rocm_smi_output) do
+      {:ok, output} ->
+        {:ok, output}
+
+      :error ->
+        executable =
+          Keyword.get(opts, :rocm_smi) ||
+            System.find_executable("rocm-smi") ||
+            existing_path("/opt/rocm/bin/rocm-smi")
+
+        if executable do
+          case System.cmd(executable, ["--showmeminfo", "vram", "--json"], stderr_to_stdout: true) do
+            {output, 0} -> {:ok, output}
+            {_output, _status} -> {:ok, ""}
+          end
+        else
+          {:ok, ""}
+        end
+    end
+  rescue
+    _exception -> {:ok, ""}
+  end
+
   defp default_xla_extension_path do
     case :code.priv_dir(:exla) do
       {:error, _reason} ->
@@ -120,6 +213,46 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
     |> List.flatten()
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  defp xla_autotune_configured?(flags) do
+    String.contains?(flags, @gfx1151_autotune_flag_name)
+  end
+
+  defp extract_json_object(output) do
+    case :binary.match(output, "{") do
+      {start, _length} ->
+        {:ok, binary_part(output, start, byte_size(output) - start)}
+
+      :nomatch ->
+        {:error, :missing_json}
+    end
+  end
+
+  defp min_free_bytes do
+    case System.get_env("GEMMA_ROCM_MIN_FREE_GB") do
+      nil ->
+        @default_min_free_bytes
+
+      value ->
+        case Float.parse(value) do
+          {gb, ""} when gb >= 0 -> round(gb * 1024 * 1024 * 1024)
+          _ -> @default_min_free_bytes
+        end
+    end
+  end
+
+  defp format_gib(bytes) do
+    bytes
+    |> Kernel./(1024 * 1024 * 1024)
+    |> :erlang.float_to_binary(decimals: 2)
+  end
+
+  defp memory_budget_message(total, used, free, min_free) do
+    "EXLA ROCm backend cannot start safely: GPU VRAM headroom is too low. " <>
+      "Total=#{format_gib(total)}GiB used=#{format_gib(used)}GiB free=#{format_gib(free)}GiB; " <>
+      "requires at least #{format_gib(min_free)}GiB free before loading Gemma. " <>
+      "Close other GPU workloads or lower GEMMA_ROCM_MIN_FREE_GB only if you accept the risk."
   end
 
   defp incompatible_message(missing, xla_targets) do
