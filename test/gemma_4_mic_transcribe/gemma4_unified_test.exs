@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
+  alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.RocmPreflight
   alias Gemma4MicTranscribe.Gemma4Unified.Prompt
@@ -58,6 +59,13 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert input.audio.token_count == 1
     assert input.prompt =~ Prompt.audio_begin() <> Prompt.audio_token() <> Prompt.audio_end()
+  end
+
+  test "token selection suppresses configured logits with a stable mask" do
+    suppression_mask = TokenSelection.suppression_mask([1, 3], 5, Nx.BinaryBackend)
+    logits = Nx.tensor([0.0, 99.0, 2.0, 100.0, 4.0])
+
+    assert TokenSelection.next_token_id(logits, suppression_mask) == 4
   end
 
   test "KV cache uses Gemma4 per-layer attention head sizes" do

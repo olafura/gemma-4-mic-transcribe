@@ -5,6 +5,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.Gemma4Unified.Model
+  alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.RocmPreflight
 
@@ -17,6 +18,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :tokenizer,
     :generation_config,
     :suppressed_token_ids,
+    :suppression_mask,
     :predict_fun,
     :debug
   ]
@@ -76,6 +78,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
         suppressed_token_ids = transcription_suppressed_token_ids(tokenizer, generation_config)
 
+        suppression_mask =
+          TokenSelection.suppression_mask(
+            suppressed_token_ids,
+            model_info.spec.vocab_size,
+            runtime_backend_from_backend(backend)
+          )
+
         log_debug(debug?, fn ->
           "runtime: loaded spec hidden_size=#{model_info.spec.hidden_size} layers=#{model_info.spec.num_blocks} " <>
             "boa_token_id=#{model_info.spec.boa_token_id} audio_token_id=#{model_info.spec.audio_token_id} " <>
@@ -96,6 +105,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            tokenizer: tokenizer,
            generation_config: generation_config,
            suppressed_token_ids: suppressed_token_ids,
+           suppression_mask: suppression_mask,
            predict_fun: predict_fun,
            debug: debug?
          }}
@@ -179,7 +189,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {logits, cache} =
       predict_prefill_next_logits(runtime, input_ids, input_features, input_features_mask, cache)
 
-    token_id = next_token_id(logits, runtime.suppressed_token_ids)
+    token_id = TokenSelection.next_token_id(logits, runtime.suppression_mask)
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
     elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -220,7 +230,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         {logits, cache} =
           predict_decode_next_logits(runtime, previous_token_id, previous_token_position, cache)
 
-        token_id = next_token_id(logits, runtime.suppressed_token_ids)
+        token_id = TokenSelection.next_token_id(logits, runtime.suppression_mask)
         eos? = eos?(token_id, runtime.generation_config.eos_token_id)
         pad? = token_id == runtime.model_info.spec.pad_token_id
         elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -307,18 +317,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp runtime_backend(%__MODULE__{backend: nil}), do: Nx.BinaryBackend
   defp runtime_backend(%__MODULE__{backend: backend}), do: backend
-
-  defp next_token_id(logits, suppressed_token_ids) do
-    logits =
-      Enum.reduce(List.wrap(suppressed_token_ids), logits, fn token_id, logits ->
-        replacement = Nx.Constants.min_finite(Nx.type(logits)) |> Nx.broadcast({1})
-        Nx.put_slice(logits, [token_id], replacement)
-      end)
-
-    logits
-    |> Nx.argmax(axis: -1)
-    |> Nx.to_number()
-  end
+  defp runtime_backend_from_backend(nil), do: Nx.BinaryBackend
+  defp runtime_backend_from_backend(backend), do: backend
 
   defp tokenize(tokenizer, prompt) do
     inputs =
