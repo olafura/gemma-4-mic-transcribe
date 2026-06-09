@@ -8,7 +8,8 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
 
   def check(opts \\ []) do
     with {:ok, gpu_targets} <- gpu_targets(opts),
-         {:ok, xla_targets} <- xla_targets(opts) do
+         {:ok, xla_inspection} <- xla_inspection(opts) do
+      xla_targets = xla_inspection.targets
       missing = gpu_targets -- xla_targets
 
       cond do
@@ -17,8 +18,7 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
            "EXLA ROCm backend cannot start safely: unable to detect local ROCm GPU ISA with rocm_agent_enumerator."}
 
         xla_targets == [] ->
-          {:error,
-           "EXLA ROCm backend cannot start safely: unable to inspect compiled XLA extension ROCm offload bundles with llvm-objdump."}
+          {:error, xla_inspection_message(xla_inspection)}
 
         missing == [] ->
           memory_budget(opts)
@@ -36,20 +36,34 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
   end
 
   def xla_targets(opts \\ []) do
-    path = Keyword.get_lazy(opts, :xla_extension_path, &default_xla_extension_path/0)
-
-    cond do
-      is_nil(path) ->
-        {:ok, []}
-
-      not File.regular?(path) ->
-        {:ok, []}
-
-      true ->
-        with {:ok, output} <- llvm_objdump_output(path, opts) do
-          {:ok, parse_offload_targets(output)}
-        end
+    with {:ok, inspection} <- xla_inspection(opts) do
+      {:ok, inspection.targets}
     end
+  end
+
+  def xla_inspection(opts \\ []) do
+    candidate_paths = xla_extension_paths(opts)
+
+    inspections =
+      candidate_paths
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.map(fn path ->
+        {:ok, output} = llvm_objdump_output(path, opts)
+        %{path: path, targets: parse_offload_targets(output)}
+      end)
+
+    targets =
+      inspections
+      |> Enum.flat_map(& &1.targets)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    {:ok,
+     %{
+       targets: targets,
+       inspected_paths: Enum.map(inspections, & &1.path),
+       candidate_paths: candidate_paths
+     }}
   end
 
   def parse_gfx_targets(output) when is_binary(output) do
@@ -191,16 +205,64 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
     _exception -> {:ok, ""}
   end
 
-  defp default_xla_extension_path do
+  defp xla_extension_paths(opts) do
+    cond do
+      Keyword.has_key?(opts, :xla_extension_paths) ->
+        Keyword.fetch!(opts, :xla_extension_paths)
+
+      Keyword.has_key?(opts, :xla_extension_path) ->
+        [Keyword.fetch!(opts, :xla_extension_path)]
+
+      true ->
+        default_xla_extension_paths()
+    end
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
+
+  defp default_xla_extension_paths do
     case :code.priv_dir(:exla) do
       {:error, _reason} ->
-        nil
+        []
 
       path ->
-        path
-        |> List.to_string()
-        |> Path.join("xla_extension/lib/libxla_extension.so")
+        priv_dir = List.to_string(path)
+
+        [
+          Path.join(priv_dir, "xla_extension/lib/libxla_extension.so"),
+          libexla_relative_xla_extension_path(Path.join(priv_dir, "libexla.so")),
+          "vendor/exla/cache/xla_extension/lib/libxla_extension.so"
+        ]
     end
+  end
+
+  defp libexla_relative_xla_extension_path(libexla_path) do
+    if File.regular?(libexla_path) do
+      libexla_path
+      |> realpath()
+      |> Path.dirname()
+      |> Path.join("xla_extension/lib/libxla_extension.so")
+    end
+  end
+
+  defp realpath(path) do
+    case File.read_link(path) do
+      {:ok, target} -> target |> Path.expand(Path.dirname(path)) |> realpath()
+      {:error, _reason} -> Path.expand(path)
+    end
+  end
+
+  defp xla_inspection_message(%{inspected_paths: []} = inspection) do
+    paths = format_paths(inspection.candidate_paths)
+
+    "EXLA ROCm backend cannot start safely: unable to find compiled XLA extension at #{paths}."
+  end
+
+  defp xla_inspection_message(%{inspected_paths: paths}) do
+    "EXLA ROCm backend cannot start safely: no ROCm offload bundles were found in " <>
+      "the inspected XLA extension(s): #{format_paths(paths)}. " <>
+      "The active EXLA cache may be CUDA/CPU-only; rebuild or extract EXLA with XLA_TARGET=rocm."
   end
 
   defp existing_path(path) do
@@ -263,4 +325,7 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
       "present in the compiled XLA extension offload bundles. Built bundles: #{xla_text}. " <>
       "Rebuild XLA/EXLA with TF_ROCM_AMDGPU_TARGETS including #{missing_text}."
   end
+
+  defp format_paths([]), do: "<none>"
+  defp format_paths(paths), do: Enum.join(paths, ", ")
 end

@@ -145,6 +145,32 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert RocmPreflight.parse_offload_targets(output) == ["gfx1100", "gfx1200"]
   end
 
+  test "ROCm preflight reports inspected XLA extension path when bundles are missing" do
+    tmp_dir = Path.join(System.tmp_dir!(), "gemma-rocm-preflight-#{System.unique_integer()}")
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf(tmp_dir) end)
+
+    xla_extension = Path.join(tmp_dir, "libxla_extension.so")
+    llvm_objdump = Path.join(tmp_dir, "llvm-objdump")
+    rocm_agent = Path.join(tmp_dir, "rocm_agent_enumerator")
+
+    File.write!(xla_extension, "")
+    File.write!(llvm_objdump, "#!/bin/sh\nprintf '%s\\n' 'file format elf64-x86-64'\n")
+    File.write!(rocm_agent, "#!/bin/sh\nprintf '%s\\n' 'gfx1151'\n")
+    File.chmod!(llvm_objdump, 0o755)
+    File.chmod!(rocm_agent, 0o755)
+
+    assert {:error, message} =
+             RocmPreflight.check(
+               xla_extension_path: xla_extension,
+               llvm_objdump: llvm_objdump,
+               rocm_agent_enumerator: rocm_agent
+             )
+
+    assert message =~ "no ROCm offload bundles"
+    assert message =~ xla_extension
+  end
+
   test "ROCm preflight adds gfx1151 XLA autotune workaround" do
     assert RocmPreflight.runtime_workaround_flags(["gfx1151"], nil) ==
              {"--xla_gpu_autotune_level=0", true}
