@@ -3,6 +3,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
   @behaviour Bumblebee.ModelSpec
   @behaviour Bumblebee.Configurable
+  @behaviour Bumblebee.Text.Generation
 
   import Nx.Defn
   import Bumblebee.Utils.Model, only: [join: 2]
@@ -62,11 +63,42 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   end
 
   @impl true
+  def init_cache(spec, batch_size, max_length, _inputs) do
+    blocks =
+      spec
+      |> layer_types()
+      |> Enum.map(fn layer_type ->
+        head_size =
+          if layer_type == :full_attention,
+            do: spec.global_attention_head_size,
+            else: spec.attention_head_size
+
+        %{
+          self_attention:
+            attention_cache(batch_size, max_length, spec.num_attention_heads, head_size),
+          cross_attention: attention_cache(batch_size, 1, 1, 1)
+        }
+      end)
+      |> List.to_tuple()
+
+    %{
+      blocks: blocks,
+      offset: Nx.tensor(0),
+      attention_mask: Nx.broadcast(0, {batch_size, max_length})
+    }
+  end
+
+  @impl true
+  def traverse_cache(_spec, cache, fun) do
+    Layers.Decoder.traverse_cache(cache, fun)
+  end
+
+  @impl true
   def model(%__MODULE__{architecture: :for_conditional_generation} = spec) do
     inputs = inputs(spec)
 
-    hidden_state = core(inputs, spec)
-    logits = language_modeling_head(hidden_state, spec, name: "language_modeling_head")
+    outputs = core(inputs, spec)
+    logits = language_modeling_head(outputs.hidden_state, spec, name: "language_modeling_head")
 
     logits =
       if spec.final_logit_softcapping do
@@ -80,7 +112,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         logits
       end
 
-    Layers.output(%{logits: logits})
+    Layers.output(%{logits: logits, cache: outputs.cache})
   end
 
   defp inputs(spec) do
@@ -89,7 +121,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       Axon.input("attention_mask", shape: {nil, nil}),
       Axon.input("position_ids", shape: {nil, nil}),
       Axon.input("input_features", shape: {nil, nil, spec.audio_embed_dim}),
-      Axon.input("input_features_mask", shape: {nil, nil})
+      Axon.input("input_features_mask", shape: {nil, nil}),
+      Axon.input("cache", optional: true)
     ])
   end
 
@@ -110,19 +143,23 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     audio_embeddings = audio_embedder(inputs["input_features"], spec, name: "audio_embedder")
     hidden_state = replace_audio_embeddings(embeddings, audio_embeddings, audio_mask)
 
-    hidden_state =
+    decoder_outputs =
       decoder(
         hidden_state,
         inputs["position_ids"],
         inputs["attention_mask"],
+        inputs["cache"],
         spec,
         name: "decoder"
       )
 
-    rms_norm(hidden_state, spec.hidden_size,
-      name: "output_norm",
-      epsilon: spec.layer_norm_epsilon
-    )
+    hidden_state =
+      rms_norm(decoder_outputs.hidden_state, spec.hidden_size,
+        name: "output_norm",
+        epsilon: spec.layer_norm_epsilon
+      )
+
+    %{hidden_state: hidden_state, cache: decoder_outputs.cache}
   end
 
   defp embedder(input_ids, spec, opts) do
@@ -184,33 +221,66 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     )
   end
 
-  defp decoder(hidden_state, position_ids, attention_mask, spec, opts) do
+  defp decoder(hidden_state, position_ids, attention_mask, cache, spec, opts) do
     name = opts[:name]
+    {attention_mask, cache} = Layers.Decoder.cached_attention_mask(attention_mask, cache)
+    offset = Layers.Decoder.get_cache_offset(cache)
 
-    spec
-    |> layer_types()
-    |> Enum.with_index()
-    |> Enum.reduce(hidden_state, fn {layer_type, idx}, hidden_state ->
-      decoder_block(hidden_state, position_ids, attention_mask, layer_type, spec,
-        name: join(name, "blocks.#{idx}")
-      )
-    end)
+    outputs =
+      spec
+      |> layer_types()
+      |> Enum.with_index()
+      |> Enum.reduce(%{hidden_state: hidden_state, cache: cache}, fn {layer_type, idx}, state ->
+        block_cache = Layers.Decoder.get_block_cache(state.cache, idx)
+
+        {hidden_state, block_cache} =
+          decoder_block(
+            state.hidden_state,
+            position_ids,
+            attention_mask,
+            block_cache,
+            offset,
+            layer_type,
+            spec,
+            name: join(name, "blocks.#{idx}")
+          )
+
+        cache = Layers.Decoder.put_block_cache(state.cache, idx, block_cache)
+
+        %{hidden_state: hidden_state, cache: cache}
+      end)
+
+    cache = Layers.Decoder.update_cache_offset(outputs.cache, outputs.hidden_state)
+
+    %{outputs | cache: cache}
   end
 
-  defp decoder_block(hidden_state, position_ids, attention_mask, layer_type, spec, opts) do
+  defp decoder_block(
+         hidden_state,
+         position_ids,
+         attention_mask,
+         block_cache,
+         offset,
+         layer_type,
+         spec,
+         opts
+       ) do
     name = opts[:name]
 
     shortcut = hidden_state
 
-    hidden_state =
+    {hidden_state, block_cache} =
       hidden_state
       |> rms_norm(spec.hidden_size,
         name: join(name, "self_attention_norm"),
         epsilon: spec.layer_norm_epsilon
       )
-      |> self_attention(position_ids, attention_mask, layer_type, spec,
+      |> self_attention(position_ids, attention_mask, block_cache, offset, layer_type, spec,
         name: join(name, "self_attention")
       )
+
+    hidden_state =
+      hidden_state
       |> rms_norm(spec.hidden_size,
         name: join(name, "post_attention_norm"),
         epsilon: spec.layer_norm_epsilon
@@ -235,12 +305,27 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         epsilon: spec.layer_norm_epsilon
       )
 
-    shortcut
-    |> Axon.add(hidden_state)
-    |> layer_scalar(name: join(name, "layer_scalar"))
+    hidden_state =
+      shortcut
+      |> Axon.add(hidden_state)
+      |> layer_scalar(name: join(name, "layer_scalar"))
+
+    {hidden_state, block_cache}
   end
 
-  defp self_attention(hidden_state, position_ids, attention_mask, layer_type, spec, opts) do
+  defp self_attention(
+         hidden_state,
+         position_ids,
+         attention_mask,
+         block_cache,
+         offset,
+         layer_type,
+         spec,
+         opts
+       ) do
+    {self_attention_cache, cross_attention_cache} =
+      Layers.Decoder.get_attention_caches(block_cache)
+
     name = opts[:name]
     full_attention? = layer_type == :full_attention
 
@@ -304,6 +389,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     key = repeat_kv(key, num_key_value_groups)
     value = repeat_kv(value, num_key_value_groups)
 
+    {key, value, self_attention_cache} =
+      Layers.Decoder.cached_attention_key_values(key, value, self_attention_cache, offset)
+
     window_size =
       case layer_type do
         :sliding_attention -> {spec.attention_window_size, 0}
@@ -318,19 +406,35 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         attention_mask,
         Layers.none(),
         Layers.none(),
-        Layers.none(),
+        offset,
         causal: true,
         window_size: window_size,
         scale: 1.0
       )
 
-    attention_output
-    |> Layers.flatten_trailing()
-    |> Axon.dense(spec.hidden_size,
-      kernel_initializer: kernel_initializer(spec),
-      name: join(name, "output"),
-      use_bias: spec.use_attention_bias
-    )
+    attention_output =
+      attention_output
+      |> Layers.flatten_trailing()
+      |> Axon.dense(spec.hidden_size,
+        kernel_initializer: kernel_initializer(spec),
+        name: join(name, "output"),
+        use_bias: spec.use_attention_bias
+      )
+
+    block_cache =
+      Layers.Decoder.put_attention_caches(
+        block_cache,
+        self_attention_cache,
+        cross_attention_cache
+      )
+
+    {attention_output, block_cache}
+  end
+
+  defp attention_cache(batch_size, sequence_length, num_heads, head_size) do
+    shape = {batch_size, sequence_length, num_heads, head_size}
+    zeros = Nx.broadcast(0.0, shape)
+    %{key: zeros, value: zeros}
   end
 
   defp rotary_embedding(query, key, position_ids, :sliding_attention, head_size, spec) do

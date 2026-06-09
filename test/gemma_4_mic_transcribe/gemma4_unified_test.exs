@@ -2,7 +2,6 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   use ExUnit.Case, async: true
 
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
-  alias Gemma4MicTranscribe.Gemma4Unified.DecodeState
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.ModelCatalog
@@ -61,30 +60,24 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert input.prompt =~ Prompt.audio_begin() <> Prompt.audio_token() <> Prompt.audio_end()
   end
 
-  test "decode state keeps tensor shapes fixed while generated tokens are appended" do
-    state = DecodeState.new([10, 11, 12], 2, 0)
+  test "KV cache uses Gemma4 per-layer attention head sizes" do
+    spec =
+      Bumblebee.configure(Model,
+        num_blocks: 2,
+        num_attention_heads: 2,
+        attention_head_size: 4,
+        global_attention_head_size: 8,
+        layer_types: [:sliding_attention, :full_attention]
+      )
 
-    assert state.prompt_length == 3
-    assert state.max_sequence_length == 5
-    assert state.input_ids == [10, 11, 12, 0, 0]
-    assert state.attention_mask == [1, 1, 1, 0, 0]
-    assert state.position_ids == [0, 1, 2, 3, 4]
-    assert DecodeState.context_length(state, 0) == 3
+    cache = Model.init_cache(spec, 1, 5, %{})
+    first_block = elem(cache.blocks, 0)
+    second_block = elem(cache.blocks, 1)
 
-    state = DecodeState.append(state, 0, 99)
-
-    assert state.input_ids == [10, 11, 12, 99, 0]
-    assert state.attention_mask == [1, 1, 1, 1, 0]
-    assert length(state.input_ids) == 5
-    assert length(state.attention_mask) == 5
-    assert DecodeState.context_length(state, 1) == 4
-
-    state = DecodeState.append(state, 1, 100)
-
-    assert state.input_ids == [10, 11, 12, 99, 100]
-    assert state.attention_mask == [1, 1, 1, 1, 1]
-    assert length(state.input_ids) == 5
-    assert length(state.attention_mask) == 5
+    assert Nx.shape(first_block.self_attention.key) == {1, 5, 2, 4}
+    assert Nx.shape(first_block.self_attention.value) == {1, 5, 2, 4}
+    assert Nx.shape(second_block.self_attention.key) == {1, 5, 2, 8}
+    assert Nx.shape(second_block.self_attention.value) == {1, 5, 2, 8}
   end
 
   test "local Gemma4Unified model graph runs with a tiny config" do
@@ -124,6 +117,62 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     outputs = predict_fun.(params, inputs)
 
     assert Nx.shape(outputs.logits) == {1, 3, 32}
+  end
+
+  test "local Gemma4Unified model graph advances KV cache across prefill and decode" do
+    spec =
+      Bumblebee.configure(Model,
+        vocab_size: 32,
+        max_positions: 16,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_blocks: 1,
+        num_attention_heads: 2,
+        num_key_value_heads: 1,
+        num_global_key_value_heads: 1,
+        attention_head_size: 4,
+        global_attention_head_size: 4,
+        attention_window_size: 4,
+        layer_types: [:sliding_attention],
+        boa_token_id: 5,
+        audio_token_id: 7,
+        eoa_token_id: 9,
+        audio_embed_dim: 4,
+        final_logit_softcapping: nil
+      )
+
+    model = Bumblebee.build_model(spec)
+    {init_fun, predict_fun} = Axon.build(model)
+    cache = Model.init_cache(spec, 1, 5, %{})
+
+    prefill_inputs = %{
+      "input_ids" => Nx.tensor([[2, 7, 3]], type: :s64),
+      "attention_mask" => Nx.tensor([[1, 1, 1]], type: :s64),
+      "position_ids" => Nx.tensor([[0, 1, 2]], type: :s64),
+      "input_features" => Nx.tensor([[[0.0, 0.1, 0.2, 0.3]]], type: {:f, 32}),
+      "input_features_mask" => Nx.tensor([[1]], type: :s64),
+      "cache" => cache
+    }
+
+    params = init_fun.(prefill_inputs, Axon.ModelState.empty())
+    prefill_outputs = predict_fun.(params, prefill_inputs)
+
+    assert Nx.shape(prefill_outputs.logits) == {1, 3, 32}
+    assert Nx.to_number(prefill_outputs.cache.offset) == 3
+
+    decode_inputs = %{
+      "input_ids" => Nx.tensor([[4]], type: :s64),
+      "attention_mask" => Nx.tensor([[1]], type: :s64),
+      "position_ids" => Nx.tensor([[3]], type: :s64),
+      "input_features" => Nx.broadcast(0.0, {1, 1, 4}),
+      "input_features_mask" => Nx.tensor([[0]], type: :s64),
+      "cache" => prefill_outputs.cache
+    }
+
+    decode_outputs = predict_fun.(params, decode_inputs)
+
+    assert Nx.shape(decode_outputs.logits) == {1, 1, 32}
+    assert Nx.to_number(decode_outputs.cache.offset) == 4
   end
 
   test "audio placeholders receive projected audio vectors in order" do

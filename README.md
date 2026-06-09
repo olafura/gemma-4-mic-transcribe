@@ -9,10 +9,9 @@ placeholders, and text prompts. It intentionally does not use Python, LiteRT, or
 Whisper as a fallback.
 
 The runtime includes a local Bumblebee/Axon implementation of the audio-only
-Gemma4UnifiedForConditionalGeneration path. Generation currently runs a
-static-shape full-context greedy loop rather than a KV-cached loop. This avoids
-per-token EXLA recompilation, but still reruns the 12B checkpoint over the whole
-fixed context for every generated token.
+Gemma4UnifiedForConditionalGeneration path. Generation runs one prefill pass over
+the prompt and audio tokens, then uses a KV-cached greedy decode loop so each
+subsequent decode step processes one generated token against the cached context.
 
 The CLI gates windows with a cheap local speech detector before loading or
 running the model. This is intentionally separate from the Gemma prompt: silent,
@@ -189,10 +188,9 @@ Implemented:
 - Mix CLI with a local launcher script.
 - PCM16 and float32 WAV normalization to mono 16 kHz samples.
 - Windowing, timestamps, prompt construction, and Gemma 4 Unified raw-audio features.
-- Local Bumblebee/Axon Gemma4Unified audio model loader and static-shape full-context greedy generation.
+- Local Bumblebee/Axon Gemma4Unified audio model loader and KV-cached greedy generation.
 
 Not implemented yet:
 
-- KV-cached generation for Gemma 4's mixed sliding/full attention head sizes.
 - Vision/video inputs.
 - Live microphone/WebRTC CLI mode.
