@@ -123,6 +123,14 @@ XLA_TARGET=rocm XLA_BUILD=true BAZEL="$(mise which bazel)" mix deps.compile xla 
 ./gemma_4_mic_transcribe --wav journal1.wav --backend exla:rocm --debug
 ```
 
+If the ROCm XLA archive already exists, reuse it while still setting
+`XLA_TARGET=rocm` so EXLA does not compile CUDA helper objects when `nvcc` is on
+`PATH`:
+
+```bash
+XLA_TARGET=rocm XLA_ARCHIVE_PATH=/home/olafura/.cache/xla/0.10.0/build/xla_extension-0.10.0-x86_64-linux-gnu-rocm.tar.gz EXLA_FORCE_REBUILD=partial mix deps.compile exla --force
+```
+
 The vendored XLA build is pinned to Bazel 7.7.0. Bazel 9.x fails this OpenXLA
 snapshot during package loading with `CcInfo symbol has been removed`. Use
 `BAZEL="$(mise which bazel)"` so the XLA build gets the pinned Bazel binary even

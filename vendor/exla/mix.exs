@@ -118,29 +118,45 @@ defmodule EXLA.MixProject do
   # ROCm builds commonly rebuild the same archive path with different code
   # object targets, so path-only tracking leaves stale extracted libraries.
   defp extract_xla(_) do
-    xla_archive_path = XLA.archive_path!()
-    xla_archive_fingerprint = xla_archive_fingerprint(xla_archive_path)
-
     cache_dir = Path.join(__DIR__, "cache")
     xla_snapshot_path = Path.join(cache_dir, "xla_snapshot.txt")
     xla_extension_path = Path.join(cache_dir, "xla_extension")
 
-    case File.read(xla_snapshot_path) do
-      {:ok, ^xla_archive_fingerprint} ->
-        :ok
+    if preserve_existing_xla_cache?(xla_snapshot_path, xla_extension_path) do
+      :ok
+    else
+      xla_archive_path = XLA.archive_path!()
+      xla_archive_fingerprint = xla_archive_fingerprint(xla_archive_path)
 
-      _ ->
-        File.rm_rf!(xla_extension_path)
-        Mix.shell().info("Unpacking #{xla_archive_path} into #{cache_dir}")
+      case File.read(xla_snapshot_path) do
+        {:ok, ^xla_archive_fingerprint} ->
+          :ok
 
-        case :erl_tar.extract(xla_archive_path, [:compressed, cwd: cache_dir]) do
-          :ok -> File.write!(xla_snapshot_path, xla_archive_fingerprint)
-          {:error, term} -> Mix.raise("failed to extract xla archive, reason: #{inspect(term)}")
-        end
+        _ ->
+          File.rm_rf!(xla_extension_path)
+          Mix.shell().info("Unpacking #{xla_archive_path} into #{cache_dir}")
+
+          case :erl_tar.extract(xla_archive_path, [:compressed, cwd: cache_dir]) do
+            :ok -> File.write!(xla_snapshot_path, xla_archive_fingerprint)
+            {:error, term} -> Mix.raise("failed to extract xla archive, reason: #{inspect(term)}")
+          end
+      end
     end
 
     {:ok, []}
   end
+
+  defp preserve_existing_xla_cache?(xla_snapshot_path, xla_extension_path) do
+    not explicit_xla_archive?() and File.exists?(xla_snapshot_path) and
+      File.dir?(xla_extension_path)
+  end
+
+  defp explicit_xla_archive? do
+    env_set?("XLA_TARGET") or env_set?("XLA_ARCHIVE_PATH") or env_set?("XLA_ARCHIVE_URL") or
+      System.get_env("XLA_BUILD") in ~w(1 true)
+  end
+
+  defp env_set?(name), do: System.get_env(name) not in [nil, ""]
 
   defp cached_make(args) do
     force_rebuild_env_var = System.get_env("EXLA_FORCE_REBUILD", "")
@@ -177,10 +193,18 @@ defmodule EXLA.MixProject do
 
     build_env = [
       "EXLA_CPU_ONLY=#{System.get_env("EXLA_CPU_ONLY")}",
+      "EXLA_TARGET=#{System.get_env("EXLA_TARGET")}",
+      "XLA_ARCHIVE_URL=#{System.get_env("XLA_ARCHIVE_URL")}",
+      "XLA_ARCHIVE_PATH=#{System.get_env("XLA_ARCHIVE_PATH")}",
+      "XLA_BUILD=#{System.get_env("XLA_BUILD")}",
       "XLA_TARGET=#{System.get_env("XLA_TARGET")}"
     ]
 
-    xla_archive_fingerprint = XLA.archive_path!() |> xla_archive_fingerprint()
+    xla_archive_fingerprint =
+      case File.read("cache/xla_snapshot.txt") do
+        {:ok, fingerprint} -> fingerprint
+        _ -> XLA.archive_path!() |> xla_archive_fingerprint()
+      end
 
     md5 =
       [xla_archive_fingerprint | build_env ++ contents]

@@ -51,12 +51,25 @@ NVCC = $(CXX)
 NVCCFLAGS = $(CFLAGS)
 LDFLAGS += -L$(XLA_EXTENSION_LIB) -lxla_extension -shared -fvisibility=hidden
 EXLA_SKIP_CUDA =
+XLA_SNAPSHOT = $(shell cat cache/xla_snapshot.txt 2> /dev/null)
 
 ifdef EXLA_CPU_ONLY
 EXLA_SKIP_CUDA = 1
 endif
 
-ifneq ($(filter rocm%,$(XLA_TARGET)),)
+ifneq ($(filter rocm%,$(XLA_TARGET) $(EXLA_TARGET)),)
+EXLA_SKIP_CUDA = 1
+endif
+
+ifneq ($(findstring rocm,$(XLA_ARCHIVE_PATH)),)
+EXLA_SKIP_CUDA = 1
+endif
+
+ifneq ($(findstring rocm,$(XLA_ARCHIVE_URL)),)
+EXLA_SKIP_CUDA = 1
+endif
+
+ifneq ($(findstring rocm,$(XLA_SNAPSHOT)),)
 EXLA_SKIP_CUDA = 1
 endif
 
