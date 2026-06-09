@@ -77,9 +77,9 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert TokenSelection.top_tokens(logits, suppression_mask, 2) == [{2, 4.0}, {4, 3.0}]
   end
 
-  test "transcript cleaning removes leaked channel labels" do
-    assert Transcript.clean("thought\nthought\n\nI enjoyed it.\n") == "I enjoyed it."
-    assert Transcript.clean("final:\nI enjoyed it.\n```") == "I enjoyed it."
+  test "transcript filtering removes tagged channel spans before decode" do
+    assert Transcript.strip_tagged_span([1, 100, 45518, 101, 2], 100, 101) == [1, 2]
+    assert Transcript.strip_tagged_span([1, 100, 45518, 2], 100, 101) == [1]
   end
 
   test "KV cache uses Gemma4 per-layer attention head sizes" do

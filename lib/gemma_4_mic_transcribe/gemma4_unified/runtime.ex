@@ -162,8 +162,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
       transcript =
         runtime.tokenizer
-        |> Bumblebee.Tokenizer.decode(token_ids)
-        |> Transcript.clean()
+        |> Transcript.decode(token_ids)
 
       {:ok, transcript}
     end
@@ -421,9 +420,6 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp transcription_suppressed_token_ids(tokenizer, generation_config) do
     control_tokens = [
-      "<|think|>",
-      "<|channel>",
-      "<channel|>",
       "<|tool>",
       "<tool|>",
       "<|tool_call>",
@@ -435,27 +431,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     generation_config.suppressed_token_ids
     |> List.wrap()
     |> Kernel.++(Enum.map(control_tokens, &Bumblebee.Tokenizer.token_to_id(tokenizer, &1)))
-    |> Kernel.++(transcription_suppressed_text_token_ids(tokenizer))
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
-  end
-
-  defp transcription_suppressed_text_token_ids(tokenizer) do
-    [
-      "thought",
-      "Thought",
-      "thinking",
-      "Thinking",
-      "analysis",
-      "Analysis",
-      "final",
-      "Final",
-      "```"
-    ]
-    |> Enum.flat_map(fn text ->
-      {:ok, token_ids} = tokenize(tokenizer, text)
-      token_ids
-    end)
   end
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
