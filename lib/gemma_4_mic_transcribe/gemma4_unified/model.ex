@@ -21,6 +21,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             attention_head_size: 256,
             global_attention_head_size: 512,
             activation: :gelu_approx_tanh,
+            attention_k_eq_v: true,
             rotary_embedding_base: 1_000_000,
             rotary_embedding_base_local: 10_000,
             full_attention_rotary_percentage: 0.25,
@@ -264,7 +265,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         epsilon: spec.layer_norm_epsilon
       )
 
-    key =
+    key_projection =
       hidden_state
       |> Axon.dense(num_key_value_heads * head_size,
         kernel_initializer: kernel_initializer(spec),
@@ -272,14 +273,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         use_bias: spec.use_attention_bias
       )
       |> Layers.split_heads(num_key_value_heads)
+
+    key =
+      key_projection
       |> rms_norm(head_size,
         name: join(name, "key_norm"),
         epsilon: spec.layer_norm_epsilon
       )
 
-    value =
-      if full_attention? do
-        key
+    value_projection =
+      if full_attention? and spec.attention_k_eq_v do
+        key_projection
       else
         hidden_state
         |> Axon.dense(num_key_value_heads * head_size,
@@ -289,7 +293,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         )
         |> Layers.split_heads(num_key_value_heads)
       end
-      |> rms_norm_no_scale(epsilon: spec.layer_norm_epsilon)
+
+    value = rms_norm_no_scale(value_projection, epsilon: spec.layer_norm_epsilon)
 
     {query, key} = rotary_embedding(query, key, position_ids, layer_type, head_size, spec)
 
@@ -509,6 +514,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         global_attention_head_size:
           get_number(text_config, "global_head_dim", spec.global_attention_head_size),
         activation: activation(Map.get(text_config, "hidden_activation")),
+        attention_k_eq_v: Map.get(text_config, "attention_k_eq_v", spec.attention_k_eq_v),
         use_attention_bias: Map.get(text_config, "attention_bias", spec.use_attention_bias),
         rotary_embedding_base:
           get_in(text_config, ["rope_parameters", "full_attention", "rope_theta"]) ||

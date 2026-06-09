@@ -83,6 +83,114 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Nx.shape(outputs.logits) == {1, 3, 32}
   end
 
+  test "audio placeholders receive projected audio vectors in order" do
+    spec =
+      Bumblebee.configure(Model,
+        vocab_size: 8,
+        max_positions: 8,
+        hidden_size: 4,
+        intermediate_size: 8,
+        num_blocks: 0,
+        num_attention_heads: 1,
+        num_key_value_heads: 1,
+        num_global_key_value_heads: 1,
+        attention_head_size: 4,
+        global_attention_head_size: 4,
+        layer_types: [],
+        audio_token_id: 7,
+        audio_embed_dim: 4,
+        final_logit_softcapping: nil,
+        tie_word_embeddings: false
+      )
+
+    model = Bumblebee.build_model(spec)
+    {_init_fun, predict_fun} = Axon.build(model)
+
+    inputs = %{
+      "input_ids" => Nx.tensor([[1, 7, 3, 7]], type: :s64),
+      "attention_mask" => Nx.tensor([[1, 1, 1, 1]], type: :s64),
+      "position_ids" => Nx.tensor([[0, 1, 2, 3]], type: :s64),
+      "input_features" =>
+        Nx.tensor([[[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]], type: {:f, 32}),
+      "input_features_mask" => Nx.tensor([[1, 1]], type: :s64)
+    }
+
+    params =
+      Axon.ModelState.new(%{
+        "audio_embedder.projection" => %{
+          "kernel" => Nx.eye(4, type: {:f, 32})
+        },
+        "embedder.token_embedding" => %{
+          "kernel" =>
+            Nx.tensor(
+              [
+                [0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0, 0.0],
+                [0.0, 1.0, 1.0, 0.0],
+                [-1.0, -1.0, -1.0, -1.0]
+              ],
+              type: {:f, 32}
+            )
+        },
+        "language_modeling_head.output" => %{
+          "kernel" =>
+            Nx.tensor(
+              [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0]
+              ],
+              type: {:f, 32}
+            )
+        },
+        "output_norm" => %{
+          "weight" => Nx.tensor([1.0, 1.0, 1.0, 1.0], type: {:f, 32})
+        }
+      })
+
+    logits = predict_fun.(params, inputs).logits
+
+    assert_close_list(logit_head(logits, 0), [2.0, 0.0, 0.0, 0.0])
+    assert_close_list(logit_head(logits, 1), rms_vector([1.0, 2.0, 3.0, 4.0]))
+    assert_close_list(logit_head(logits, 2), [0.0, 0.0, 2.0, 0.0])
+    assert_close_list(logit_head(logits, 3), rms_vector([4.0, 3.0, 2.0, 1.0]))
+  end
+
+  test "full attention with k_eq_v reuses key projection without key norm leakage" do
+    params =
+      tiny_model_params(
+        num_blocks: 1,
+        layer_types: [:full_attention],
+        attention_k_eq_v: true
+      )
+
+    paths = param_paths(params)
+
+    assert "decoder.blocks.0.self_attention.key.kernel" in paths
+    assert "decoder.blocks.0.self_attention.key_norm.weight" in paths
+    refute "decoder.blocks.0.self_attention.value.kernel" in paths
+  end
+
+  test "full attention without k_eq_v keeps an explicit value projection" do
+    params =
+      tiny_model_params(
+        num_blocks: 1,
+        layer_types: [:full_attention],
+        attention_k_eq_v: false
+      )
+
+    assert "decoder.blocks.0.self_attention.value.kernel" in param_paths(params)
+  end
+
   test "model config loads Gemma4Unified composite config fields" do
     spec =
       Bumblebee.HuggingFace.Transformers.Config.load(%Model{}, %{
@@ -101,6 +209,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
           "num_attention_heads" => 2,
           "num_key_value_heads" => 1,
           "num_global_key_value_heads" => 1,
+          "attention_k_eq_v" => true,
           "head_dim" => 4,
           "global_head_dim" => 4,
           "hidden_activation" => "gelu_pytorch_tanh",
@@ -123,8 +232,88 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert spec.boa_token_id == 11
     assert spec.audio_token_id == 12
     assert spec.eoa_token_id == 13
+    assert spec.attention_k_eq_v == true
     assert spec.audio_embed_dim == 4
     assert spec.layer_types == [:sliding_attention, :full_attention]
+  end
+
+  defp tiny_model_params(opts) do
+    spec =
+      Bumblebee.configure(Model,
+        vocab_size: 32,
+        max_positions: 16,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_blocks: Keyword.fetch!(opts, :num_blocks),
+        num_attention_heads: 2,
+        num_key_value_heads: 1,
+        num_global_key_value_heads: 1,
+        attention_head_size: 4,
+        global_attention_head_size: 4,
+        layer_types: Keyword.fetch!(opts, :layer_types),
+        attention_k_eq_v: Keyword.fetch!(opts, :attention_k_eq_v),
+        audio_embed_dim: 4,
+        final_logit_softcapping: nil
+      )
+
+    model = Bumblebee.build_model(spec)
+    {init_fun, _predict_fun} = Axon.build(model)
+
+    inputs = %{
+      "input_ids" => Nx.tensor([[2, 7, 3]], type: :s64),
+      "attention_mask" => Nx.tensor([[1, 1, 1]], type: :s64),
+      "position_ids" => Nx.tensor([[0, 1, 2]], type: :s64),
+      "input_features" => Nx.tensor([[[0.0, 0.1, 0.2, 0.3]]], type: {:f, 32}),
+      "input_features_mask" => Nx.tensor([[1]], type: :s64)
+    }
+
+    init_fun.(inputs, Axon.ModelState.empty())
+  end
+
+  defp param_paths(%Axon.ModelState{data: data}) do
+    data
+    |> param_paths([])
+    |> Enum.sort()
+  end
+
+  defp param_paths(%Nx.Tensor{}, path), do: [Enum.join(path, ".")]
+
+  defp param_paths(map, path) when is_map(map) do
+    Enum.flat_map(map, fn {key, value} -> param_paths(value, path ++ [to_string(key)]) end)
+  end
+
+  defp param_paths(list, path) when is_list(list) do
+    list
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {value, index} -> param_paths(value, path ++ [to_string(index)]) end)
+  end
+
+  defp param_paths(_other, _path), do: []
+
+  defp logit_head(logits, position) do
+    logits
+    |> Nx.slice([0, position, 0], [1, 1, 4])
+    |> Nx.reshape({4})
+    |> Nx.to_flat_list()
+  end
+
+  defp rms_vector(values) do
+    rms =
+      values
+      |> Enum.map(&(&1 * &1))
+      |> Enum.sum()
+      |> Kernel./(length(values))
+      |> Kernel.+(1.0e-6)
+      |> :math.sqrt()
+
+    Enum.map(values, &(&1 / rms))
+  end
+
+  defp assert_close_list(actual, expected) do
+    Enum.zip(actual, expected)
+    |> Enum.each(fn {actual, expected} ->
+      assert_in_delta actual, expected, 1.0e-5
+    end)
   end
 
   test "model catalog resolves the friendly Gemma4 alias" do
