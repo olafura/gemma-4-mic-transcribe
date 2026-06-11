@@ -26,7 +26,8 @@ defmodule Gemma4MicTranscribe.ModelCatalog do
       description: "Gemma 4 12B QAT w4a16 compressed tensors",
       artifact_format: :compressed_tensors,
       runtime_kind: :bumblebee_axon,
-      runtime: "local Bumblebee/Axon Gemma4Unified audio runtime with compressed-tensors unpacking"
+      runtime:
+        "local Bumblebee/Axon Gemma4Unified audio runtime with compressed-tensors unpacking"
     }
   ]
 
