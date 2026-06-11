@@ -20,6 +20,10 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert {:list_models, output} = CLI.parse(["--list-models"])
     assert output =~ "google/gemma-4-12B-it"
     assert output =~ "qat-q4_0-gguf"
+    assert output =~ "qat-w4a16-ct"
+    assert output =~ "compressed_tensors"
+    assert output =~ "compressed-tensors unpacking"
+    assert output =~ "llama.cpp"
   end
 
   test "parses debug logging flag" do

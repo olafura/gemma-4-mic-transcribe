@@ -108,8 +108,6 @@ defmodule Gemma4MicTranscribe.CLI do
   def run(%RunConfig{} = config, opts) do
     configure_logger(config)
 
-    runtime_module = Keyword.get(opts, :runtime_module)
-
     debug(config, fn ->
       "cli: preparing WAV windows path=#{inspect(config.wav)} sample_rate=#{config.sample_rate} " <>
         "window_seconds=#{config.window_seconds} stride_seconds=#{config.stride_seconds} " <>
@@ -122,7 +120,8 @@ defmodule Gemma4MicTranscribe.CLI do
         "speech_max_zero_crossing_rate=#{config.speech_max_zero_crossing_rate}"
     end)
 
-    with {:ok, windows} <- wav_windows(config),
+    with {:ok, runtime_module} <- runtime_module(config, opts),
+         {:ok, windows} <- wav_windows(config),
          {:ok, results} <-
            Transcriber.transcribe_windows(windows,
              model_name: config.model_name,
@@ -138,19 +137,11 @@ defmodule Gemma4MicTranscribe.CLI do
              speech_min_active_ratio: config.speech_min_active_ratio,
              speech_max_zero_crossing_rate: config.speech_max_zero_crossing_rate,
              debug_top_k: config.debug_top_k,
-             runtime_module: runtime_module || Gemma4MicTranscribe.Gemma4Unified.Runtime,
+             runtime_module: runtime_module,
              on_window_result: &print_window_result/1
            ) do
       if Enum.any?(results, fn {:ok, _window, text} -> text != "" end), do: 0, else: 3
     else
-      {:error, {:unsupported_runtime, message, _runtime}} ->
-        IO.puts(:stderr, "error: #{message}")
-        2
-
-      {:error, {:unsupported_runtime, message}} ->
-        IO.puts(:stderr, "error: #{message}")
-        2
-
       {:error, reason} ->
         IO.puts(:stderr, "error: #{format_reason(reason)}")
         1
@@ -266,6 +257,13 @@ defmodule Gemma4MicTranscribe.CLI do
   defp maybe_take(windows, nil), do: windows
   defp maybe_take(windows, count), do: Stream.take(windows, count)
 
+  defp runtime_module(%RunConfig{} = config, opts) do
+    case Keyword.fetch(opts, :runtime_module) do
+      {:ok, runtime_module} -> {:ok, runtime_module}
+      :error -> ModelCatalog.runtime_module(config.model_name)
+    end
+  end
+
   defp print_window_result({:ok, window, text}) do
     if text != "" do
       start = Audio.frames_to_timestamp(window.start_frame, window.sample_rate)
@@ -311,7 +309,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --stride-seconds FLOAT             Seconds between windows, default 2.5
       --sample-rate INT                  Target sample rate, default 16000
       --request-timeout-seconds FLOAT    Maximum seconds for one generation
-      --model-name NAME                  Hugging Face or local model name
+      --model-name NAME                  Model alias or Hugging Face repo; selects the required runtime
       --max-response-tokens INT          Maximum generated text tokens per window, default 512
       --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                         Nx/Bumblebee backend label, default torchx

@@ -1,11 +1,15 @@
 defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   use ExUnit.Case, async: true
 
+  import Bitwise, only: [&&&: 2, <<<: 2, |||: 2]
+
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
+  alias Gemma4MicTranscribe.Gemma4Unified.CompressedTensors
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.Gemma4Unified.Transcript
+  alias Gemma4MicTranscribe.Gemma4Unified.Runtime
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.RocmPreflight
   alias Gemma4MicTranscribe.Gemma4Unified.Prompt
@@ -42,7 +46,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Nx.shape(features.input_features) == {2, 640}
   end
 
-  test "prompt expands Gemma4 audio marker like LiteRT-LM input data" do
+  test "prompt expands Gemma4 audio marker and preselects the final channel" do
     prompt = Prompt.build("System", "Transcribe.", 3)
 
     assert prompt ==
@@ -53,7 +57,8 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
                Prompt.audio_end() <>
                "\n\n" <>
                "Transcribe.<turn|>\n" <>
-               "<|turn>model\n"
+               "<|turn>model\n" <>
+               Prompt.final_channel()
   end
 
   test "input builder combines prompt and audio features" do
@@ -77,9 +82,45 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert TokenSelection.top_tokens(logits, suppression_mask, 2) == [{2, 4.0}, {4, 3.0}]
   end
 
+  test "token selection can select from the last batched sequence position" do
+    suppression_mask = TokenSelection.suppression_mask([3], 5, Nx.BinaryBackend)
+
+    logits =
+      Nx.tensor([
+        [
+          [0.0, 9.0, 1.0, 2.0, 3.0],
+          [0.0, 2.0, 4.0, 100.0, 3.0]
+        ]
+      ])
+
+    assert TokenSelection.next_token_id_from_sequence(logits, suppression_mask) == 2
+
+    assert TokenSelection.top_tokens_from_sequence(logits, suppression_mask, 2) == [
+             {2, 4.0},
+             {4, 3.0}
+           ]
+  end
+
   test "transcript filtering removes tagged channel spans before decode" do
     assert Transcript.strip_tagged_span([1, 100, 45518, 101, 2], 100, 101) == [1, 2]
     assert Transcript.strip_tagged_span([1, 100, 45518, 2], 100, 101) == [1]
+  end
+
+  test "transcript filtering strips channel headers without dropping following text" do
+    token_ids = [
+      1,
+      100,
+      901,
+      101,
+      2,
+      100,
+      900,
+      101,
+      3,
+      4
+    ]
+
+    assert Transcript.strip_tagged_span(token_ids, 100, 101) == [1, 2, 3, 4]
   end
 
   test "KV cache uses Gemma4 per-layer attention head sizes" do
@@ -291,7 +332,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert "decoder.blocks.0.self_attention.key.kernel" in paths
     assert "decoder.blocks.0.self_attention.key_norm.weight" in paths
-    assert "decoder.blocks.0.layer_scalar.layer_scalar" in paths
+    refute "decoder.blocks.0.layer_scalar.layer_scalar" in paths
     refute "decoder.blocks.0.self_attention.value.kernel" in paths
   end
 
@@ -306,10 +347,50 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert "decoder.blocks.0.self_attention.value.kernel" in param_paths(params)
   end
 
-  test "params mapping loads Gemma4 layer scalar buffers" do
+  test "params mapping does not include synthetic layer scalar buffers" do
     mapping = Bumblebee.HuggingFace.Transformers.Model.params_mapping(%Model{})
 
-    assert mapping["decoder.blocks.{n}.layer_scalar"] == "model.language_model.layers.{n}"
+    refute Map.has_key?(mapping, "decoder.blocks.{n}.layer_scalar")
+  end
+
+  test "compressed-tensors params mapping uses packed linear kernels" do
+    mapping =
+      Bumblebee.HuggingFace.Transformers.Model.params_mapping(%Model{
+        quantization_config: %{"quant_method" => "compressed-tensors"}
+      })
+
+    assert %{
+             "kernel" =>
+               {[{"model.language_model.layers.{n}.self_attn.q_proj", "weight_packed"},
+                 {"model.language_model.layers.{n}.self_attn.q_proj", "weight_scale"}],
+                builder}
+           } = mapping["decoder.blocks.{n}.self_attention.query"]
+
+    assert is_function(builder, 1)
+    assert mapping["embedder.token_embedding"] == "model.language_model.embed_tokens"
+  end
+
+  test "compressed-tensors linear kernel unpacks signed int4 group scales" do
+    packed =
+      Nx.tensor(
+        [
+          [pack_int4([-8, -1, 0, 1, 2, 3, 6, -1])],
+          [pack_int4([7, 6, 5, 4, 3, 2, 1, 0])]
+        ],
+        type: :s32
+      )
+
+    scales = Nx.tensor([[0.5], [2.0]], type: :f32)
+
+    kernel = CompressedTensors.linear_kernel([packed, scales])
+
+    assert Nx.shape(kernel) == {8, 2}
+
+    assert_close_list(
+      Nx.to_flat_list(kernel),
+      [-4.0, 14.0, -0.5, 12.0, 0.0, 10.0, 0.5, 8.0, 1.0, 6.0, 1.5, 4.0, 3.0, 2.0,
+       -0.5, 0.0]
+    )
   end
 
   test "model config loads Gemma4Unified composite config fields" do
@@ -320,6 +401,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
         "eoa_token_index" => 13,
         "eos_token_id" => [1, 50],
         "initializer_range" => 0.01,
+        "quantization_config" => %{"quant_method" => "compressed-tensors"},
         "audio_config" => %{"audio_embed_dim" => 4, "rms_norm_eps" => 1.0e-5},
         "text_config" => %{
           "vocab_size" => 32,
@@ -356,6 +438,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert spec.attention_k_eq_v == true
     assert spec.audio_embed_dim == 4
     assert spec.layer_types == [:sliding_attention, :full_attention]
+    assert spec.quantization_config == %{"quant_method" => "compressed-tensors"}
   end
 
   defp tiny_model_params(opts) do
@@ -437,9 +520,49 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     end)
   end
 
+  defp pack_int4(values) do
+    values
+    |> Enum.with_index()
+    |> Enum.reduce(0, fn {value, index}, packed ->
+      packed ||| ((value &&& 0xF) <<< (index * 4))
+    end)
+    |> signed_i32()
+  end
+
+  defp signed_i32(value) when value >= 0x8000_0000, do: value - 0x1_0000_0000
+  defp signed_i32(value), do: value
+
   test "model catalog resolves the friendly Gemma4 alias" do
-    assert ModelCatalog.resolve("gemma4-12b-unified") == "google/gemma-4-12B-it"
-    assert ModelCatalog.resolve("google/gemma-4-12B-it") == "google/gemma-4-12B-it"
+    for model <- ModelCatalog.all() do
+      assert ModelCatalog.resolve(model.name) == model.hf_repo
+      assert ModelCatalog.resolve(model.hf_repo) == model.hf_repo
+    end
+
+    assert ModelCatalog.runtime_kind("gemma4-12b-unified") == :bumblebee_axon
+
+    assert ModelCatalog.runtime_kind("gemma4-12b-qat-w4a16-ct") == :bumblebee_axon
+
+    assert ModelCatalog.artifact_format("google/gemma-4-12B-it-qat-w4a16-ct") ==
+             :compressed_tensors
+
+    assert ModelCatalog.runtime_module("gemma4-12b-qat-w4a16-ct") ==
+             {:ok, Gemma4MicTranscribe.Gemma4Unified.Runtime}
+
+    assert ModelCatalog.runtime_kind("gemma4-12b-qat-q4_0-gguf") == :llama_cpp
+    assert ModelCatalog.artifact_format("gemma4-12b-qat-q4_0-gguf") == :gguf
+
+    assert {:error, gguf_runtime_message} =
+             ModelCatalog.runtime_module("gemma4-12b-qat-q4_0-gguf")
+
+    assert gguf_runtime_message =~ "llama.cpp"
+  end
+
+  test "Axon runtime refuses GGUF before backend setup" do
+    assert {:error, gguf_message} =
+             Runtime.load(model_name: "gemma4-12b-qat-q4_0-gguf", backend: "exla:rocm")
+
+    assert gguf_message =~ "GGUF"
+    assert gguf_message =~ "llama.cpp"
   end
 
   test "ROCm preflight parses GPU targets from rocm_agent_enumerator output" do

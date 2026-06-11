@@ -4,11 +4,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   @audio_begin "<|audio>"
   @audio_token "<|audio|>"
   @audio_end "<audio|>"
+  @final_channel "<|channel>final<channel|>\n"
 
   def audio_begin, do: @audio_begin
   def audio_token, do: @audio_token
   def audio_end, do: @audio_end
   def audio_placeholder, do: @audio_token
+  def final_channel, do: @final_channel
 
   def build(system_message, prompt, audio_token_count)
       when is_integer(audio_token_count) and audio_token_count >= 0 do
@@ -30,7 +32,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
       "\n\n" <>
       prompt <>
       "<turn|>\n" <>
-      "<|turn>model\n"
+      "<|turn>model\n" <>
+      @final_channel
   end
 
   defp normalize_text(nil), do: ""

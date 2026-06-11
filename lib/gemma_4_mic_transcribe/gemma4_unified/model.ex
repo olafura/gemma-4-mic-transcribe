@@ -40,7 +40,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             audio_token_id: 258_881,
             eoa_token_id: 258_883,
             audio_embed_dim: 640,
-            audio_rms_norm_epsilon: 1.0e-6
+            audio_rms_norm_epsilon: 1.0e-6,
+            quantization_config: nil
 
   @impl true
   def architectures, do: [:for_conditional_generation]
@@ -305,10 +306,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         epsilon: spec.layer_norm_epsilon
       )
 
-    hidden_state =
-      shortcut
-      |> Axon.add(hidden_state)
-      |> layer_scalar(name: join(name, "layer_scalar"))
+    hidden_state = Axon.add(shortcut, hidden_state)
 
     {hidden_state, block_cache}
   end
@@ -497,17 +495,6 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     end)
   end
 
-  defp layer_scalar(input, opts) do
-    Axon.layer(
-      fn input, scalar, _opts ->
-        Nx.multiply(input, scalar)
-      end,
-      [input, Axon.param("layer_scalar", {1}, initializer: Axon.Initializers.ones())],
-      name: opts[:name],
-      op_name: :gemma4_layer_scalar
-    )
-  end
-
   defp gated_ffn(hidden_state, intermediate_size, output_size, opts) do
     name = opts[:name]
 
@@ -659,7 +646,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         eoa_token_id: Map.get(data, "eoa_token_index", spec.eoa_token_id),
         audio_embed_dim: get_number(audio_config, "audio_embed_dim", spec.audio_embed_dim),
         audio_rms_norm_epsilon:
-          get_number(audio_config, "rms_norm_eps", spec.audio_rms_norm_epsilon)
+          get_number(audio_config, "rms_norm_eps", spec.audio_rms_norm_epsilon),
+        quantization_config: Map.get(data, "quantization_config", spec.quantization_config)
       )
     end
 
@@ -674,17 +662,19 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
     def params_mapping(spec) do
+      linear_source = linear_source_fun(spec)
+
       %{
         "embedder.token_embedding" => "model.language_model.embed_tokens",
         "audio_embedder.projection" => "model.embed_audio.embedding_projection",
         "decoder.blocks.{n}.self_attention.query" =>
-          "model.language_model.layers.{n}.self_attn.q_proj",
+          linear_source.("model.language_model.layers.{n}.self_attn.q_proj"),
         "decoder.blocks.{n}.self_attention.key" =>
-          "model.language_model.layers.{n}.self_attn.k_proj",
+          linear_source.("model.language_model.layers.{n}.self_attn.k_proj"),
         "decoder.blocks.{n}.self_attention.value" =>
-          "model.language_model.layers.{n}.self_attn.v_proj",
+          linear_source.("model.language_model.layers.{n}.self_attn.v_proj"),
         "decoder.blocks.{n}.self_attention.output" =>
-          "model.language_model.layers.{n}.self_attn.o_proj",
+          linear_source.("model.language_model.layers.{n}.self_attn.o_proj"),
         "decoder.blocks.{n}.self_attention.query_norm" =>
           "model.language_model.layers.{n}.self_attn.q_norm",
         "decoder.blocks.{n}.self_attention.key_norm" =>
@@ -697,14 +687,30 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
           "model.language_model.layers.{n}.pre_feedforward_layernorm",
         "decoder.blocks.{n}.post_ffn_norm" =>
           "model.language_model.layers.{n}.post_feedforward_layernorm",
-        "decoder.blocks.{n}.layer_scalar" => "model.language_model.layers.{n}",
-        "decoder.blocks.{n}.ffn.gate" => "model.language_model.layers.{n}.mlp.gate_proj",
-        "decoder.blocks.{n}.ffn.intermediate" => "model.language_model.layers.{n}.mlp.up_proj",
-        "decoder.blocks.{n}.ffn.output" => "model.language_model.layers.{n}.mlp.down_proj",
+        "decoder.blocks.{n}.ffn.gate" =>
+          linear_source.("model.language_model.layers.{n}.mlp.gate_proj"),
+        "decoder.blocks.{n}.ffn.intermediate" =>
+          linear_source.("model.language_model.layers.{n}.mlp.up_proj"),
+        "decoder.blocks.{n}.ffn.output" =>
+          linear_source.("model.language_model.layers.{n}.mlp.down_proj"),
         "output_norm" => "model.language_model.norm",
         "language_modeling_head.output" =>
           if(spec.tie_word_embeddings, do: "model.language_model.embed_tokens", else: "lm_head")
       }
+    end
+
+    defp linear_source_fun(%{quantization_config: %{"quant_method" => "compressed-tensors"}}) do
+      fn layer_name ->
+        %{
+          "kernel" =>
+            {[{layer_name, "weight_packed"}, {layer_name, "weight_scale"}],
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.linear_kernel/1}
+        }
+      end
+    end
+
+    defp linear_source_fun(_spec) do
+      fn layer_name -> layer_name end
     end
   end
 end

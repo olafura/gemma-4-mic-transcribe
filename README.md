@@ -5,8 +5,10 @@ Elixir CLI for direct Gemma 4 12B Unified audio transcription.
 The app reads PCM WAV audio, normalizes it to mono 16 kHz float samples, and
 builds Gemma 4 Unified audio inputs directly: raw 640-sample audio frames,
 `<|audio>/<audio|>` prompt markers, repeated `<|audio|>` soft-token
-placeholders, and text prompts. It intentionally does not use Python, LiteRT, or
-Whisper as a fallback.
+placeholders, and text prompts. It does not use LiteRT or Whisper as a fallback.
+The runtime is pure Elixir/Nx/Bumblebee. The compressed-tensors QAT variant is
+loaded by unpacking its packed int4 Linear weights during Bumblebee parameter
+conversion.
 
 The runtime includes a local Bumblebee/Axon implementation of the audio-only
 Gemma4UnifiedForConditionalGeneration path. Generation runs one prefill pass over
@@ -40,22 +42,27 @@ mix test
 mix compile
 ```
 
-The default model is:
+The default model for this Elixir Bumblebee/Axon runtime is:
 
 ```text
 google/gemma-4-12B-it
 ```
 
-Other Gemma 4 12B variants are listed for reference:
+The QAT model repos use different artifact formats and runtimes:
 
 ```text
-google/gemma-4-12B-it-qat-q4_0-gguf   non-Bumblebee GGUF runtimes
-google/gemma-4-12B-it-qat-w4a16-ct    Transformers/vLLM compressed-tensors workflows
+google/gemma-4-12B-it-qat-q4_0-gguf      GGUF for llama.cpp/Ollama/LM Studio
+google/gemma-4-12B-it-qat-w4a16-ct       compressed-tensors safetensors with local unpacking
 ```
+
+The local `Gemma4Unified.Runtime` can load the w4a16 compressed-tensors
+safetensors by unpacking packed int4 Linear weights during Bumblebee parameter
+conversion. GGUF repos still require a GGUF runtime such as llama.cpp/Ollama/LM
+Studio and fail before backend allocation in this CLI.
 
 ## Usage
 
-List supported model variants:
+List known model variants and their required runtimes:
 
 ```bash
 mix run -e 'System.halt(Gemma4MicTranscribe.CLI.main(["--list-models"]))'
@@ -83,7 +90,7 @@ After `scripts/setup.sh` or `mix compile`:
 Useful options:
 
 ```text
---list-models                  show supported Gemma 4 12B model variants
+--list-models                  show known Gemma 4 12B model variants and required runtimes
 --wav PATH                     read PCM WAV audio from a file
 --skip-windows INT             skip leading windows
 --max-windows INT              stop after N selected windows
@@ -93,7 +100,7 @@ Useful options:
 --window-seconds FLOAT         audio window duration, default 5.0
 --stride-seconds FLOAT         seconds between windows, default 2.5
 --sample-rate INT              target sample rate, default 16000
---model-name NAME              Hugging Face or local model name, default google/gemma-4-12B-it
+--model-name NAME              model alias or Hugging Face repo; selects the required runtime
 --max-response-tokens INT      maximum generated tokens, default 512
 --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                Nx/Bumblebee backend label, default torchx

@@ -27,18 +27,20 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   def load(opts \\ []) do
     debug? = Keyword.get(opts, :debug, false)
+    model_name = Keyword.fetch!(opts, :model_name)
 
-    with :ok <- verify_bumblebee_available(),
+    with :ok <- verify_supported_model(model_name),
+         :ok <- verify_bumblebee_available(),
          {:ok, backend} <- backend(Keyword.get(opts, :backend, Config.backend())) do
-      model_name = Keyword.fetch!(opts, :model_name)
       repo_id = ModelCatalog.resolve(model_name)
       repo = {:hf, repo_id}
 
-      model_opts =
-        [
-          module: Model,
-          architecture: :for_conditional_generation
-        ] ++ if(backend, do: [backend: backend], else: [])
+      spec_opts = [
+        module: Model,
+        architecture: :for_conditional_generation
+      ]
+
+      model_opts = if backend, do: [backend: backend], else: []
 
       log_debug(debug?, fn ->
         "runtime: resolved model #{inspect(model_name)} -> #{repo_id}; backend=#{inspect(backend)}"
@@ -46,12 +48,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
       log_backend_details(debug?, backend)
 
-      with {:ok, model_info} <-
+      with {:ok, spec} <-
+             timed_debug(debug?, "runtime: Bumblebee.load_spec #{repo_id}", fn ->
+               Bumblebee.load_spec(repo, spec_opts)
+             end),
+           {:ok, model_info} <-
              timed_debug(
                debug?,
                "runtime: Bumblebee.load_model #{repo_id} (checkpoint download/load)",
                fn ->
-                 Bumblebee.load_model(repo, model_opts)
+                 Bumblebee.load_model(repo, Keyword.put(model_opts, :spec, spec))
                end
              ),
            {:ok, tokenizer} <-
@@ -78,7 +84,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             strategy: %{type: :greedy_search}
           )
 
-        suppressed_token_ids = transcription_suppressed_token_ids(tokenizer, generation_config)
+        suppressed_token_ids =
+          transcription_suppressed_token_ids(tokenizer, generation_config, model_info.spec)
 
         suppression_mask =
           TokenSelection.suppression_mask(
@@ -200,7 +207,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     log_top_token_candidates(runtime, "runtime: prefill", logits)
 
-    token_id = TokenSelection.next_token_id(logits, runtime.suppression_mask)
+    token_id = TokenSelection.next_token_id_from_sequence(logits, runtime.suppression_mask)
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
     elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -243,7 +250,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
         log_top_token_candidates(runtime, "runtime: generation step #{step}", logits)
 
-        token_id = TokenSelection.next_token_id(logits, runtime.suppression_mask)
+        token_id = TokenSelection.next_token_id_from_sequence(logits, runtime.suppression_mask)
         eos? = eos?(token_id, runtime.generation_config.eos_token_id)
         pad? = token_id == runtime.model_info.spec.pad_token_id
         elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -295,7 +302,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     %{logits: logits, cache: cache} = runtime.predict_fun.(runtime.model_info.params, inputs)
 
-    {logits[0][sequence_length - 1], cache}
+    {logits, cache}
   end
 
   defp predict_decode_next_logits(runtime, previous_token_id, position_id, cache) do
@@ -316,7 +323,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     %{logits: logits, cache: cache} = runtime.predict_fun.(runtime.model_info.params, inputs)
 
-    {logits[0][0], cache}
+    {logits, cache}
   end
 
   defp prepare_audio_tensors(runtime, input_features, input_features_mask) do
@@ -418,7 +425,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     Bumblebee.Tokenizer.token_to_id(tokenizer, token) || fallback
   end
 
-  defp transcription_suppressed_token_ids(tokenizer, generation_config) do
+  defp transcription_suppressed_token_ids(tokenizer, generation_config, spec) do
     control_tokens = [
       "<|tool>",
       "<tool|>",
@@ -430,9 +437,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     generation_config.suppressed_token_ids
     |> List.wrap()
+    |> Kernel.++([spec.pad_token_id])
     |> Kernel.++(Enum.map(control_tokens, &Bumblebee.Tokenizer.token_to_id(tokenizer, &1)))
+    |> Kernel.++(unused_token_ids(tokenizer))
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
+  end
+
+  defp unused_token_ids(tokenizer) do
+    0..255
+    |> Enum.map(&Bumblebee.Tokenizer.token_to_id(tokenizer, "<unused#{&1}>"))
   end
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
@@ -442,7 +456,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
        do: :ok
 
   defp log_top_token_candidates(%__MODULE__{} = runtime, label, logits) do
-    top_tokens = TokenSelection.top_tokens(logits, runtime.suppression_mask, runtime.debug_top_k)
+    top_tokens =
+      TokenSelection.top_tokens_from_sequence(
+        logits,
+        runtime.suppression_mask,
+        runtime.debug_top_k
+      )
 
     log_debug(runtime, fn ->
       candidates =
@@ -535,6 +554,18 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp backend("torchx:cuda"), do: torchx_backend(:cuda)
 
   defp backend(other), do: {:error, "unsupported backend #{inspect(other)}"}
+
+  defp verify_supported_model(model_name) do
+    case ModelCatalog.runtime_kind(model_name) do
+      :bumblebee_axon ->
+        :ok
+
+      :llama_cpp ->
+        {:error,
+         "#{model_name} is a GGUF checkpoint. It is runnable through llama.cpp/Ollama/LM Studio, " <>
+           "but this module is the local Bumblebee/Axon runtime and does not consume GGUF files."}
+    end
+  end
 
   defp exla_backend(:rocm) do
     with :ok <- RocmPreflight.check(),
