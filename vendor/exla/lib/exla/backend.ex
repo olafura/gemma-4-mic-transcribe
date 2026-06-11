@@ -285,43 +285,38 @@ defmodule EXLA.Backend do
   def slice(out, tensor, start_indices, lengths, strides) do
     out = Nx.to_template(out)
 
-    if Enum.all?(start_indices, &is_integer/1) do
-      expr_fun = fn tensor ->
-        Nx.Defn.Expr.slice(out, tensor, start_indices, lengths, strides)
-      end
+    start_indices = normalize_slice_indices(start_indices)
 
-      jit([], expr_fun, [tensor])
-    else
-      expr_fun = fn tensor, start_indices ->
-        Nx.Defn.Expr.slice(out, tensor, Tuple.to_list(start_indices), lengths, strides)
-      end
-
-      jit([], expr_fun, [tensor | start_indices], [tensor, List.to_tuple(start_indices)])
+    expr_fun = fn tensor, start_indices ->
+      Nx.Defn.Expr.slice(out, tensor, Tuple.to_list(start_indices), lengths, strides)
     end
+
+    jit([], expr_fun, [tensor | start_indices], [tensor, List.to_tuple(start_indices)])
   end
 
   @impl true
   def put_slice(out, tensor, start_indices, slice) do
     out = Nx.to_template(out)
 
-    if Enum.all?(start_indices, &is_integer/1) do
-      expr_fun = fn tensor, slice ->
-        Nx.Defn.Expr.put_slice(out, tensor, start_indices, slice)
-      end
+    start_indices = normalize_slice_indices(start_indices)
 
-      jit([], expr_fun, [tensor, slice])
-    else
-      expr_fun = fn tensor, start_indices, slice ->
-        Nx.Defn.Expr.put_slice(out, tensor, Tuple.to_list(start_indices), slice)
-      end
-
-      jit(
-        [],
-        expr_fun,
-        [tensor, slice | start_indices],
-        [tensor, List.to_tuple(start_indices), slice]
-      )
+    expr_fun = fn tensor, start_indices, slice ->
+      Nx.Defn.Expr.put_slice(out, tensor, Tuple.to_list(start_indices), slice)
     end
+
+    jit(
+      [],
+      expr_fun,
+      [tensor, slice | start_indices],
+      [tensor, List.to_tuple(start_indices), slice]
+    )
+  end
+
+  defp normalize_slice_indices(start_indices) do
+    Enum.map(start_indices, fn
+      index when is_integer(index) -> Nx.tensor(index, type: {:s, 64})
+      index -> index
+    end)
   end
 
   @impl true
