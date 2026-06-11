@@ -25,10 +25,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
 
     "<bos>" <>
       system_turn <>
-      "<|turn>user\n\n\n" <>
-      audio_block <>
-      "\n\n" <>
+      "<|turn>user\n" <>
       prompt <>
+      "\n\n" <>
+      audio_block <>
       "<turn|>\n" <>
       "<|turn>model\n"
   end

@@ -52,12 +52,13 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert prompt ==
              "<bos><|turn>system\nSystem<turn|>\n" <>
-               "<|turn>user\n\n\n" <>
+               "<|turn>user\n" <>
+               "Transcribe." <>
+               "\n\n" <>
                Prompt.audio_begin() <>
                String.duplicate(Prompt.audio_token(), 3) <>
                Prompt.audio_end() <>
-               "\n\n" <>
-               "Transcribe.<turn|>\n" <>
+               "<turn|>\n" <>
                "<|turn>model\n"
   end
 
