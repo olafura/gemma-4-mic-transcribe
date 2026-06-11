@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   require Logger
 
   alias Gemma4MicTranscribe.Config
+  alias Gemma4MicTranscribe.Gemma4Unified.ChannelState
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.Gemma4Unified.Transcript
@@ -20,6 +21,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :generation_config,
     :suppressed_token_ids,
     :suppression_mask,
+    :channel_token_ids,
+    :inside_channel_suppression_mask,
+    :content_suppression_mask,
     :predict_fun,
     :debug,
     :debug_top_k
@@ -94,10 +98,30 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             runtime_backend_from_backend(backend)
           )
 
+        channel_token_ids = channel_token_ids(tokenizer)
+
+        inside_channel_suppression_mask =
+          suppression_mask(
+            suppressed_token_ids ++ [channel_token_ids.start],
+            model_info.spec.vocab_size,
+            runtime_backend_from_backend(backend)
+          )
+
+        content_suppression_mask =
+          suppression_mask(
+            suppressed_token_ids ++ [channel_token_ids.start, channel_token_ids.end],
+            model_info.spec.vocab_size,
+            runtime_backend_from_backend(backend)
+          )
+
         log_debug(debug?, fn ->
           "runtime: loaded spec hidden_size=#{model_info.spec.hidden_size} layers=#{model_info.spec.num_blocks} " <>
             "boa_token_id=#{model_info.spec.boa_token_id} audio_token_id=#{model_info.spec.audio_token_id} " <>
             "eoa_token_id=#{model_info.spec.eoa_token_id} max_new_tokens=#{generation_config.max_new_tokens}"
+        end)
+
+        log_debug(debug?, fn ->
+          "runtime: channel token ids=#{inspect(channel_token_ids)}"
         end)
 
         log_debug(debug?, fn ->
@@ -115,6 +139,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            generation_config: generation_config,
            suppressed_token_ids: suppressed_token_ids,
            suppression_mask: suppression_mask,
+           channel_token_ids: channel_token_ids,
+           inside_channel_suppression_mask: inside_channel_suppression_mask,
+           content_suppression_mask: content_suppression_mask,
            predict_fun: predict_fun,
            debug: debug?,
            debug_top_k: Keyword.get(opts, :debug_top_k, 0)
@@ -205,9 +232,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {logits, cache} =
       predict_prefill_next_logits(runtime, input_ids, input_features, input_features_mask, cache)
 
-    log_top_token_candidates(runtime, "runtime: prefill", logits)
+    suppression_mask = suppression_mask_for_state(runtime, ChannelState.initial())
 
-    token_id = TokenSelection.next_token_id_from_sequence(logits, runtime.suppression_mask)
+    log_top_token_candidates(runtime, "runtime: prefill", logits, suppression_mask)
+
+    token_id = TokenSelection.next_token_id_from_sequence(logits, suppression_mask)
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
     elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -220,11 +249,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     if eos? or pad? do
       []
     else
-      greedy_decode(runtime, cache, token_id, prompt_length, [token_id])
+      channel_state =
+        ChannelState.advance(ChannelState.initial(), token_id, runtime.channel_token_ids)
+
+      greedy_decode(runtime, cache, token_id, prompt_length, [token_id], channel_state)
     end
   end
 
-  defp greedy_decode(runtime, cache, previous_token_id, prompt_length, generated) do
+  defp greedy_decode(runtime, cache, previous_token_id, prompt_length, generated, channel_state) do
     cond do
       length(generated) >= runtime.max_response_tokens ->
         log_debug(runtime, fn ->
@@ -248,9 +280,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         {logits, cache} =
           predict_decode_next_logits(runtime, previous_token_id, previous_token_position, cache)
 
-        log_top_token_candidates(runtime, "runtime: generation step #{step}", logits)
+        suppression_mask = suppression_mask_for_state(runtime, channel_state)
 
-        token_id = TokenSelection.next_token_id_from_sequence(logits, runtime.suppression_mask)
+        log_top_token_candidates(
+          runtime,
+          "runtime: generation step #{step}",
+          logits,
+          suppression_mask
+        )
+
+        token_id = TokenSelection.next_token_id_from_sequence(logits, suppression_mask)
         eos? = eos?(token_id, runtime.generation_config.eos_token_id)
         pad? = token_id == runtime.model_info.spec.pad_token_id
         elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -268,7 +307,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             cache,
             token_id,
             prompt_length,
-            generated ++ [token_id]
+            generated ++ [token_id],
+            ChannelState.advance(channel_state, token_id, runtime.channel_token_ids)
           )
         end
     end
@@ -444,6 +484,27 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     |> Enum.uniq()
   end
 
+  defp channel_token_ids(tokenizer) do
+    %{
+      start: Bumblebee.Tokenizer.token_to_id(tokenizer, "<|channel>"),
+      end: Bumblebee.Tokenizer.token_to_id(tokenizer, "<channel|>")
+    }
+  end
+
+  defp suppression_mask(token_ids, vocab_size, backend) do
+    token_ids
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> TokenSelection.suppression_mask(vocab_size, backend)
+  end
+
+  defp suppression_mask_for_state(runtime, :before_content), do: runtime.suppression_mask
+
+  defp suppression_mask_for_state(runtime, :inside_channel),
+    do: runtime.inside_channel_suppression_mask
+
+  defp suppression_mask_for_state(runtime, :content), do: runtime.content_suppression_mask
+
   defp unused_token_ids(tokenizer) do
     0..255
     |> Enum.map(&Bumblebee.Tokenizer.token_to_id(tokenizer, "<unused#{&1}>"))
@@ -451,15 +512,20 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp eos?(token_id, eos_token_id), do: token_id in List.wrap(eos_token_id)
 
-  defp log_top_token_candidates(%__MODULE__{debug_top_k: count}, _label, _logits)
+  defp log_top_token_candidates(
+         %__MODULE__{debug_top_k: count},
+         _label,
+         _logits,
+         _suppression_mask
+       )
        when not is_integer(count) or count <= 0,
        do: :ok
 
-  defp log_top_token_candidates(%__MODULE__{} = runtime, label, logits) do
+  defp log_top_token_candidates(%__MODULE__{} = runtime, label, logits, suppression_mask) do
     top_tokens =
       TokenSelection.top_tokens_from_sequence(
         logits,
-        runtime.suppression_mask,
+        suppression_mask,
         runtime.debug_top_k
       )
 

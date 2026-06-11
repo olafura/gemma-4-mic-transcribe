@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   import Bitwise, only: [&&&: 2, <<<: 2, |||: 2]
 
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
+  alias Gemma4MicTranscribe.Gemma4Unified.ChannelState
   alias Gemma4MicTranscribe.Gemma4Unified.CompressedTensors
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
@@ -120,6 +121,18 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     ]
 
     assert Transcript.strip_tagged_span(token_ids, 100, 101) == [1, 2, 3, 4]
+  end
+
+  test "channel generation state allows one hidden channel span before content" do
+    channel_token_ids = %{start: 100, end: 101}
+
+    assert ChannelState.advance(ChannelState.initial(), 100, channel_token_ids) ==
+             :inside_channel
+
+    assert ChannelState.advance(:inside_channel, 45518, channel_token_ids) == :inside_channel
+    assert ChannelState.advance(:inside_channel, 101, channel_token_ids) == :content
+    assert ChannelState.advance(ChannelState.initial(), 200, channel_token_ids) == :content
+    assert ChannelState.advance(:content, 100, channel_token_ids) == :content
   end
 
   test "KV cache uses Gemma4 per-layer attention head sizes" do
