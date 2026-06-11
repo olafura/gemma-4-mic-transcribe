@@ -59,7 +59,8 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
                String.duplicate(Prompt.audio_token(), 3) <>
                Prompt.audio_end() <>
                "<turn|>\n" <>
-               "<|turn>model\n"
+               "<|turn>model\n" <>
+               "<|channel>thought\n<channel|>"
   end
 
   test "input builder combines prompt and audio features" do
@@ -134,6 +135,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert ChannelState.advance(:inside_channel, 101, channel_token_ids) == :content
     assert ChannelState.advance(ChannelState.initial(), 200, channel_token_ids) == :content
     assert ChannelState.advance(:content, 100, channel_token_ids) == :content
+    assert ChannelState.content() == :content
   end
 
   test "KV cache uses Gemma4 per-layer attention head sizes" do

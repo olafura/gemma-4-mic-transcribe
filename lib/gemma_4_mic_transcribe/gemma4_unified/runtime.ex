@@ -232,7 +232,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {logits, cache} =
       predict_prefill_next_logits(runtime, input_ids, input_features, input_features_mask, cache)
 
-    suppression_mask = suppression_mask_for_state(runtime, ChannelState.initial())
+    channel_state = ChannelState.content()
+    suppression_mask = suppression_mask_for_state(runtime, channel_state)
 
     log_top_token_candidates(runtime, "runtime: prefill", logits, suppression_mask)
 
@@ -249,9 +250,6 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     if eos? or pad? do
       []
     else
-      channel_state =
-        ChannelState.advance(ChannelState.initial(), token_id, runtime.channel_token_ids)
-
       greedy_decode(runtime, cache, token_id, prompt_length, [token_id], channel_state)
     end
   end

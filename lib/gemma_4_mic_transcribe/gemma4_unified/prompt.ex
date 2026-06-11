@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   @audio_begin "<|audio>"
   @audio_token "<|audio|>"
   @audio_end "<audio|>"
+  @empty_thought_channel "<|channel>thought\n<channel|>"
 
   def audio_begin, do: @audio_begin
   def audio_token, do: @audio_token
@@ -30,7 +31,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
       "\n\n" <>
       audio_block <>
       "<turn|>\n" <>
-      "<|turn>model\n"
+      "<|turn>model\n" <>
+      @empty_thought_channel
   end
 
   defp normalize_text(nil), do: ""
