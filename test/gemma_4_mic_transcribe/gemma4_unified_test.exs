@@ -332,7 +332,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert "decoder.blocks.0.self_attention.key.kernel" in paths
     assert "decoder.blocks.0.self_attention.key_norm.weight" in paths
-    refute "decoder.blocks.0.layer_scalar.layer_scalar" in paths
+    assert "decoder.blocks.0.layer_scalar.layer_scalar" in paths
     refute "decoder.blocks.0.self_attention.value.kernel" in paths
   end
 
@@ -347,10 +347,10 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert "decoder.blocks.0.self_attention.value.kernel" in param_paths(params)
   end
 
-  test "params mapping does not include synthetic layer scalar buffers" do
+  test "params mapping loads Gemma4 layer scalar buffers" do
     mapping = Bumblebee.HuggingFace.Transformers.Model.params_mapping(%Model{})
 
-    refute Map.has_key?(mapping, "decoder.blocks.{n}.layer_scalar")
+    assert mapping["decoder.blocks.{n}.layer_scalar"] == "model.language_model.layers.{n}"
   end
 
   test "compressed-tensors params mapping uses packed linear kernels" do
@@ -361,9 +361,10 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert %{
              "kernel" =>
-               {[{"model.language_model.layers.{n}.self_attn.q_proj", "weight_packed"},
-                 {"model.language_model.layers.{n}.self_attn.q_proj", "weight_scale"}],
-                builder}
+               {[
+                  {"model.language_model.layers.{n}.self_attn.q_proj", "weight_packed"},
+                  {"model.language_model.layers.{n}.self_attn.q_proj", "weight_scale"}
+                ], builder}
            } = mapping["decoder.blocks.{n}.self_attention.query"]
 
     assert is_function(builder, 1)
@@ -388,8 +389,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert_close_list(
       Nx.to_flat_list(kernel),
-      [-4.0, 14.0, -0.5, 12.0, 0.0, 10.0, 0.5, 8.0, 1.0, 6.0, 1.5, 4.0, 3.0, 2.0,
-       -0.5, 0.0]
+      [-4.0, 14.0, -0.5, 12.0, 0.0, 10.0, 0.5, 8.0, 1.0, 6.0, 1.5, 4.0, 3.0, 2.0, -0.5, 0.0]
     )
   end
 
@@ -524,7 +524,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     values
     |> Enum.with_index()
     |> Enum.reduce(0, fn {value, index}, packed ->
-      packed ||| ((value &&& 0xF) <<< (index * 4))
+      packed ||| (value &&& 0xF) <<< (index * 4)
     end)
     |> signed_i32()
   end
