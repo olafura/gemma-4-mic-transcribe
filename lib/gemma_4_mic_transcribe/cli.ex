@@ -14,6 +14,7 @@ defmodule Gemma4MicTranscribe.CLI do
               skip_windows: 0,
               max_windows: nil,
               system_message: nil,
+              system_message_source: :none,
               prompt: Config.default_prompt(),
               window_seconds: 5.0,
               stride_seconds: 2.5,
@@ -123,7 +124,9 @@ defmodule Gemma4MicTranscribe.CLI do
     debug(config, fn ->
       "cli: prompt config model=#{inspect(config.model_name)} backend=#{inspect(config.backend)} " <>
         "prompt_bytes=#{byte_size(config.prompt)} system_message_bytes=#{byte_size_or_zero(config.system_message)} " <>
-        "system_message=#{config.system_message not in [nil, ""]}"
+        "system_message=#{config.system_message not in [nil, ""]} " <>
+        "system_message_source=#{inspect(config.system_message_source)} " <>
+        "system_message_sha256=#{inspect(system_message_hash(config.system_message))}"
     end)
 
     with {:ok, runtime_module} <- runtime_module(config, opts),
@@ -200,10 +203,11 @@ defmodule Gemma4MicTranscribe.CLI do
          :ok <- validate_non_negative(config.skip_windows, "--skip-windows"),
          :ok <- validate_optional_positive(config.max_windows, "--max-windows"),
          :ok <- validate_non_negative(config.debug_top_k, "--debug-top-k"),
-         {:ok, system_message} <-
+         {:ok, system_message, system_message_source} <-
            read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
          :ok <- validate_wav(config.wav) do
-      {:ok, %{config | system_message: system_message}}
+      {:ok,
+       %{config | system_message: system_message, system_message_source: system_message_source}}
     end
   end
 
@@ -229,10 +233,14 @@ defmodule Gemma4MicTranscribe.CLI do
     exception -> {:error, exception}
   end
 
-  defp read_system_message(system_message, nil), do: {:ok, system_message}
+  defp read_system_message(nil, nil), do: {:ok, nil, :none}
 
-  defp read_system_message(nil, path),
-    do: {:ok, path |> Path.expand() |> File.read!() |> String.trim()}
+  defp read_system_message(system_message, nil), do: {:ok, system_message, :system_message}
+
+  defp read_system_message(nil, path) do
+    expanded_path = Path.expand(path)
+    {:ok, expanded_path |> File.read!() |> String.trim(), {:system_message_file, expanded_path}}
+  end
 
   defp read_system_message(_system_message, _path),
     do: {:error, "use either --system-message or --system-message-file, not both"}
@@ -261,6 +269,16 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_optional_positive(_value, name), do: {:error, "#{name} must be positive"}
   defp byte_size_or_zero(nil), do: 0
   defp byte_size_or_zero(text) when is_binary(text), do: byte_size(text)
+
+  defp system_message_hash(nil), do: nil
+  defp system_message_hash(""), do: nil
+
+  defp system_message_hash(text) when is_binary(text) do
+    text
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 12)
+  end
 
   defp maybe_take(windows, nil), do: windows
   defp maybe_take(windows, count), do: Stream.take(windows, count)

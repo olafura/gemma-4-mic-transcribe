@@ -12,6 +12,7 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert config.skip_windows == 0
     assert config.model_name == "google/gemma-4-12B-it"
     assert config.backend == "torchx"
+    assert config.system_message_source == :none
     assert config.speech_gate
     assert config.min_speech_seconds == 0.25
   end
@@ -39,6 +40,13 @@ defmodule Gemma4MicTranscribe.CLITest do
 
     assert {:ok, %RunConfig{} = config} = CLI.parse(["--system-message-file", path])
     assert config.system_message == "Transcribe only."
+    assert config.system_message_source == {:system_message_file, Path.expand(path)}
+  end
+
+  test "tracks inline system message source" do
+    assert {:ok, %RunConfig{} = config} = CLI.parse(["--system-message", "Transcribe only."])
+    assert config.system_message == "Transcribe only."
+    assert config.system_message_source == :system_message
   end
 
   test "parses speech gate controls" do
