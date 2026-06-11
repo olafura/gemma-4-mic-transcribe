@@ -31,6 +31,16 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert config.debug
   end
 
+  test "parses system message file" do
+    path = Path.join(System.tmp_dir!(), "gemma-system-message-#{System.unique_integer()}.txt")
+    on_exit(fn -> File.rm(path) end)
+
+    File.write!(path, "  Transcribe only.  \n")
+
+    assert {:ok, %RunConfig{} = config} = CLI.parse(["--system-message-file", path])
+    assert config.system_message == "Transcribe only."
+  end
+
   test "parses speech gate controls" do
     assert {:ok, %RunConfig{} = config} =
              CLI.parse([

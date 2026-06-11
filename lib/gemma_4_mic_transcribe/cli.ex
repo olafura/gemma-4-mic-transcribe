@@ -120,6 +120,12 @@ defmodule Gemma4MicTranscribe.CLI do
         "speech_max_zero_crossing_rate=#{config.speech_max_zero_crossing_rate}"
     end)
 
+    debug(config, fn ->
+      "cli: prompt config model=#{inspect(config.model_name)} backend=#{inspect(config.backend)} " <>
+        "prompt_bytes=#{byte_size(config.prompt)} system_message_bytes=#{byte_size_or_zero(config.system_message)} " <>
+        "system_message=#{config.system_message not in [nil, ""]}"
+    end)
+
     with {:ok, runtime_module} <- runtime_module(config, opts),
          {:ok, windows} <- wav_windows(config),
          {:ok, results} <-
@@ -253,6 +259,8 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_optional_positive(nil, _name), do: :ok
   defp validate_optional_positive(value, _name) when is_integer(value) and value > 0, do: :ok
   defp validate_optional_positive(_value, name), do: {:error, "#{name} must be positive"}
+  defp byte_size_or_zero(nil), do: 0
+  defp byte_size_or_zero(text) when is_binary(text), do: byte_size(text)
 
   defp maybe_take(windows, nil), do: windows
   defp maybe_take(windows, count), do: Stream.take(windows, count)
