@@ -11,7 +11,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.CompressedTensors do
 
     unpacked =
       @nibble_shifts
-      |> Enum.map(&signed_int4_at(packed, &1))
+      |> Enum.map(&biased_int4_at(packed, &1))
       |> Nx.stack(axis: -1)
       |> Nx.reshape({out_features, packed_cols * @int4_values_per_i32})
 
@@ -27,12 +27,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.CompressedTensors do
     |> Nx.transpose()
   end
 
-  defp signed_int4_at(packed, shift) do
-    nibble =
-      packed
-      |> Nx.right_shift(shift)
-      |> Nx.bitwise_and(0xF)
-
-    Nx.select(Nx.greater_equal(nibble, 8), Nx.subtract(nibble, 16), nibble)
+  defp biased_int4_at(packed, shift) do
+    packed
+    |> Nx.right_shift(shift)
+    |> Nx.bitwise_and(0xF)
+    |> Nx.subtract(8)
   end
 end

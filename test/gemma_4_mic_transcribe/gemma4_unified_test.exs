@@ -371,12 +371,15 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert mapping["embedder.token_embedding"] == "model.language_model.embed_tokens"
   end
 
-  test "compressed-tensors linear kernel unpacks signed int4 group scales" do
+  test "compressed-tensors linear kernel unpacks uint4b8 group scales" do
+    row_a = List.flatten(List.duplicate([-8, -1, 0, 1, 2, 3, 6, -1], 4))
+    row_b = List.flatten(List.duplicate([7, 6, 5, 4, 3, 2, 1, 0], 4))
+
     packed =
       Nx.tensor(
         [
-          [pack_int4([-8, -1, 0, 1, 2, 3, 6, -1])],
-          [pack_int4([7, 6, 5, 4, 3, 2, 1, 0])]
+          Enum.map(Enum.chunk_every(row_a, 8), &pack_int4/1),
+          Enum.map(Enum.chunk_every(row_b, 8), &pack_int4/1)
         ],
         type: :s32
       )
@@ -385,11 +388,13 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     kernel = CompressedTensors.linear_kernel([packed, scales])
 
-    assert Nx.shape(kernel) == {8, 2}
+    assert Nx.shape(kernel) == {32, 2}
 
     assert_close_list(
       Nx.to_flat_list(kernel),
-      [-4.0, 14.0, -0.5, 12.0, 0.0, 10.0, 0.5, 8.0, 1.0, 6.0, 1.5, 4.0, 3.0, 2.0, -0.5, 0.0]
+      row_a
+      |> Enum.zip(row_b)
+      |> Enum.flat_map(fn {a, b} -> [a * 0.5, b * 2.0] end)
     )
   end
 
@@ -524,7 +529,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     values
     |> Enum.with_index()
     |> Enum.reduce(0, fn {value, index}, packed ->
-      packed ||| (value &&& 0xF) <<< (index * 4)
+      packed ||| (value + 8 &&& 0xF) <<< (index * 4)
     end)
     |> signed_i32()
   end
