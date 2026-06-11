@@ -46,7 +46,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Nx.shape(features.input_features) == {2, 640}
   end
 
-  test "prompt expands Gemma4 audio marker and preselects the final channel" do
+  test "prompt expands Gemma4 audio marker and opens the model turn" do
     prompt = Prompt.build("System", "Transcribe.", 3)
 
     assert prompt ==
@@ -57,8 +57,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
                Prompt.audio_end() <>
                "\n\n" <>
                "Transcribe.<turn|>\n" <>
-               "<|turn>model\n" <>
-               Prompt.final_channel()
+               "<|turn>model\n"
   end
 
   test "input builder combines prompt and audio features" do
