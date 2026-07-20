@@ -105,7 +105,15 @@ After `scripts/setup.sh` or `mix compile`:
 ```
 
 For LLM-bound events, use streaming WAV mode. It forms speech utterances first
-and only marks committed final transcripts as safe to send downstream:
+and only marks committed final transcripts as safe to send downstream.
+
+**Pass `--no-partials` when only final transcripts are consumed.** Partials are
+throwaway feedback that nothing downstream reads, and each one costs a full
+generation. Because a partial costs more than the partial interval, the queue
+grows and delays the final behind it. Measured on `journal1.wav` with
+`--realtime`: final lag 2.0s/3.5s without partials versus 4.7s/11.9s with them,
+for identical transcripts. If partials are needed for a UI, raise
+`--partial-interval-ms` until a partial costs less than the interval.
 
 ```bash
 ./gemma_4_mic_transcribe \
