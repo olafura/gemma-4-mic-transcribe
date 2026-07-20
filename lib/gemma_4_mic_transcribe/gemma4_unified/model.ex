@@ -45,7 +45,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             audio_rms_norm_epsilon: 1.0e-6,
             quantization_config: nil,
             logits_last_only: false,
-            cache_type: {:f, 32}
+            cache_type: {:f, 32},
+            # false dequantizes int4 weights to bf16 at load: 4x the resident
+            # memory, but prefill uses rocBLAS instead of the hand int4 GEMM.
+            packed_linear: true
 
   @impl true
   def architectures, do: [:for_conditional_generation]
@@ -590,8 +593,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     Axon.Initializers.normal(scale: spec.initializer_scale)
   end
 
-  defp quantized?(%__MODULE__{quantization_config: %{"quant_method" => "compressed-tensors"}}),
-    do: true
+  defp quantized?(%__MODULE__{
+         quantization_config: %{"quant_method" => "compressed-tensors"},
+         packed_linear: true
+       }),
+       do: true
 
   defp quantized?(_spec), do: false
 
@@ -842,7 +848,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
     # Weights stay packed: the layer reads int4 directly on decode instead of
     # loading a dequantized bf16 matrix four times the size.
-    defp linear_source_fun(%{quantization_config: %{"quant_method" => "compressed-tensors"}}) do
+    defp linear_source_fun(%{
+           quantization_config: %{"quant_method" => "compressed-tensors"},
+           packed_linear: true
+         }) do
       fn layer_name ->
         %{
           "packed" =>
@@ -851,6 +860,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
           "scales" =>
             {[{layer_name, "weight_scale"}],
              &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.repack_scales/1}
+        }
+      end
+    end
+
+    defp linear_source_fun(%{quantization_config: %{"quant_method" => "compressed-tensors"}}) do
+      fn layer_name ->
+        %{
+          "kernel" =>
+            {[{layer_name, "weight_packed"}, {layer_name, "weight_scale"}],
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.linear_kernel/1}
         }
       end
     end

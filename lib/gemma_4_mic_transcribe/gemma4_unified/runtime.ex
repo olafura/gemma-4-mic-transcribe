@@ -75,7 +75,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
                Bumblebee.load_spec(repo, spec_opts)
              end),
            spec <-
-             Bumblebee.configure(spec, logits_last_only: true, cache_type: param_type),
+             Bumblebee.configure(spec,
+               logits_last_only: true,
+               cache_type: param_type,
+               packed_linear: Keyword.get(opts, :packed_weights, true)
+             ),
            {:ok, model_info} <-
              timed_debug(
                debug?,
