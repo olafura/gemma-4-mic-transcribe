@@ -25,8 +25,10 @@ defmodule Gemma4MicTranscribe.MixProject do
       {:exla, path: "vendor/exla", override: true, runtime: false},
       {:ex_libsrt, path: "vendor/ex_libsrt", override: true},
       {:jason, "~> 1.4"},
-      {:nx, "~> 0.12.0"},
-      {:torchx, "~> 0.12.0"},
+      # override: bumblebee 0.7.0 (latest) pins nx ~> 0.12.0, but nx 0.13
+      # works with it and is required by exla/torchx 0.13
+      {:nx, "~> 0.13.0", override: true},
+      {:torchx, "~> 0.13.0"},
       {:xla, path: "vendor/xla", override: true, runtime: false}
     ]
   end
