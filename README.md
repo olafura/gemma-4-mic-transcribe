@@ -264,6 +264,18 @@ mise run trace:bpf -- <pid>   # specific pid
 
 Set `ROCM_PATH` or `HIP_LIB` if the HIP runtime is not under `/opt/rocm`.
 
+[OBI](https://opentelemetry.io/docs/zero-code/obi/setup/standalone/)
+(OpenTelemetry eBPF Instrumentation) covers a third angle: zero-code
+protocol-level spans (HTTP/S, gRPC, SQL, ...) for a target process, exported
+as OpenTelemetry data. It cannot hook arbitrary native functions, so it does
+not replace the HIP histograms; it becomes useful for the WebRTC/signaling
+path and any outbound HTTP (for example Hugging Face downloads). With the
+`obi` binary installed:
+
+```bash
+mise run trace:obi   # attaches to beam.smp, prints spans to stdout
+```
+
 ## Implementation Status
 
 Implemented:
