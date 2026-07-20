@@ -172,7 +172,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            channel_token_ids: channel_token_ids,
            inside_channel_suppression_mask: inside_channel_suppression_mask,
            content_suppression_mask: content_suppression_mask,
-           no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 4),
+           no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 0),
            predict_fun: predict_fun,
            debug: debug?,
            debug_top_k: Keyword.get(opts, :debug_top_k, 0)
