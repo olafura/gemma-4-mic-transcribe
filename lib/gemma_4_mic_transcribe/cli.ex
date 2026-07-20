@@ -32,6 +32,7 @@ defmodule Gemma4MicTranscribe.CLI do
               backend: Config.backend(),
               param_type: "bf16",
               weights: "packed",
+              incremental_prefill: false,
               warmup: true,
               speech_gate: Config.speech_gate?(),
               min_speech_seconds: Config.min_speech_seconds(),
@@ -75,6 +76,7 @@ defmodule Gemma4MicTranscribe.CLI do
     backend: :string,
     param_type: :string,
     weights: :string,
+    incremental_prefill: :boolean,
     warmup: :boolean,
     speech_gate: :boolean,
     min_speech_seconds: :float,
@@ -204,6 +206,7 @@ defmodule Gemma4MicTranscribe.CLI do
       backend: Keyword.get(opts, :backend, Config.backend()),
       param_type: Keyword.get(opts, :param_type, "bf16"),
       weights: Keyword.get(opts, :weights, "packed"),
+      incremental_prefill: Keyword.get(opts, :incremental_prefill, false),
       warmup: Keyword.get(opts, :warmup, true),
       speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
       min_speech_seconds: Keyword.get(opts, :min_speech_seconds, Config.min_speech_seconds()),
@@ -402,6 +405,7 @@ defmodule Gemma4MicTranscribe.CLI do
       param_type: config.param_type,
       packed_weights: config.weights in ["packed", "hybrid"],
       hybrid_weights: config.weights == "hybrid",
+      incremental_prefill: config.incremental_prefill,
       warmup: config.warmup,
       # Lag numbers are only meaningful against a loaded, warmed model, so
       # realtime mode loads before the audio clock starts.
@@ -663,6 +667,7 @@ defmodule Gemma4MicTranscribe.CLI do
                                         bf16: dequantized only (fast prefill, slower decode)
                                         hybrid: both, fast prefill and fast decode (~31GB)
                                         default packed
+      --incremental-prefill              Prefill audio during speech instead of after end-of-speech
       --no-warmup                        Skip startup generation warmup (JIT compiles on first utterance instead)
       --no-speech-gate                  Disable cheap local speech gating before model generation
       --min-speech-seconds FLOAT        Minimum likely speech duration before generation, default 0.25

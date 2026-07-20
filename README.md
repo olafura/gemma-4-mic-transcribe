@@ -367,6 +367,15 @@ which the single-shot path never does. That path was broken by a rotary
 position bug (see below) and is covered by a test asserting chunked prefill
 and one-token-at-a-time decode both match a single-shot prefill exactly.
 
+Enable with `--incremental-prefill`. Transcripts match the one-shot path
+exactly. Latency is a trade rather than a win: measured on `journal1.wav` with
+`--no-partials`, a 2s utterance costs 2635ms against 2093ms one-shot, while a
+5s utterance costs 3261ms against 3523ms. Prefill is hidden behind arriving
+audio, so lag stops scaling with utterance length (spread 626ms versus
+1430ms) at the price of a fixed prefix/flush/suffix overhead per utterance.
+It pays off above roughly 4-5 seconds of speech. Removing the fixed cost means
+variable-size appends instead of one padded chunk size.
+
 ## Implementation Status
 
 Implemented:
