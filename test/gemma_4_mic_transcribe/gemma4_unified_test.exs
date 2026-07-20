@@ -92,6 +92,21 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert TokenSelection.top_tokens(logits, suppression_mask, 2) == [{2, 4.0}, {4, 3.0}]
   end
 
+  test "token selection skips banned candidates and falls back when all are banned" do
+    suppression_mask = TokenSelection.suppression_mask([], 5, Nx.BinaryBackend)
+    logits = Nx.tensor([[[0.0, 9.0, 1.0, 2.0, 8.0]]])
+
+    assert TokenSelection.next_allowed_token_id_from_sequence(logits, suppression_mask, []) == 1
+    assert TokenSelection.next_allowed_token_id_from_sequence(logits, suppression_mask, [1]) == 4
+
+    assert TokenSelection.next_allowed_token_id_from_sequence(
+             logits,
+             suppression_mask,
+             [0, 1, 2, 3, 4],
+             3
+           ) == 1
+  end
+
   test "token selection can select from the last batched sequence position" do
     suppression_mask = TokenSelection.suppression_mask([3], 5, Nx.BinaryBackend)
 
@@ -694,6 +709,20 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert message =~ "no ROCm offload bundles"
     assert message =~ xla_extension
+  end
+
+  test "banned ngram tokens block completing an already-generated trigram" do
+    # sequence in order: [5, 6, 7, 9, 5, 6] -> reversed [6, 5, 9, 7, 6, 5]
+    # last bigram [5, 6] previously continued with 7, so 7 is banned
+    assert Runtime.banned_ngram_token_ids([6, 5, 9, 7, 6, 5], 3) == [7]
+
+    # a fresh bigram bans nothing
+    assert Runtime.banned_ngram_token_ids([9, 7], 3) == []
+
+    # too little history or disabled sizes ban nothing
+    assert Runtime.banned_ngram_token_ids([7], 3) == []
+    assert Runtime.banned_ngram_token_ids([6, 5, 9, 7, 6, 5], 0) == []
+    assert Runtime.banned_ngram_token_ids([6, 5, 9, 7, 6, 5], 1) == []
   end
 
   test "prefill masks exclude padded audio tokens and keep positions contiguous" do

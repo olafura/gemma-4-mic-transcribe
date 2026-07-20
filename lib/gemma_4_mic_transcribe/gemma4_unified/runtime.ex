@@ -32,6 +32,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :channel_token_ids,
     :inside_channel_suppression_mask,
     :content_suppression_mask,
+    :no_repeat_ngram_size,
     :predict_fun,
     :debug,
     :debug_top_k
@@ -166,6 +167,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            channel_token_ids: channel_token_ids,
            inside_channel_suppression_mask: inside_channel_suppression_mask,
            content_suppression_mask: content_suppression_mask,
+           no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 3),
            predict_fun: predict_fun,
            debug: debug?,
            debug_top_k: Keyword.get(opts, :debug_top_k, 0)
@@ -444,7 +446,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         suppression_mask
       )
 
-      token_id = TokenSelection.next_token_id_from_sequence(logits, suppression_mask)
+      banned_ids = banned_ngram_token_ids(generated, runtime.no_repeat_ngram_size)
+
+      token_id =
+        TokenSelection.next_allowed_token_id_from_sequence(logits, suppression_mask, banned_ids)
+
       eos? = eos?(token_id, runtime.generation_config.eos_token_id)
       pad? = token_id == runtime.model_info.spec.pad_token_id
       elapsed_ms = System.monotonic_time(:millisecond) - started_at
@@ -474,6 +480,29 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp stop?(eos?, pad?, step, limits) do
     (eos? or pad?) and step >= limits.min_new_tokens
   end
+
+  @doc """
+  Token ids that would complete an n-gram already present in the generated
+  sequence (HF-style no_repeat_ngram).
+
+  Greedy decode loops on pauses and silence by re-emitting phrases it has
+  already produced; banning exact n-gram repeats breaks the loop. Stop
+  tokens are never banned because they never occur inside the generated
+  sequence. `generated_reversed` is the generated ids, most recent first.
+  """
+  def banned_ngram_token_ids(generated_reversed, size)
+      when is_integer(size) and size > 1 and length(generated_reversed) >= size - 1 do
+    sequence = Enum.reverse(generated_reversed)
+    suffix = generated_reversed |> Enum.take(size - 1) |> Enum.reverse()
+
+    sequence
+    |> Enum.chunk_every(size, 1, :discard)
+    |> Enum.filter(fn chunk -> Enum.take(chunk, size - 1) == suffix end)
+    |> Enum.map(&List.last/1)
+    |> Enum.uniq()
+  end
+
+  def banned_ngram_token_ids(_generated_reversed, _size), do: []
 
   defp cache_length(prompt_length, max_response_tokens) do
     needed = prompt_length + max_response_tokens

@@ -27,6 +27,7 @@ defmodule Gemma4MicTranscribe.CLI do
               request_timeout_seconds: Config.request_timeout_seconds(),
               model_name: Config.default_model_name(),
               max_response_tokens: Config.max_response_tokens(),
+              no_repeat_ngram: 3,
               backend: Config.backend(),
               param_type: "bf16",
               warmup: true,
@@ -67,6 +68,7 @@ defmodule Gemma4MicTranscribe.CLI do
     request_timeout_seconds: :float,
     model_name: :string,
     max_response_tokens: :integer,
+    no_repeat_ngram: :integer,
     backend: :string,
     param_type: :string,
     warmup: :boolean,
@@ -193,6 +195,7 @@ defmodule Gemma4MicTranscribe.CLI do
         Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
       model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
+      no_repeat_ngram: Keyword.get(opts, :no_repeat_ngram, 3),
       backend: Keyword.get(opts, :backend, Config.backend()),
       param_type: Keyword.get(opts, :param_type, "bf16"),
       warmup: Keyword.get(opts, :warmup, true),
@@ -246,6 +249,7 @@ defmodule Gemma4MicTranscribe.CLI do
          :ok <- validate_non_negative_float(config.tts_timestamp_ms, "--tts-timestamp-ms"),
          :ok <- validate_optional_positive(config.max_windows, "--max-windows"),
          :ok <- validate_non_negative(config.debug_top_k, "--debug-top-k"),
+         :ok <- validate_non_negative(config.no_repeat_ngram, "--no-repeat-ngram"),
          :ok <- validate_param_type(config.param_type),
          :ok <- validate_output(config.output),
          {:ok, system_message, system_message_source} <-
@@ -266,6 +270,7 @@ defmodule Gemma4MicTranscribe.CLI do
              param_type: config.param_type,
              warmup: config.warmup,
              max_response_tokens: config.max_response_tokens,
+             no_repeat_ngram_size: config.no_repeat_ngram,
              prompt: config.prompt,
              system_message: config.system_message,
              request_timeout_seconds: config.request_timeout_seconds,
@@ -323,6 +328,7 @@ defmodule Gemma4MicTranscribe.CLI do
       param_type: config.param_type,
       warmup: config.warmup,
       max_response_tokens: config.max_response_tokens,
+      no_repeat_ngram_size: config.no_repeat_ngram,
       prompt: config.prompt,
       system_message: config.system_message,
       request_timeout_seconds: config.request_timeout_seconds,
@@ -553,6 +559,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --request-timeout-seconds FLOAT    Maximum seconds for one generation
       --model-name NAME                  Model alias or Hugging Face repo; selects the required runtime
       --max-response-tokens INT          Maximum generated text tokens per window, default 512
+      --no-repeat-ngram INT              Ban repeating generated n-grams of this size, default 3, 0 disables
       --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                         Nx/Bumblebee backend label, default torchx
       --param-type bf16|f16|f32          Model parameter/compute precision, default bf16

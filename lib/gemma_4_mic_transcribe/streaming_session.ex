@@ -188,6 +188,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
       backend: Keyword.get(opts, :backend, Config.backend()),
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
+      no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 3),
       request_timeout_seconds:
         Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
       param_type: Keyword.get(opts, :param_type),

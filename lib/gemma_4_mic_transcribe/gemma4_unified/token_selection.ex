@@ -21,6 +21,32 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.TokenSelection do
     end)
   end
 
+  @doc """
+  Picks the best token from the last sequence position that is not in
+  `banned_ids`, falling back to the overall best candidate when every
+  candidate is banned.
+
+  The ban set is tiny and changes every step, so instead of rebuilding a
+  device-side mask (which would defeat executable reuse) the top candidates
+  are pulled to the host and filtered there.
+  """
+  def next_allowed_token_id_from_sequence(logits, suppression_mask, banned_ids, top_k \\ 8)
+
+  def next_allowed_token_id_from_sequence(logits, suppression_mask, [], _top_k) do
+    next_token_id_from_sequence(logits, suppression_mask)
+  end
+
+  def next_allowed_token_id_from_sequence(logits, suppression_mask, banned_ids, top_k) do
+    top_k = min(top_k, Nx.axis_size(logits, -1))
+    candidates = top_tokens_from_sequence(logits, suppression_mask, top_k)
+    banned = MapSet.new(banned_ids)
+
+    case Enum.find(candidates, fn {token_id, _score} -> token_id not in banned end) do
+      {token_id, _score} -> token_id
+      nil -> candidates |> List.first() |> elem(0)
+    end
+  end
+
   def next_token_id_from_sequence(logits, suppression_mask) do
     with_tensor_backend(suppression_mask, fn ->
       logits
