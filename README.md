@@ -292,6 +292,23 @@ BEAM TLS is implemented in Erlang rather than libssl, so OBI reports HTTPS
 connections at the TCP level without decoding request contents; plain HTTP,
 gRPC, and proxied traffic decode fully.
 
+## Incremental prefill (experimental, off by default)
+
+Streaming re-transcribes the whole utterance for every partial, so each
+partial pays a full prefill over all audio so far. `Gemma4Unified.Runtime`
+exposes an utterance cache (`start_utterance/2`, `append_audio/3`,
+`transcribe_utterance/2`) that prefills the prompt prefix once, appends new
+audio in fixed 50-token chunks, and prefills only the short prompt suffix per
+transcript. Enable with `incremental_prefill: true` on a streaming session.
+
+It is **not correct yet**: transcripts come back empty once audio chunks are
+appended, while the same prompt tokenizes identically to the working
+single-shot path (verified: prefix ends at the audio-begin marker, suffix
+starts at audio-end, and their concatenation matches the full prompt exactly).
+The remaining suspect is appending several tokens to the KV cache at a
+non-zero offset, which the single-shot path never does — it only ever
+prefills at offset 0 and then decodes one token at a time.
+
 ## Implementation Status
 
 Implemented:

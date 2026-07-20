@@ -55,6 +55,7 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
     {:ok, session} =
       start_test_session(
         runtime_module: IncrementalRuntime,
+        incremental_prefill: true,
         speech_end_silence_ms: 1_000.0,
         partial_interval_ms: 40.0,
         partials: true
