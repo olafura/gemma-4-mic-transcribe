@@ -373,8 +373,19 @@ exactly. Latency is a trade rather than a win: measured on `journal1.wav` with
 5s utterance costs 3261ms against 3523ms. Prefill is hidden behind arriving
 audio, so lag stops scaling with utterance length (spread 626ms versus
 1430ms) at the price of a fixed prefix/flush/suffix overhead per utterance.
-It pays off above roughly 4-5 seconds of speech. Removing the fixed cost means
-variable-size appends instead of one padded chunk size.
+It pays off above roughly 4-5 seconds of speech.
+
+Leftover audio is prefilled at its real size (decomposed into 50/25/10/5/2/1
+token chunks) rather than padded up to a whole chunk. That helps short
+utterances (2s: 2400ms versus 2635ms padded) and hurts longer ones (5s: 3719ms
+versus 3261ms padded), because a decomposed remainder costs several prefill
+calls instead of one and each call carries fixed dispatch overhead. Averaged
+over both, one-shot prefill is still ahead on this file (2808ms).
+
+The remaining idea worth testing is prefilling on a timer during speech, so
+whole 50-token chunks are consumed as they complete and the flush is at most
+one small chunk. That keeps the call count near the one-shot count while still
+hiding prefill behind arriving audio.
 
 ## Implementation Status
 
