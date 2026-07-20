@@ -515,12 +515,23 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   # several times realtime, so this keeps up with arriving audio.
   defp stream_audio_into_cache(state, frame) do
     if incremental?(state) and state.runtime do
+      # The utterance opens with the candidate window that triggered speech
+      # detection, so the first append has to carry that audio too or the
+      # transcript loses the start of the utterance.
+      pending =
+        if state.utterance_cache do
+          frame
+        else
+          buffered = state.utterance_samples |> Enum.drop(1) |> Enum.reverse() |> Enum.concat()
+          buffered ++ frame
+        end
+
       state = ensure_utterance_cache(state)
 
       %{
         state
-        | utterance_cache: state.runtime_module.append_audio(state.utterance_cache, frame),
-          utterance_cached_samples: state.utterance_cached_samples + length(frame)
+        | utterance_cache: state.runtime_module.append_audio(state.utterance_cache, pending),
+          utterance_cached_samples: state.utterance_cached_samples + length(pending)
       }
     else
       state
