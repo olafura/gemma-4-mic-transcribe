@@ -24,6 +24,16 @@ defmodule Gemma4MicTranscribe.AudioTest do
     assert Enum.map(windows, &{&1.start_frame, &1.end_frame}) == [{0, 4}, {2, 6}]
   end
 
+  test "stream_sample_chunks emits timestamped chunks" do
+    chunks = Audio.stream_sample_chunks(Enum.to_list(0..4), 10, 200.0) |> Enum.to_list()
+
+    assert chunks == [
+             {[0, 1], 0.0},
+             {[2, 3], 200.0},
+             {[4], 400.0}
+           ]
+  end
+
   test "frames_to_timestamp formats minute and fractional seconds" do
     assert Audio.frames_to_timestamp(100, 10) == "00:10.0"
     assert Audio.frames_to_timestamp(650, 10) == "01:05.0"

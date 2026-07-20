@@ -57,6 +57,25 @@ defmodule Gemma4MicTranscribe.Audio do
     |> stream_windows_from_samples(sample_rate, window_seconds, stride_seconds)
   end
 
+  def stream_sample_chunks(samples, sample_rate, chunk_ms) do
+    validate_positive!(sample_rate, "sample_rate")
+    validate_positive!(chunk_ms, "chunk_ms")
+
+    chunk_frames = max(1, round(sample_rate * chunk_ms / 1000))
+
+    samples = Enum.to_list(samples)
+
+    Stream.unfold({samples, 0}, fn
+      {[], _start_frame} ->
+        nil
+
+      {remaining, start_frame} ->
+        {chunk, rest} = Enum.split(remaining, chunk_frames)
+        timestamp_ms = start_frame * 1000 / sample_rate
+        {{chunk, timestamp_ms}, {rest, start_frame + length(chunk)}}
+    end)
+  end
+
   def read_wav_samples!(path, target_sample_rate) do
     path
     |> File.read!()

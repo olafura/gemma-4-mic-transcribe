@@ -70,6 +70,49 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert config.speech_max_zero_crossing_rate == 0.25
   end
 
+  test "parses streaming controls" do
+    assert {:ok, %RunConfig{} = config} =
+             CLI.parse([
+               "--stream-wav",
+               "--output",
+               "jsonl",
+               "--chunk-ms",
+               "50",
+               "--speech-start-ms",
+               "80",
+               "--speech-end-silence-ms",
+               "300",
+               "--min-utterance-ms",
+               "200",
+               "--max-utterance-ms",
+               "5000",
+               "--partial-interval-ms",
+               "750",
+               "--no-partials",
+               "--tts-text",
+               "hello",
+               "--tts-timestamp-ms",
+               "1200"
+             ])
+
+    assert config.stream_wav
+    assert config.output == "jsonl"
+    assert config.chunk_ms == 50.0
+    assert config.speech_start_ms == 80.0
+    assert config.speech_end_silence_ms == 300.0
+    assert config.min_utterance_ms == 200.0
+    assert config.max_utterance_ms == 5000.0
+    assert config.partial_interval_ms == 750.0
+    refute config.partials
+    assert config.tts_text == "hello"
+    assert config.tts_timestamp_ms == 1200.0
+  end
+
+  test "validates output format" do
+    assert {:error, message} = CLI.parse(["--output", "xml"])
+    assert message =~ "--output"
+  end
+
   test "parses explicit Torchx CUDA backend" do
     assert {:ok, %RunConfig{} = config} = CLI.parse(["--backend", "torchx:cuda"])
     assert config.backend == "torchx:cuda"

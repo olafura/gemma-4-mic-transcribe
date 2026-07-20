@@ -6,6 +6,7 @@ defmodule Gemma4MicTranscribe.CLI do
   alias Gemma4MicTranscribe.Audio
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.ModelCatalog
+  alias Gemma4MicTranscribe.StreamingSession
   alias Gemma4MicTranscribe.Transcriber
 
   defmodule RunConfig do
@@ -13,6 +14,9 @@ defmodule Gemma4MicTranscribe.CLI do
     defstruct wav: nil,
               skip_windows: 0,
               max_windows: nil,
+              stream_wav: false,
+              output: "text",
+              chunk_ms: 100.0,
               system_message: nil,
               system_message_source: :none,
               prompt: Config.default_prompt(),
@@ -28,6 +32,14 @@ defmodule Gemma4MicTranscribe.CLI do
               speech_threshold: Config.speech_threshold(),
               speech_min_active_ratio: Config.speech_min_active_ratio(),
               speech_max_zero_crossing_rate: Config.speech_max_zero_crossing_rate(),
+              speech_start_ms: 120.0,
+              speech_end_silence_ms: 500.0,
+              min_utterance_ms: 350.0,
+              max_utterance_ms: 8_000.0,
+              partial_interval_ms: 1_000.0,
+              partials: true,
+              tts_text: nil,
+              tts_timestamp_ms: 0.0,
               debug: false,
               debug_top_k: 0
   end
@@ -38,6 +50,9 @@ defmodule Gemma4MicTranscribe.CLI do
     wav: :string,
     skip_windows: :integer,
     max_windows: :integer,
+    stream_wav: :boolean,
+    output: :string,
+    chunk_ms: :float,
     system_message: :string,
     system_message_file: :string,
     prompt: :string,
@@ -53,6 +68,14 @@ defmodule Gemma4MicTranscribe.CLI do
     speech_threshold: :float,
     speech_min_active_ratio: :float,
     speech_max_zero_crossing_rate: :float,
+    speech_start_ms: :float,
+    speech_end_silence_ms: :float,
+    min_utterance_ms: :float,
+    max_utterance_ms: :float,
+    partial_interval_ms: :float,
+    partials: :boolean,
+    tts_text: :string,
+    tts_timestamp_ms: :float,
     debug: :boolean,
     debug_top_k: :integer
   ]
@@ -129,6 +152,87 @@ defmodule Gemma4MicTranscribe.CLI do
         "system_message_sha256=#{inspect(system_message_hash(config.system_message))}"
     end)
 
+    if config.stream_wav do
+      run_stream_wav(config, opts)
+    else
+      run_windowed_wav(config, opts)
+    end
+  end
+
+  defp validate(opts) do
+    config = %RunConfig{
+      wav: Keyword.get(opts, :wav),
+      skip_windows: Keyword.get(opts, :skip_windows, 0),
+      max_windows: Keyword.get(opts, :max_windows),
+      stream_wav: Keyword.get(opts, :stream_wav, false),
+      output: Keyword.get(opts, :output, "text"),
+      chunk_ms: Keyword.get(opts, :chunk_ms, 100.0),
+      system_message: Keyword.get(opts, :system_message),
+      prompt: Keyword.get(opts, :prompt, Config.default_prompt()),
+      window_seconds: Keyword.get(opts, :window_seconds, 5.0),
+      stride_seconds: Keyword.get(opts, :stride_seconds, 2.5),
+      sample_rate: Keyword.get(opts, :sample_rate, 16_000),
+      request_timeout_seconds:
+        Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
+      model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
+      max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
+      backend: Keyword.get(opts, :backend, Config.backend()),
+      speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
+      min_speech_seconds: Keyword.get(opts, :min_speech_seconds, Config.min_speech_seconds()),
+      speech_threshold: Keyword.get(opts, :speech_threshold, Config.speech_threshold()),
+      speech_min_active_ratio:
+        Keyword.get(opts, :speech_min_active_ratio, Config.speech_min_active_ratio()),
+      speech_max_zero_crossing_rate:
+        Keyword.get(
+          opts,
+          :speech_max_zero_crossing_rate,
+          Config.speech_max_zero_crossing_rate()
+        ),
+      speech_start_ms: Keyword.get(opts, :speech_start_ms, 120.0),
+      speech_end_silence_ms: Keyword.get(opts, :speech_end_silence_ms, 500.0),
+      min_utterance_ms: Keyword.get(opts, :min_utterance_ms, 350.0),
+      max_utterance_ms: Keyword.get(opts, :max_utterance_ms, 8_000.0),
+      partial_interval_ms: Keyword.get(opts, :partial_interval_ms, 1_000.0),
+      partials: Keyword.get(opts, :partials, true),
+      tts_text: Keyword.get(opts, :tts_text),
+      tts_timestamp_ms: Keyword.get(opts, :tts_timestamp_ms, 0.0),
+      debug: Keyword.get(opts, :debug, false),
+      debug_top_k: Keyword.get(opts, :debug_top_k, 0)
+    }
+
+    with :ok <- validate_positive(config.window_seconds, "--window-seconds"),
+         :ok <- validate_positive(config.stride_seconds, "--stride-seconds"),
+         :ok <- validate_positive(config.chunk_ms, "--chunk-ms"),
+         :ok <- validate_positive(config.sample_rate, "--sample-rate"),
+         :ok <- validate_positive(config.request_timeout_seconds, "--request-timeout-seconds"),
+         :ok <- validate_positive(config.max_response_tokens, "--max-response-tokens"),
+         :ok <- validate_positive(config.min_speech_seconds, "--min-speech-seconds"),
+         :ok <- validate_positive(config.speech_threshold, "--speech-threshold"),
+         :ok <- validate_positive(config.speech_start_ms, "--speech-start-ms"),
+         :ok <- validate_positive(config.speech_end_silence_ms, "--speech-end-silence-ms"),
+         :ok <- validate_positive(config.min_utterance_ms, "--min-utterance-ms"),
+         :ok <- validate_positive(config.max_utterance_ms, "--max-utterance-ms"),
+         :ok <- validate_positive(config.partial_interval_ms, "--partial-interval-ms"),
+         :ok <- validate_ratio(config.speech_min_active_ratio, "--speech-min-active-ratio"),
+         :ok <-
+           validate_ratio(
+             config.speech_max_zero_crossing_rate,
+             "--speech-max-zero-crossing-rate"
+           ),
+         :ok <- validate_non_negative(config.skip_windows, "--skip-windows"),
+         :ok <- validate_non_negative_float(config.tts_timestamp_ms, "--tts-timestamp-ms"),
+         :ok <- validate_optional_positive(config.max_windows, "--max-windows"),
+         :ok <- validate_non_negative(config.debug_top_k, "--debug-top-k"),
+         :ok <- validate_output(config.output),
+         {:ok, system_message, system_message_source} <-
+           read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
+         :ok <- validate_wav(config.wav) do
+      {:ok,
+       %{config | system_message: system_message, system_message_source: system_message_source}}
+    end
+  end
+
+  defp run_windowed_wav(config, opts) do
     with {:ok, runtime_module} <- runtime_module(config, opts),
          {:ok, windows} <- wav_windows(config),
          {:ok, results} <-
@@ -157,58 +261,105 @@ defmodule Gemma4MicTranscribe.CLI do
     end
   end
 
-  defp validate(opts) do
-    config = %RunConfig{
-      wav: Keyword.get(opts, :wav),
-      skip_windows: Keyword.get(opts, :skip_windows, 0),
-      max_windows: Keyword.get(opts, :max_windows),
-      system_message: Keyword.get(opts, :system_message),
-      prompt: Keyword.get(opts, :prompt, Config.default_prompt()),
-      window_seconds: Keyword.get(opts, :window_seconds, 5.0),
-      stride_seconds: Keyword.get(opts, :stride_seconds, 2.5),
-      sample_rate: Keyword.get(opts, :sample_rate, 16_000),
-      request_timeout_seconds:
-        Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
-      model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
-      max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
-      backend: Keyword.get(opts, :backend, Config.backend()),
-      speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
-      min_speech_seconds: Keyword.get(opts, :min_speech_seconds, Config.min_speech_seconds()),
-      speech_threshold: Keyword.get(opts, :speech_threshold, Config.speech_threshold()),
-      speech_min_active_ratio:
-        Keyword.get(opts, :speech_min_active_ratio, Config.speech_min_active_ratio()),
-      speech_max_zero_crossing_rate:
-        Keyword.get(
-          opts,
-          :speech_max_zero_crossing_rate,
-          Config.speech_max_zero_crossing_rate()
-        ),
-      debug: Keyword.get(opts, :debug, false),
-      debug_top_k: Keyword.get(opts, :debug_top_k, 0)
-    }
+  defp run_stream_wav(config, opts) do
+    with {:ok, runtime_module} <- runtime_module(config, opts),
+         {:ok, session} <-
+           StreamingSession.start_link(streaming_session_opts(config, runtime_module)) do
+      event_sink = Keyword.get(opts, :event_sink, &print_stream_event(config, &1))
 
-    with :ok <- validate_positive(config.window_seconds, "--window-seconds"),
-         :ok <- validate_positive(config.stride_seconds, "--stride-seconds"),
-         :ok <- validate_positive(config.sample_rate, "--sample-rate"),
-         :ok <- validate_positive(config.request_timeout_seconds, "--request-timeout-seconds"),
-         :ok <- validate_positive(config.max_response_tokens, "--max-response-tokens"),
-         :ok <- validate_positive(config.min_speech_seconds, "--min-speech-seconds"),
-         :ok <- validate_positive(config.speech_threshold, "--speech-threshold"),
-         :ok <- validate_ratio(config.speech_min_active_ratio, "--speech-min-active-ratio"),
-         :ok <-
-           validate_ratio(
-             config.speech_max_zero_crossing_rate,
-             "--speech-max-zero-crossing-rate"
-           ),
-         :ok <- validate_non_negative(config.skip_windows, "--skip-windows"),
-         :ok <- validate_optional_positive(config.max_windows, "--max-windows"),
-         :ok <- validate_non_negative(config.debug_top_k, "--debug-top-k"),
-         {:ok, system_message, system_message_source} <-
-           read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
-         :ok <- validate_wav(config.wav) do
-      {:ok,
-       %{config | system_message: system_message, system_message_source: system_message_source}}
+      try do
+        counts =
+          %{finals: 0, errors: 0}
+          |> emit_stream_events(maybe_push_tts(session, config), event_sink)
+          |> push_streaming_wav(session, config, event_sink)
+          |> emit_stream_events(flush_streaming_wav(session), event_sink)
+
+        cond do
+          counts.errors > 0 -> 1
+          counts.finals > 0 -> 0
+          true -> 3
+        end
+      after
+        if Process.alive?(session), do: GenServer.stop(session)
+      end
+    else
+      {:error, reason} ->
+        IO.puts(:stderr, "error: #{format_reason(reason)}")
+        1
     end
+  end
+
+  defp streaming_session_opts(config, runtime_module) do
+    [
+      runtime_module: runtime_module,
+      model_name: config.model_name,
+      backend: config.backend,
+      max_response_tokens: config.max_response_tokens,
+      prompt: config.prompt,
+      system_message: config.system_message,
+      request_timeout_seconds: config.request_timeout_seconds,
+      sample_rate: config.sample_rate,
+      speech_threshold: config.speech_threshold,
+      speech_min_active_ratio: config.speech_min_active_ratio,
+      speech_max_zero_crossing_rate: config.speech_max_zero_crossing_rate,
+      speech_start_ms: config.speech_start_ms,
+      speech_end_silence_ms: config.speech_end_silence_ms,
+      min_utterance_ms: config.min_utterance_ms,
+      max_utterance_ms: config.max_utterance_ms,
+      partial_interval_ms: config.partial_interval_ms,
+      partials: config.partials,
+      debug: config.debug,
+      debug_top_k: config.debug_top_k
+    ]
+  end
+
+  defp maybe_push_tts(_session, %RunConfig{tts_text: nil}), do: []
+
+  defp maybe_push_tts(session, %RunConfig{} = config) do
+    case StreamingSession.push_tts(session, config.tts_text, config.tts_timestamp_ms) do
+      {:ok, events} -> events
+    end
+  end
+
+  defp push_streaming_wav(counts, session, config, event_sink) do
+    config.wav
+    |> Audio.read_wav_samples!(config.sample_rate)
+    |> Audio.stream_sample_chunks(config.sample_rate, config.chunk_ms)
+    |> Enum.reduce(counts, fn {samples, timestamp_ms}, counts ->
+      case StreamingSession.push_audio(session, samples, timestamp_ms) do
+        {:ok, events} -> emit_stream_events(counts, events, event_sink)
+      end
+    end)
+  rescue
+    exception ->
+      emit_stream_events(
+        counts,
+        [%{type: "error", reason: Exception.message(exception), send_to_llm: false}],
+        event_sink
+      )
+  end
+
+  defp flush_streaming_wav(session) do
+    case StreamingSession.flush(session) do
+      {:ok, events} -> events
+    end
+  end
+
+  defp emit_stream_events(counts, events, event_sink) do
+    Enum.reduce(events, counts, fn event, counts ->
+      event_sink.(event)
+
+      cond do
+        event[:type] == "final" and event[:send_to_llm] ->
+          %{counts | finals: counts.finals + 1}
+
+        event[:type] == "error" ->
+          %{counts | errors: counts.errors + 1}
+
+        true ->
+          counts
+      end
+    end)
   end
 
   defp wav_windows(config) do
@@ -259,11 +410,17 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_positive(_value, name), do: {:error, "#{name} must be positive"}
   defp validate_non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
   defp validate_non_negative(_value, name), do: {:error, "#{name} must be zero or positive"}
+  defp validate_non_negative_float(value, _name) when is_number(value) and value >= 0.0, do: :ok
+
+  defp validate_non_negative_float(_value, name),
+    do: {:error, "#{name} must be zero or positive"}
 
   defp validate_ratio(value, _name) when is_number(value) and value >= 0.0 and value <= 1.0,
     do: :ok
 
   defp validate_ratio(_value, name), do: {:error, "#{name} must be between 0 and 1"}
+  defp validate_output(output) when output in ["text", "jsonl"], do: :ok
+  defp validate_output(_output), do: {:error, "--output must be text or jsonl"}
   defp validate_optional_positive(nil, _name), do: :ok
   defp validate_optional_positive(value, _name) when is_integer(value) and value > 0, do: :ok
   defp validate_optional_positive(_value, name), do: {:error, "#{name} must be positive"}
@@ -298,6 +455,31 @@ defmodule Gemma4MicTranscribe.CLI do
     end
   end
 
+  defp print_stream_event(%RunConfig{output: "jsonl"}, event) do
+    IO.puts(StreamingSession.json_event!(event))
+  end
+
+  defp print_stream_event(%RunConfig{output: "text"}, %{type: "final"} = event) do
+    start = ms_to_timestamp(event.start_ms)
+    finish = ms_to_timestamp(event.end_ms)
+    IO.puts("[#{start}-#{finish}] #{event.text}")
+  end
+
+  defp print_stream_event(%RunConfig{output: "text"}, _event), do: :ok
+
+  defp ms_to_timestamp(ms) do
+    total_seconds = ms / 1000
+    minutes = trunc(total_seconds / 60)
+    remaining = total_seconds - minutes * 60
+
+    seconds_text =
+      :io_lib.format("~.1f", [remaining])
+      |> IO.iodata_to_binary()
+      |> String.pad_leading(4, "0")
+
+    String.pad_leading(Integer.to_string(minutes), 2, "0") <> ":" <> seconds_text
+  end
+
   defp configure_logger(%RunConfig{debug: true}) do
     Logger.configure(level: :debug)
     Logger.debug("cli: debug logging enabled")
@@ -328,6 +510,9 @@ defmodule Gemma4MicTranscribe.CLI do
       --wav PATH                         Read PCM WAV audio from a file
       --skip-windows INT                 Skip leading audio windows
       --max-windows INT                  Stop after N selected rolling audio windows, not audio tokens
+      --stream-wav                       Process WAV audio as timed streaming chunks and emit utterance events
+      --output text|jsonl                Output format for stream events, default text
+      --chunk-ms FLOAT                   Streaming WAV chunk duration, default 100.0
       --system-message TEXT              System instruction for every window
       --system-message-file PATH         Read system instruction from a file
       --prompt TEXT                      User prompt paired with every audio window
@@ -345,6 +530,14 @@ defmodule Gemma4MicTranscribe.CLI do
       --speech-min-active-ratio FLOAT   Required active-frame ratio per window, default 0.2
       --speech-max-zero-crossing-rate FLOAT
                                         Reject very noisy windows above this zero-crossing ratio, default 0.35
+      --speech-start-ms FLOAT            Active speech needed to start an utterance, default 120
+      --speech-end-silence-ms FLOAT      Silence needed to commit an utterance, default 500
+      --min-utterance-ms FLOAT           Suppress shorter utterances, default 350
+      --max-utterance-ms FLOAT           Force-commit long utterances, default 8000
+      --partial-interval-ms FLOAT        Minimum time between partial transcripts, default 1000
+      --no-partials                      Disable unstable partial transcript events
+      --tts-text TEXT                    Recent TTS text to suppress as echo in stream mode
+      --tts-timestamp-ms FLOAT           Timestamp for --tts-text, default 0
       --debug                            Emit progress logs to stderr
       --debug-top-k INT                  Log top prefill token candidates after suppression, default 0
     """
