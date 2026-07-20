@@ -696,17 +696,25 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert message =~ xla_extension
   end
 
-  test "ROCm preflight adds gfx1151 XLA autotune workaround" do
-    assert RocmPreflight.runtime_workaround_flags(["gfx1151"], nil) ==
-             {"--xla_gpu_autotune_level=0", true}
+  test "ROCm preflight adds gfx1151 XLA workarounds" do
+    all_flags =
+      "--xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= " <>
+        "--xla_gpu_enable_triton_gemm=false"
+
+    assert RocmPreflight.runtime_workaround_flags(["gfx1151"], nil) == {all_flags, true}
 
     assert RocmPreflight.runtime_workaround_flags(["gfx1151"], "--xla_dump_to=/tmp/xla") ==
-             {"--xla_dump_to=/tmp/xla --xla_gpu_autotune_level=0", true}
+             {"--xla_dump_to=/tmp/xla " <> all_flags, true}
   end
 
   test "ROCm preflight preserves explicit XLA autotune settings" do
-    assert RocmPreflight.runtime_workaround_flags(["gfx1151"], "--xla_gpu_autotune_level=2") ==
-             {"--xla_gpu_autotune_level=2", false}
+    assert RocmPreflight.runtime_workaround_flags(
+             ["gfx1151"],
+             "--xla_gpu_autotune_level=2 --xla_gpu_enable_command_buffer=FUSION " <>
+               "--xla_gpu_enable_triton_gemm=true"
+           ) ==
+             {"--xla_gpu_autotune_level=2 --xla_gpu_enable_command_buffer=FUSION " <>
+                "--xla_gpu_enable_triton_gemm=true", false}
 
     assert RocmPreflight.runtime_workaround_flags(["gfx1100"], nil) == {nil, false}
   end

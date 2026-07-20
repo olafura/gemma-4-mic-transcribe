@@ -83,9 +83,19 @@ if [[ "$backend" == "exla:rocm" ]]; then
 
   if [[ -n "$rocm_agent_enumerator" ]]; then
     rocm_agents="$("$rocm_agent_enumerator" 2>/dev/null || true)"
-    if [[ "$rocm_agents" == *gfx1151* && "${XLA_FLAGS:-}" != *"--xla_gpu_autotune_level"* ]]; then
-      export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_autotune_level=0"
-      echo "warning: applied ROCm gfx1151 XLA workaround before VM startup: --xla_gpu_autotune_level=0" >&2
+    if [[ "$rocm_agents" == *gfx1151* ]]; then
+      gfx1151_flags=(
+        "--xla_gpu_autotune_level=0"
+        "--xla_gpu_enable_command_buffer="
+        "--xla_gpu_enable_triton_gemm=false"
+      )
+      for gfx1151_flag in "${gfx1151_flags[@]}"; do
+        gfx1151_flag_name="${gfx1151_flag%%=*}"
+        if [[ "${XLA_FLAGS:-}" != *"$gfx1151_flag_name"* ]]; then
+          export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }$gfx1151_flag"
+          echo "warning: applied ROCm gfx1151 XLA workaround before VM startup: $gfx1151_flag" >&2
+        fi
+      done
     fi
   fi
 fi

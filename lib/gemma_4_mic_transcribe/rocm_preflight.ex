@@ -2,8 +2,18 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
   @moduledoc false
 
   @gfx_regex ~r/\bgfx[0-9a-f]+\b/
-  @gfx1151_autotune_flag "--xla_gpu_autotune_level=0"
-  @gfx1151_autotune_flag_name "--xla_gpu_autotune_level"
+
+  # gfx1151 workarounds, applied only when the flag is not already configured:
+  # - autotuning crashes while loading HIP code objects (rocm-jax issue #234)
+  # - HIP graph capture (XLA "command buffers") segfaults recursively inside
+  #   libamdhip64 when the first fused executable runs, so it is disabled
+  # - triton GEMM is not validated on RDNA3.5; force the rocBLAS path
+  @gfx1151_flags [
+    {"--xla_gpu_autotune_level", "--xla_gpu_autotune_level=0"},
+    {"--xla_gpu_enable_command_buffer", "--xla_gpu_enable_command_buffer="},
+    {"--xla_gpu_enable_triton_gemm", "--xla_gpu_enable_triton_gemm=false"}
+  ]
+
   @default_min_free_bytes 24 * 1024 * 1024 * 1024
 
   def check(opts \\ []) do
@@ -93,22 +103,27 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
   end
 
   def runtime_workaround_flags(gpu_targets, xla_flags \\ nil) when is_list(gpu_targets) do
-    flags = String.trim(xla_flags || "")
+    if "gfx1151" in gpu_targets do
+      flags = String.trim(xla_flags || "")
 
-    cond do
-      "gfx1151" not in gpu_targets ->
-        {xla_flags, false}
+      missing =
+        @gfx1151_flags
+        |> Enum.reject(fn {name, _flag} -> String.contains?(flags, name) end)
+        |> Enum.map(fn {_name, flag} -> flag end)
 
-      xla_autotune_configured?(flags) ->
-        {xla_flags, false}
+      case missing do
+        [] ->
+          {xla_flags, false}
 
-      flags == "" ->
-        {@gfx1151_autotune_flag, true}
-
-      true ->
-        {"#{flags} #{@gfx1151_autotune_flag}", true}
+        missing ->
+          {Enum.join(Enum.reject([flags | missing], &(&1 == "")), " "), true}
+      end
+    else
+      {xla_flags, false}
     end
   end
+
+  def gfx1151_flags, do: Enum.map(@gfx1151_flags, fn {_name, flag} -> flag end)
 
   def memory_info(opts \\ []) do
     with {:ok, output} <- rocm_smi_memory_output(opts) do
@@ -275,10 +290,6 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
     |> List.flatten()
     |> Enum.uniq()
     |> Enum.sort()
-  end
-
-  defp xla_autotune_configured?(flags) do
-    String.contains?(flags, @gfx1151_autotune_flag_name)
   end
 
   defp extract_json_object(output) do
