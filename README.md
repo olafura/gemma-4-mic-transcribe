@@ -125,6 +125,11 @@ Useful options:
 --skip-windows INT             skip leading windows
 --max-windows INT              stop after N selected windows
 --stream-wav                   process WAV audio as timed streaming chunks
+--realtime                     pace chunks to the wall clock (preloads the model first) and
+                               annotate events with lag_ms; prints a lag summary to stderr
+--no-repeat-ngram INT          ban repeating generated n-grams of this size, default 4, 0 disables
+--partial-max-response-tokens INT
+                               token cap for partial transcripts, default 16
 --output text|jsonl            output format for streaming events, default text
 --chunk-ms FLOAT               streaming WAV chunk duration, default 100.0
 --system-message TEXT          system instruction for every window
