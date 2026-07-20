@@ -320,31 +320,30 @@ defmodule Gemma4MicTranscribe.CLI do
       clock_start_ms = System.monotonic_time(:millisecond)
 
       event_sink = fn event ->
-        event = annotate_lag(event, config, Process.get(:clock_start_ms, clock_start_ms))
+        event = annotate_lag(event, config, clock_start_ms)
         base_sink.(event)
         event
       end
 
       try do
-        counts =
-          Enum.reduce(1..config.repeat, %{finals: 0, errors: 0, lags: %{}}, fn pass, counts ->
-            # Each pass restarts the audio clock, so lag stays comparable and
-            # repeated passes show whether the per-utterance cost is stable
-            # once the model is loaded and every shape is compiled.
-            pass_start_ms = System.monotonic_time(:millisecond)
-            Process.put(:clock_start_ms, pass_start_ms)
-
+        # The session keeps one audio timeline across passes, so later passes
+        # continue it rather than restarting; resetting only the wall clock
+        # would make lag negative.
+        {counts, _offset} =
+          Enum.reduce(1..config.repeat, {%{finals: 0, errors: 0, lags: %{}}, 0.0}, fn pass,
+                                                                                      {counts,
+                                                                                       offset} ->
             counts =
               counts
               |> emit_stream_events(maybe_push_tts(session, config), event_sink)
-              |> push_streaming_wav(session, config, event_sink, pass_start_ms)
+              |> push_streaming_wav(session, config, event_sink, clock_start_ms, offset)
               |> emit_stream_events(flush_streaming_wav(session), event_sink)
 
             if config.repeat > 1 do
               IO.puts(:stderr, "bench: pass #{pass}/#{config.repeat} complete")
             end
 
-            counts
+            {counts, offset + wav_duration_ms(config)}
           end)
 
         print_lag_summary(config, counts)
@@ -458,11 +457,12 @@ defmodule Gemma4MicTranscribe.CLI do
     end
   end
 
-  defp push_streaming_wav(counts, session, config, event_sink, clock_start_ms) do
+  defp push_streaming_wav(counts, session, config, event_sink, clock_start_ms, offset_ms) do
     config.wav
     |> Audio.read_wav_samples!(config.sample_rate)
     |> Audio.stream_sample_chunks(config.sample_rate, config.chunk_ms)
-    |> Enum.reduce(counts, fn {samples, timestamp_ms}, counts ->
+    |> Enum.reduce(counts, fn {samples, chunk_ms}, counts ->
+      timestamp_ms = chunk_ms + offset_ms
       maybe_pace(config, clock_start_ms, timestamp_ms)
 
       case StreamingSession.push_audio(session, samples, timestamp_ms) do
@@ -476,6 +476,10 @@ defmodule Gemma4MicTranscribe.CLI do
         [%{type: "error", reason: Exception.message(exception), send_to_llm: false}],
         event_sink
       )
+  end
+
+  defp wav_duration_ms(config) do
+    length(Audio.read_wav_samples!(config.wav, config.sample_rate)) * 1000 / config.sample_rate
   end
 
   defp flush_streaming_wav(session) do
