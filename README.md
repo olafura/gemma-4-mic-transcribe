@@ -15,6 +15,23 @@ Gemma4UnifiedForConditionalGeneration path. Generation runs one prefill pass ove
 the prompt and audio tokens, then uses a KV-cached greedy decode loop so each
 subsequent decode step processes one generated token against the cached context.
 
+On EXLA backends the whole forward pass is JIT-compiled into one fused XLA
+executable per input shape instead of dispatching each Nx op eagerly. Input
+shapes are kept static so executables compile once and are then reused:
+
+- audio windows/utterances are padded to fixed audio-token buckets,
+- KV cache lengths are rounded up to a fixed step (512), so all buckets share
+  one compiled decode step,
+- prefill computes logits only for the final prompt position instead of the
+  whole sequence,
+- parameters load as bf16 by default (`--param-type`), halving the memory
+  bandwidth per decoded token versus f32.
+
+The first generation per shape pays the XLA compile cost. The CLI and
+streaming sessions warm these executables at startup by generating a couple of
+tokens over silence (disable with `--no-warmup`), so live audio never hits a
+compile stall.
+
 The CLI gates windows with a cheap local speech detector before loading or
 running the model. This is intentionally separate from the Gemma prompt: silent,
 too-short, or high-noise windows are skipped without generation, and empty
@@ -120,6 +137,8 @@ Useful options:
 --max-response-tokens INT      maximum generated tokens, default 512
 --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                Nx/Bumblebee backend label, default torchx
+--param-type bf16|f16|f32      model parameter/compute precision, default bf16
+--no-warmup                    skip startup warmup; JIT compiles on the first real utterance
 --no-speech-gate               disable cheap local speech gating before model generation
 --min-speech-seconds FLOAT     minimum likely speech duration before generation, default 0.25
 --speech-threshold FLOAT       RMS threshold for active audio frames, default 0.01

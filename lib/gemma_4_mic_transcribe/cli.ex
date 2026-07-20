@@ -27,6 +27,8 @@ defmodule Gemma4MicTranscribe.CLI do
               model_name: Config.default_model_name(),
               max_response_tokens: Config.max_response_tokens(),
               backend: Config.backend(),
+              param_type: "bf16",
+              warmup: true,
               speech_gate: Config.speech_gate?(),
               min_speech_seconds: Config.min_speech_seconds(),
               speech_threshold: Config.speech_threshold(),
@@ -63,6 +65,8 @@ defmodule Gemma4MicTranscribe.CLI do
     model_name: :string,
     max_response_tokens: :integer,
     backend: :string,
+    param_type: :string,
+    warmup: :boolean,
     speech_gate: :boolean,
     min_speech_seconds: :float,
     speech_threshold: :float,
@@ -177,6 +181,8 @@ defmodule Gemma4MicTranscribe.CLI do
       model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
       backend: Keyword.get(opts, :backend, Config.backend()),
+      param_type: Keyword.get(opts, :param_type, "bf16"),
+      warmup: Keyword.get(opts, :warmup, true),
       speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
       min_speech_seconds: Keyword.get(opts, :min_speech_seconds, Config.min_speech_seconds()),
       speech_threshold: Keyword.get(opts, :speech_threshold, Config.speech_threshold()),
@@ -223,6 +229,7 @@ defmodule Gemma4MicTranscribe.CLI do
          :ok <- validate_non_negative_float(config.tts_timestamp_ms, "--tts-timestamp-ms"),
          :ok <- validate_optional_positive(config.max_windows, "--max-windows"),
          :ok <- validate_non_negative(config.debug_top_k, "--debug-top-k"),
+         :ok <- validate_param_type(config.param_type),
          :ok <- validate_output(config.output),
          {:ok, system_message, system_message_source} <-
            read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
@@ -239,6 +246,8 @@ defmodule Gemma4MicTranscribe.CLI do
            Transcriber.transcribe_windows(windows,
              model_name: config.model_name,
              backend: config.backend,
+             param_type: config.param_type,
+             warmup: config.warmup,
              max_response_tokens: config.max_response_tokens,
              prompt: config.prompt,
              system_message: config.system_message,
@@ -294,6 +303,8 @@ defmodule Gemma4MicTranscribe.CLI do
       runtime_module: runtime_module,
       model_name: config.model_name,
       backend: config.backend,
+      param_type: config.param_type,
+      warmup: config.warmup,
       max_response_tokens: config.max_response_tokens,
       prompt: config.prompt,
       system_message: config.system_message,
@@ -419,6 +430,8 @@ defmodule Gemma4MicTranscribe.CLI do
     do: :ok
 
   defp validate_ratio(_value, name), do: {:error, "#{name} must be between 0 and 1"}
+  defp validate_param_type(param_type) when param_type in ["bf16", "f16", "f32"], do: :ok
+  defp validate_param_type(_param_type), do: {:error, "--param-type must be bf16, f16, or f32"}
   defp validate_output(output) when output in ["text", "jsonl"], do: :ok
   defp validate_output(_output), do: {:error, "--output must be text or jsonl"}
   defp validate_optional_positive(nil, _name), do: :ok
@@ -524,6 +537,8 @@ defmodule Gemma4MicTranscribe.CLI do
       --max-response-tokens INT          Maximum generated text tokens per window, default 512
       --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                         Nx/Bumblebee backend label, default torchx
+      --param-type bf16|f16|f32          Model parameter/compute precision, default bf16
+      --no-warmup                        Skip startup generation warmup (JIT compiles on first utterance instead)
       --no-speech-gate                  Disable cheap local speech gating before model generation
       --min-speech-seconds FLOAT        Minimum likely speech duration before generation, default 0.25
       --speech-threshold FLOAT          RMS threshold for active audio frames, default 0.01
