@@ -302,6 +302,25 @@ gRPC, and proxied traffic decode fully.
 
 ## Latency budget
 
+Streaming ASR services report two separate numbers, and mixing them hides which
+one is slow:
+
+- **EOT latency** — speaker stops to end-of-turn event. Ours is
+  `--speech-end-silence-ms`, default 500 ms.
+- **Transcript latency** — audio available to transcript emitted, excluding the
+  endpoint wait. This is transcription speed.
+
+`--realtime` reports both for finals (`bench: final ... eot_ms=... transcript_ms
+...`). Measured on `journal1.wav` with `--no-partials`: EOT 500 ms, transcript
+1.5-3.0 s, total 2.0-3.5 s.
+
+For reference, Deepgram publishes 100-500 ms EOT and 150-300 ms transcript
+latency for their purpose-built streaming models. Our endpointing is in that
+range; transcription is roughly 5-10x slower, which is the cost of a 12B
+multimodal LLM generating tokens autoregressively rather than a dedicated
+streaming recognizer. Transcript latency here scales with generated tokens
+(~90 ms each), so `--max-response-tokens` bounds the worst case.
+
 Measured per final transcript on `journal1.wav` with `--realtime --no-partials`
 (steady state; model load and device transfer excluded, since they are startup
 costs):

@@ -361,7 +361,8 @@ defmodule Gemma4MicTranscribe.CLI do
 
   defp record_lag(counts, _event), do: counts
 
-  defp print_lag_summary(%RunConfig{realtime: true}, %{lags: lags}) when map_size(lags) > 0 do
+  defp print_lag_summary(%RunConfig{realtime: true} = config, %{lags: lags})
+       when map_size(lags) > 0 do
     Enum.each(Enum.sort(lags), fn {type, lag_list} ->
       lag_list = Enum.sort(lag_list)
       count = length(lag_list)
@@ -372,6 +373,22 @@ defmodule Gemma4MicTranscribe.CLI do
         "bench: #{type} events=#{count} lag_ms min=#{List.first(lag_list)} " <>
           "avg=#{avg} max=#{List.last(lag_list)}"
       )
+
+      # A final is held until the endpointer has seen enough silence, so its lag
+      # mixes two independent costs. Reporting them apart keeps transcription
+      # speed comparable across endpointing settings, and matches how streaming
+      # ASR services report latency.
+      if type == "final" do
+        eot = round(config.speech_end_silence_ms)
+        transcript = Enum.map(lag_list, &max(&1 - eot, 0))
+        transcript_avg = round(Enum.sum(transcript) / count)
+
+        IO.puts(
+          :stderr,
+          "bench: #{type} eot_ms=#{eot} transcript_ms min=#{List.first(transcript)} " <>
+            "avg=#{transcript_avg} max=#{List.last(transcript)}"
+        )
+      end
     end)
   end
 
