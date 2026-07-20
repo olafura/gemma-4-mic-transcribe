@@ -891,7 +891,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         %{
           "kernel" =>
             {[{layer_name, "weight_packed"}, {layer_name, "weight_scale"}],
-             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.linear_kernel/1},
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.linear_kernel_bf16/1},
           "packed" =>
             {[{layer_name, "weight_packed"}],
              &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.repack_kernel/1},

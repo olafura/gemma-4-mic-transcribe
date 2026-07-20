@@ -52,6 +52,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.CompressedTensors do
 
   def quant_group_size, do: @quant_group_size
 
+  @doc """
+  Dequantized kernel in bf16.
+
+  Hybrid weights skip the global precision policy because they also carry
+  packed integer params, so the kernel has to pick its own type. bf16 halves
+  the weight traffic against f32 and is what the GPU's matrix cores consume.
+  """
+  def linear_kernel_bf16(sources) do
+    sources |> linear_kernel() |> Nx.as_type({:bf, 16})
+  end
+
   def linear_kernel([packed, scales]) do
     {out_features, packed_cols} = Nx.shape(packed)
     {_out_features, scale_cols} = Nx.shape(scales)
