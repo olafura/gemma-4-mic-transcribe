@@ -16,3 +16,6 @@ __pycache__/
 /vendor/exla/.hex
 /vendor/exla/cache/
 /vendor/exla/hex_metadata.config
+
+# Artifacts
+*.log
