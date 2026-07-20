@@ -88,6 +88,111 @@ __global__ void q4_gemv_kernel(const int32_t *__restrict__ packed,
   }
 }
 
+// Prefill multiplies a whole token sequence. Dequantizing first materialises
+// the bf16 matrix (measured 1.46s for one Gemma prefill), so this kernel
+// unpacks each weight once into registers and reuses it across a tile of
+// tokens, keeping weight traffic proportional to seq / kSeqTile.
+constexpr int kGemmCols = 64;
+constexpr int kSeqTile = 32;
+
+__global__ void q4_gemm_kernel(const int32_t *__restrict__ packed,
+                               const __hip_bfloat16 *__restrict__ scales,
+                               const __hip_bfloat16 *__restrict__ x,
+                               float *__restrict__ out, int k, int n, int seq,
+                               int group_size) {
+  const int col = blockIdx.x * kGemmCols + threadIdx.x;
+  const int seq_base = blockIdx.y * kSeqTile;
+  if (col >= n) return;
+
+  const int words_per_col = k / kNibblesPerWord;
+  const int words_per_group = group_size / kNibblesPerWord;
+
+  float acc[kSeqTile];
+#pragma unroll
+  for (int t = 0; t < kSeqTile; ++t) acc[t] = 0.0f;
+
+  for (int word = 0; word < words_per_col; ++word) {
+    const int32_t packed_word = packed[word * n + col];
+    const float scale =
+        __bfloat162float(scales[(word / words_per_group) * n + col]);
+    const int k_base = word * kNibblesPerWord;
+
+    float weights[kNibblesPerWord];
+#pragma unroll
+    for (int nib = 0; nib < kNibblesPerWord; ++nib) {
+      weights[nib] =
+          static_cast<float>(((packed_word >> (nib * 4)) & 0xF) - 8) * scale;
+    }
+
+#pragma unroll
+    for (int t = 0; t < kSeqTile; ++t) {
+      const int token = seq_base + t;
+      if (token < seq) {
+        const __hip_bfloat16 *row = x + static_cast<size_t>(token) * k + k_base;
+        float sum = 0.0f;
+#pragma unroll
+        for (int nib = 0; nib < kNibblesPerWord; ++nib) {
+          sum += weights[nib] * __bfloat162float(row[nib]);
+        }
+        acc[t] += sum;
+      }
+    }
+  }
+
+  for (int t = 0; t < kSeqTile; ++t) {
+    const int token = seq_base + t;
+    if (token < seq) {
+      out[static_cast<size_t>(token) * n + col] = acc[t];
+    }
+  }
+}
+
+ffi::Error q4_gemm_impl(hipStream_t stream, ffi::AnyBuffer x,
+                        ffi::AnyBuffer packed, ffi::AnyBuffer scales,
+                        int64_t group_size, ffi::Result<ffi::AnyBuffer> out) {
+  auto packed_dims = packed.dimensions();
+  auto x_dims = x.dimensions();
+
+  if (packed_dims.size() != 2 || x_dims.size() != 2) {
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                      "q4_gemm expects packed {k/8, n} and x {seq, k}");
+  }
+
+  const int64_t n = packed_dims[1];
+  const int64_t seq = x_dims[0];
+  const int64_t k = x_dims[1];
+
+  if (packed_dims[0] * kNibblesPerWord != k) {
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                      "q4_gemm packed rows must equal k/8");
+  }
+
+  if (group_size <= 0 || k % group_size != 0 ||
+      group_size % kNibblesPerWord != 0) {
+    return ffi::Error(
+        ffi::ErrorCode::kInvalidArgument,
+        "q4_gemm group_size must divide k and be a multiple of 8");
+  }
+
+  const dim3 blocks(static_cast<uint32_t>((n + kGemmCols - 1) / kGemmCols),
+                    static_cast<uint32_t>((seq + kSeqTile - 1) / kSeqTile));
+
+  hipLaunchKernelGGL(q4_gemm_kernel, blocks, dim3(kGemmCols), 0, stream,
+                     static_cast<const int32_t *>(packed.untyped_data()),
+                     static_cast<const __hip_bfloat16 *>(scales.untyped_data()),
+                     static_cast<const __hip_bfloat16 *>(x.untyped_data()),
+                     static_cast<float *>(out->untyped_data()),
+                     static_cast<int>(k), static_cast<int>(n),
+                     static_cast<int>(seq), static_cast<int>(group_size));
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    return ffi::Error(ffi::ErrorCode::kInternal, hipGetErrorString(err));
+  }
+
+  return ffi::Error::Success();
+}
+
 ffi::Error q4_gemv_impl(hipStream_t stream, ffi::AnyBuffer x,
                         ffi::AnyBuffer packed, ffi::AnyBuffer scales,
                         int64_t group_size, ffi::Result<ffi::AnyBuffer> out) {
@@ -146,3 +251,15 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_q4_gemv_rocm, q4_gemv_impl,
 
 XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), "exla_q4_gemv", "ROCM",
                          exla_q4_gemv_rocm);
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_q4_gemm_rocm, q4_gemm_impl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<hipStream_t>>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Attr<int64_t>("group_size")
+                                  .Ret<ffi::AnyBuffer>());
+
+XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), "exla_q4_gemm", "ROCM",
+                         exla_q4_gemm_rocm);

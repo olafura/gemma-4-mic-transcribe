@@ -41,6 +41,30 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
   end
 
   @doc """
+  Computes `x . dequantize(packed, scales)` for a `{seq, k}` activation matrix.
+
+  Used by prefill. Dequantizing first materialises the whole bf16 matrix, so
+  this keeps the weights packed and lets the kernel reuse each unpacked weight
+  across the token tile.
+  """
+  deftransform matmul(x, packed, scales, opts \\ []) do
+    group_size = Keyword.get(opts, :group_size, 32)
+    {seq, _k} = Nx.shape(x)
+    {words, n} = Nx.shape(packed)
+    _k = words * @nibbles_per_word
+
+    Nx.block(
+      %__MODULE__{group_size: group_size},
+      [x, packed, scales],
+      Nx.template({seq, n}, :f32),
+      fn %__MODULE__{}, x, packed, scales ->
+        Nx.dot(Nx.as_type(x, :f32), dequantize(packed, scales, group_size))
+        |> Nx.reshape({seq, n})
+      end
+    )
+  end
+
+  @doc """
   Dequantizes packed weights to a `{k, n}` f32 matrix.
 
   Used by the prefill path, which multiplies a whole token sequence and so
@@ -111,13 +135,21 @@ defimpl EXLA.CustomCall, for: Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
     with {:bf, 16} <- Nx.type(x),
          {:s, 32} <- Nx.type(packed),
          {:bf, 16} <- Nx.type(scales) do
+      # Decode passes one token as {k}; prefill passes {seq, k}.
+      target =
+        case Nx.rank(x) do
+          1 -> "exla_q4_gemv"
+          2 -> "exla_q4_gemm"
+        end
+
       Logger.info(fn ->
-        "q4_gemv: kernel selected for #{inspect(Nx.shape(packed))} group_size=#{group_size}"
+        "q4_gemv: #{target} selected for #{inspect(Nx.shape(packed))} " <>
+          "x=#{inspect(Nx.shape(x))} group_size=#{group_size}"
       end)
 
       {:ok,
        %EXLA.CustomCall.Spec{
-         call_target_name: "exla_q4_gemv",
+         call_target_name: target,
          attributes: [{"group_size", "#{group_size} : i64"}]
        }}
     else

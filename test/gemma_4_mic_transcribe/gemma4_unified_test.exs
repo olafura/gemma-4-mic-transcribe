@@ -740,10 +740,13 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
       |> Nx.sum(axes: [2])
       |> Nx.bitcast(:s32)
 
+    # bf16 throughout: repack_scales stores bf16 because that is the type the
+    # kernel's FFI signature requires.
     scales =
       Nx.iota({out_features, scale_cols}, type: {:f, 32})
       |> Nx.add(1)
       |> Nx.divide(100)
+      |> Nx.as_type({:bf, 16})
 
     # Reference: existing dequant path, {in_features, out_features}
     reference = CompressedTensors.linear_kernel([packed, scales])
@@ -773,7 +776,11 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
         |> Nx.reshape({in_features, out_features})
       )
 
-    assert Nx.to_number(Nx.reduce_max(Nx.abs(Nx.subtract(dequantized, reference)))) < 1.0e-5
+    # Tolerance is bf16 rounding of the product (~2^-8 relative), not repack error.
+    max_diff = Nx.to_number(Nx.reduce_max(Nx.abs(Nx.subtract(dequantized, reference))))
+    max_value = Nx.to_number(Nx.reduce_max(Nx.abs(reference)))
+
+    assert max_diff / max_value < 0.01
   end
 
   test "banned ngram tokens block completing an already-generated trigram" do

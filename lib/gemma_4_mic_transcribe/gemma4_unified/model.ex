@@ -636,11 +636,15 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       |> Nx.reshape(put_elem(shape, tuple_size(shape) - 1, units))
       |> Nx.as_type(input_type)
     else
-      weights = Q4Gemv.dequantize(packed, scales, group_size)
+      seq = div(Nx.size(input), hidden_size)
 
       input
-      |> Nx.as_type(:f32)
-      |> Nx.dot(weights)
+      |> Nx.reshape({seq, hidden_size})
+      |> Nx.as_type({:bf, 16})
+      |> Q4Gemv.matmul(Nx.as_type(packed, {:s, 32}), Nx.as_type(scales, {:bf, 16}),
+        group_size: group_size
+      )
+      |> Nx.reshape(put_elem(shape, tuple_size(shape) - 1, units))
       |> Nx.as_type(input_type)
     end
   end
