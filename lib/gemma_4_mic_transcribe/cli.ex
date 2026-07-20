@@ -275,7 +275,8 @@ defmodule Gemma4MicTranscribe.CLI do
              model_name: config.model_name,
              backend: config.backend,
              param_type: config.param_type,
-             packed_weights: config.weights == "packed",
+             packed_weights: config.weights in ["packed", "hybrid"],
+             hybrid_weights: config.weights == "hybrid",
              warmup: config.warmup,
              max_response_tokens: config.max_response_tokens,
              no_repeat_ngram_size: config.no_repeat_ngram,
@@ -382,7 +383,8 @@ defmodule Gemma4MicTranscribe.CLI do
       model_name: config.model_name,
       backend: config.backend,
       param_type: config.param_type,
-      packed_weights: config.weights == "packed",
+      packed_weights: config.weights in ["packed", "hybrid"],
+      hybrid_weights: config.weights == "hybrid",
       warmup: config.warmup,
       # Lag numbers are only meaningful against a loaded, warmed model, so
       # realtime mode loads before the audio clock starts.
@@ -530,8 +532,8 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_ratio(_value, name), do: {:error, "#{name} must be between 0 and 1"}
   defp validate_param_type(param_type) when param_type in ["bf16", "f16", "f32"], do: :ok
   defp validate_param_type(_param_type), do: {:error, "--param-type must be bf16, f16, or f32"}
-  defp validate_weights(weights) when weights in ["packed", "bf16"], do: :ok
-  defp validate_weights(_weights), do: {:error, "--weights must be packed or bf16"}
+  defp validate_weights(weights) when weights in ["packed", "bf16", "hybrid"], do: :ok
+  defp validate_weights(_weights), do: {:error, "--weights must be packed, bf16, or hybrid"}
   defp validate_output(output) when output in ["text", "jsonl"], do: :ok
   defp validate_output(_output), do: {:error, "--output must be text or jsonl"}
   defp validate_optional_positive(nil, _name), do: :ok
@@ -640,8 +642,10 @@ defmodule Gemma4MicTranscribe.CLI do
       --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                         Nx/Bumblebee backend label, default torchx
       --param-type bf16|f16|f32          Model parameter/compute precision, default bf16
-      --weights packed|bf16              Keep int4 weights packed (less memory, faster decode) or
-                                        dequantize at load (more memory, faster prefill), default packed
+      --weights packed|bf16|hybrid       packed: int4 only (least memory, fast decode, slow prefill)
+                                        bf16: dequantized only (fast prefill, slower decode)
+                                        hybrid: both, fast prefill and fast decode (~31GB)
+                                        default packed
       --no-warmup                        Skip startup generation warmup (JIT compiles on first utterance instead)
       --no-speech-gate                  Disable cheap local speech gating before model generation
       --min-speech-seconds FLOAT        Minimum likely speech duration before generation, default 0.25

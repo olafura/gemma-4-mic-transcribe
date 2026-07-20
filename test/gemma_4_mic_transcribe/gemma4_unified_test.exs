@@ -553,6 +553,19 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert mapping["embedder.token_embedding"] == "model.language_model.embed_tokens"
   end
 
+  test "hybrid params mapping loads dequantized kernels alongside packed weights" do
+    mapping =
+      Bumblebee.HuggingFace.Transformers.Model.params_mapping(%Model{
+        quantization_config: %{"quant_method" => "compressed-tensors"},
+        packed_linear: true,
+        hybrid_linear: true
+      })
+
+    # Prefill reads "kernel" via rocBLAS; decode reads "packed"/"scales".
+    assert %{"kernel" => {_, _}, "packed" => {_, _}, "scales" => {_, _}} =
+             mapping["decoder.blocks.{n}.self_attention.query"]
+  end
+
   test "compressed-tensors linear kernel unpacks uint4b8 group scales" do
     row_a = List.flatten(List.duplicate([-8, -1, 0, 1, 2, 3, 6, -1], 4))
     row_b = List.flatten(List.duplicate([7, 6, 5, 4, 3, 2, 1, 0], 4))

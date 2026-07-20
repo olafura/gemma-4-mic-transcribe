@@ -48,7 +48,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             cache_type: {:f, 32},
             # false dequantizes int4 weights to bf16 at load: 4x the resident
             # memory, but prefill uses rocBLAS instead of the hand int4 GEMM.
-            packed_linear: true
+            packed_linear: true,
+            # true also loads dequantized bf16 kernels, so prefill can use rocBLAS
+            # matrix cores while decode still reads packed int4
+            hybrid_linear: false
 
   @impl true
   def architectures, do: [:for_conditional_generation]
@@ -606,7 +609,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   # can read 4-bit traffic through the GEMV kernel.
   defp linear(input, units, spec, opts) do
     if quantized?(spec) and not opts[:use_bias] do
-      quantized_dense(input, units, name: opts[:name])
+      quantized_dense(input, units, name: opts[:name], hybrid: spec.hybrid_linear)
     else
       Axon.dense(input, units,
         kernel_initializer: opts[:kernel_initializer],
@@ -635,11 +638,42 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         initializer: :zeros
       )
 
-    Axon.layer(&quantized_dense_impl/4, [input, packed, scales],
-      name: opts[:name],
-      op_name: :gemma4_q4_dense,
-      group_size: group_size
-    )
+    if opts[:hybrid] do
+      kernel =
+        Axon.param(
+          "kernel",
+          fn shape -> {elem(shape, tuple_size(shape) - 1), units} end,
+          type: {:bf, 16},
+          initializer: :zeros
+        )
+
+      Axon.layer(&hybrid_dense_impl/5, [input, packed, scales, kernel],
+        name: opts[:name],
+        op_name: :gemma4_q4_dense,
+        group_size: group_size
+      )
+    else
+      Axon.layer(&quantized_dense_impl/4, [input, packed, scales],
+        name: opts[:name],
+        op_name: :gemma4_q4_dense,
+        group_size: group_size
+      )
+    end
+  end
+
+  # Decode is a GEMV over one token and is memory bound, so it reads packed
+  # int4. Prefill is a GEMM over the whole sequence and is compute bound, so it
+  # uses the dequantized kernel and rocBLAS matrix cores, which beat the hand
+  # int4 GEMM by roughly 4x.
+  defp hybrid_dense_impl(input, packed, scales, kernel, opts) do
+    shape = Nx.shape(input)
+
+    if single_token?(shape) do
+      quantized_dense_impl(input, packed, scales, opts)
+    else
+      input
+      |> Nx.dot(Nx.as_type(kernel, Nx.type(input)))
+    end
   end
 
   # Decode runs one token at a time, which is exactly the GEMV the kernel
@@ -848,6 +882,26 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
     # Weights stay packed: the layer reads int4 directly on decode instead of
     # loading a dequantized bf16 matrix four times the size.
+    defp linear_source_fun(%{
+           quantization_config: %{"quant_method" => "compressed-tensors"},
+           packed_linear: true,
+           hybrid_linear: true
+         }) do
+      fn layer_name ->
+        %{
+          "kernel" =>
+            {[{layer_name, "weight_packed"}, {layer_name, "weight_scale"}],
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.linear_kernel/1},
+          "packed" =>
+            {[{layer_name, "weight_packed"}],
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.repack_kernel/1},
+          "scales" =>
+            {[{layer_name, "weight_scale"}],
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.repack_scales/1}
+        }
+      end
+    end
+
     defp linear_source_fun(%{
            quantization_config: %{"quant_method" => "compressed-tensors"},
            packed_linear: true

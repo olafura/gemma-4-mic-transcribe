@@ -202,6 +202,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
       param_type: Keyword.get(opts, :param_type),
       packed_weights: Keyword.get(opts, :packed_weights, true),
+      hybrid_weights: Keyword.get(opts, :hybrid_weights, false),
       prompt: Keyword.get(opts, :prompt, Config.default_prompt()),
       system_message: Keyword.get(opts, :system_message),
       debug: Keyword.get(opts, :debug, false),

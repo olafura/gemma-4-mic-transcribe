@@ -78,7 +78,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
              Bumblebee.configure(spec,
                logits_last_only: true,
                cache_type: param_type,
-               packed_linear: Keyword.get(opts, :packed_weights, true)
+               packed_linear: Keyword.get(opts, :packed_weights, true),
+               hybrid_linear: Keyword.get(opts, :hybrid_weights, false)
              ),
            {:ok, model_info} <-
              timed_debug(
