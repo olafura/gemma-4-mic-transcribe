@@ -300,6 +300,30 @@ BEAM TLS is implemented in Erlang rather than libssl, so OBI reports HTTPS
 connections at the TCP level without decoding request contents; plain HTTP,
 gRPC, and proxied traffic decode fully.
 
+## Latency budget
+
+Measured per final transcript on `journal1.wav` with `--realtime --no-partials`
+(steady state; model load and device transfer excluded, since they are startup
+costs):
+
+```text
+end-of-speech silence   500 ms   --speech-end-silence-ms
+prefill               ~1100 ms   one pass over the utterance audio
+decode                  90 ms    per generated token
+audio -> tensor         7-25 ms  all WAV reading, resampling and framing
+```
+
+Audio ingestion is under 1.5% of the cost, so faster decoding of the input
+format (GPU FLAC decode, for example) cannot move the total meaningfully. The
+levers that matter are, in order: how many tokens a final generates, prefill,
+and the end-of-speech wait.
+
+Prefill is the one place where packed int4 loses: it gives up rocBLAS matrix
+cores for a hand kernel (~1100 ms versus ~240 ms). Decode more than repays it
+here, but on a machine with enough memory to hold both representations
+(~31 GB), dequantized weights for prefill plus packed weights for decode would
+beat either single choice.
+
 ## Incremental prefill
 
 Without it, streaming re-transcribes the whole utterance for every partial, so
