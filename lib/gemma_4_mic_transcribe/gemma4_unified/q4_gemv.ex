@@ -105,19 +105,36 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
 end
 
 defimpl EXLA.CustomCall, for: Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
+  require Logger
+
   def call(%{group_size: group_size}, _out, [x, packed, scales], %{platform: :rocm}) do
     with {:bf, 16} <- Nx.type(x),
          {:s, 32} <- Nx.type(packed),
          {:bf, 16} <- Nx.type(scales) do
+      Logger.info(fn ->
+        "q4_gemv: kernel selected for #{inspect(Nx.shape(packed))} group_size=#{group_size}"
+      end)
+
       {:ok,
        %EXLA.CustomCall.Spec{
          call_target_name: "exla_q4_gemv",
          attributes: [{"group_size", "#{group_size} : i64"}]
        }}
     else
-      _other -> :skip
+      _other ->
+        # Silent fallback here costs the whole point of the kernel, so say so.
+        Logger.warning(fn ->
+          "q4_gemv: falling back to dequantization, unsupported types " <>
+            "x=#{inspect(Nx.type(x))} packed=#{inspect(Nx.type(packed))} " <>
+            "scales=#{inspect(Nx.type(scales))}"
+        end)
+
+        :skip
     end
   end
 
-  def call(_block, _out, _args, _client), do: :skip
+  def call(_block, _out, _args, %{platform: platform}) do
+    Logger.warning(fn -> "q4_gemv: no kernel for platform #{inspect(platform)}" end)
+    :skip
+  end
 end

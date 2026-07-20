@@ -26,48 +26,66 @@ namespace ffi = xla::ffi;
 
 namespace {
 
-constexpr int kBlockSize = 256;
+// Columns per workgroup, along threadIdx.x so adjacent lanes read adjacent
+// memory. Parallelising over columns alone starves the GPU on the narrow
+// layers (n = 2048 is only 8 workgroups), so threadIdx.y splits the k loop
+// and the partial sums are reduced in LDS.
+constexpr int kCols = 32;
+constexpr int kSplitK = 8;
 constexpr int kNibblesPerWord = 8;
 
-// One lane owns one output column and accumulates that column's whole dot
-// product, so there is no cross-lane reduction (which would have to know the
-// wavefront size; RDNA defaults to wave32, CDNA to wave64). Adjacent lanes own
-// adjacent columns, and the packed/scale layouts are row-major with n as the
-// fast axis, so each lane step is a fully coalesced read. x is identical
-// across lanes and comes from the broadcast path.
+// Reduction happens in LDS rather than across lanes, so the kernel does not
+// depend on the wavefront size (RDNA defaults to wave32, CDNA to wave64).
 __global__ void q4_gemv_kernel(const int32_t *__restrict__ packed,
                                const __hip_bfloat16 *__restrict__ scales,
                                const __hip_bfloat16 *__restrict__ x,
                                float *__restrict__ out, int k, int n,
                                int group_size) {
-  const int col = blockIdx.x * blockDim.x + threadIdx.x;
-  if (col >= n) return;
+  __shared__ float partials[kSplitK][kCols];
+
+  const int col = blockIdx.x * kCols + threadIdx.x;
+  const int split = threadIdx.y;
 
   const int words_per_col = k / kNibblesPerWord;
   const int words_per_group = group_size / kNibblesPerWord;
 
   float acc = 0.0f;
 
-  for (int word = 0; word < words_per_col; ++word) {
-    const int32_t packed_word = packed[word * n + col];
-    const int k_base = word * kNibblesPerWord;
+  if (col < n) {
+    for (int word = split; word < words_per_col; word += kSplitK) {
+      const int32_t packed_word = packed[word * n + col];
+      const int k_base = word * kNibblesPerWord;
 
-    // group_size is a multiple of 8, so all nibbles in a word share a scale.
-    const float scale =
-        __bfloat162float(scales[(word / words_per_group) * n + col]);
+      // group_size is a multiple of 8, so all nibbles in a word share a scale.
+      const float scale =
+          __bfloat162float(scales[(word / words_per_group) * n + col]);
 
-    float partial = 0.0f;
+      float partial = 0.0f;
 
 #pragma unroll
-    for (int nib = 0; nib < kNibblesPerWord; ++nib) {
-      const int weight = ((packed_word >> (nib * 4)) & 0xF) - 8;
-      partial += static_cast<float>(weight) * __bfloat162float(x[k_base + nib]);
-    }
+      for (int nib = 0; nib < kNibblesPerWord; ++nib) {
+        const int weight = ((packed_word >> (nib * 4)) & 0xF) - 8;
+        partial +=
+            static_cast<float>(weight) * __bfloat162float(x[k_base + nib]);
+      }
 
-    acc += partial * scale;
+      acc += partial * scale;
+    }
   }
 
-  out[col] = acc;
+  partials[split][threadIdx.x] = acc;
+  __syncthreads();
+
+  if (split == 0 && col < n) {
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int s = 0; s < kSplitK; ++s) {
+      sum += partials[s][threadIdx.x];
+    }
+
+    out[col] = sum;
+  }
 }
 
 ffi::Error q4_gemv_impl(hipStream_t stream, ffi::AnyBuffer x,
@@ -96,10 +114,10 @@ ffi::Error q4_gemv_impl(hipStream_t stream, ffi::AnyBuffer x,
         "q4_gemv group_size must divide k and be a multiple of 8");
   }
 
-  const uint32_t blocks =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const uint32_t blocks = static_cast<uint32_t>((n + kCols - 1) / kCols);
 
-  hipLaunchKernelGGL(q4_gemv_kernel, dim3(blocks), dim3(kBlockSize), 0, stream,
+  hipLaunchKernelGGL(q4_gemv_kernel, dim3(blocks), dim3(kCols, kSplitK), 0,
+                     stream,
                      static_cast<const int32_t *>(packed.untyped_data()),
                      static_cast<const __hip_bfloat16 *>(scales.untyped_data()),
                      static_cast<const __hip_bfloat16 *>(x.untyped_data()),

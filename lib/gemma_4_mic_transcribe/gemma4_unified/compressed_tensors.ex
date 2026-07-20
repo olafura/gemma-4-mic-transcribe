@@ -47,7 +47,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.CompressedTensors do
   the `{in_features / group_size, out_features}` layout the kernel indexes.
   """
   def repack_scales([scales]) do
-    Nx.transpose(scales)
+    scales |> Nx.transpose() |> Nx.as_type({:bf, 16})
   end
 
   def quant_group_size, do: @quant_group_size

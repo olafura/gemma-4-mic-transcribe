@@ -625,10 +625,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     input_type = Nx.type(input)
 
     if single_token?(shape) do
+      # Types must match the kernel's FFI signature exactly, otherwise the
+      # custom call is skipped and this silently falls back to dequantization.
       input
       |> Nx.reshape({hidden_size})
       |> Nx.as_type({:bf, 16})
-      |> Q4Gemv.dot(packed, scales, group_size: group_size)
+      |> Q4Gemv.dot(Nx.as_type(packed, {:s, 32}), Nx.as_type(scales, {:bf, 16}),
+        group_size: group_size
+      )
       |> Nx.reshape(put_elem(shape, tuple_size(shape) - 1, units))
       |> Nx.as_type(input_type)
     else
