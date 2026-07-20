@@ -35,7 +35,9 @@ ulimit -l "$(ulimit -Hl)" 2>/dev/null || true
 echo "tracing HIP calls in pid $PID (histograms print every 5s while the GPU is busy)" >&2
 echo "if nothing appears, the target is idle: start a transcription first" >&2
 
-exec bpftrace -p "$PID" -e "
+# bpftrace block-buffers stdout when it is a pipe, so piping into tee hides the
+# periodic histograms until 4KB accumulates. stdbuf forces line buffering.
+exec stdbuf -oL bpftrace -p "$PID" -e "
 uprobe:${HIP_LIB}:hipLaunchKernel { @launch[tid] = nsecs; @launch_count++; }
 uretprobe:${HIP_LIB}:hipLaunchKernel /@launch[tid]/ {
   @kernel_launch_us = hist((nsecs - @launch[tid]) / 1000);
