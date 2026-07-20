@@ -17,6 +17,34 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
     def load(_opts), do: raise("runtime should not load")
   end
 
+  defmodule WarmupRuntime do
+    def load(_opts), do: {:ok, :runtime}
+
+    def warmup(:runtime, opts) do
+      send(:streaming_warmup_test, {:warmup, Keyword.fetch!(opts, :audio_token_counts)})
+      :ok
+    end
+
+    def generate(:runtime, _input, _opts), do: {:ok, "hello world"}
+  end
+
+  test "warms the runtime for every configured audio-token bucket on load" do
+    Process.register(self(), :streaming_warmup_test)
+
+    {:ok, session} =
+      start_test_session(
+        runtime_module: WarmupRuntime,
+        partials: false,
+        audio_token_buckets: [50, 100]
+      )
+
+    samples = List.duplicate(0.2, 60) ++ List.duplicate(0.0, 60)
+    assert {:ok, events} = StreamingSession.push_audio(session, samples, 0.0)
+    assert Enum.any?(events, &(&1.type == "final"))
+
+    assert_received {:warmup, [50, 100]}
+  end
+
   test "silence produces no final event and does not load the runtime" do
     {:ok, session} =
       StreamingSession.start_link(

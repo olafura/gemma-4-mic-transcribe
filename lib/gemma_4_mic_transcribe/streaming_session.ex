@@ -38,6 +38,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     :tts_echo_window_ms,
     :tts_similarity_threshold,
     :audio_token_buckets,
+    :warmup?,
     :pending_samples,
     :next_frame_start_ms,
     :candidate_samples,
@@ -105,6 +106,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       tts_similarity_threshold:
         Keyword.get(opts, :tts_similarity_threshold, @default_tts_similarity_threshold),
       audio_token_buckets: Keyword.get(opts, :audio_token_buckets, @default_audio_token_buckets),
+      warmup?: Keyword.get(opts, :warmup, true),
       pending_samples: [],
       next_frame_start_ms: nil,
       candidate_samples: [],
@@ -182,6 +184,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
       request_timeout_seconds:
         Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
+      param_type: Keyword.get(opts, :param_type),
       prompt: Keyword.get(opts, :prompt, Config.default_prompt()),
       system_message: Keyword.get(opts, :system_message),
       debug: Keyword.get(opts, :debug, false),
@@ -243,7 +246,8 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   defp process_idle_frame(state, frame, frame_start_ms, frame_end_ms, true, events) do
     candidate_start_ms = state.candidate_start_ms || frame_start_ms
     candidate_active_ms = state.candidate_active_ms + (frame_end_ms - frame_start_ms)
-    candidate_samples = state.candidate_samples ++ frame
+    # Frames are prepended and flattened on demand to keep per-frame cost O(1).
+    candidate_samples = [frame | state.candidate_samples]
 
     state = %{
       state
@@ -306,7 +310,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
     state = %{
       state
-      | utterance_samples: state.utterance_samples ++ frame,
+      | utterance_samples: [frame | state.utterance_samples],
         trailing_silence_ms: trailing_silence_ms,
         utterance_last_active_end_ms: utterance_last_active_end_ms
     }
@@ -345,7 +349,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   end
 
   defp emit_partial(state, frame_end_ms, events) do
-    case transcribe(state, state.utterance_samples) do
+    case transcribe(state, utterance_samples(state)) do
       {:ok, text, metrics, state} ->
         event = %{
           type: "partial",
@@ -398,7 +402,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   end
 
   defp final_transcript_event(state, start_ms, end_ms) do
-    case transcribe(state, state.utterance_samples) do
+    case transcribe(state, utterance_samples(state)) do
       {:ok, text, metrics, state} ->
         cond do
           normalize_text(text) == "" ->
@@ -465,14 +469,37 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
   defp ensure_runtime(%__MODULE__{runtime: nil} = state) do
     case state.runtime_module.load(state.runtime_opts) do
-      {:ok, runtime} -> {:ok, %{state | runtime: runtime}}
-      {:error, reason} -> {:error, reason, state}
+      {:ok, runtime} ->
+        state = %{state | runtime: runtime}
+
+        case maybe_warmup(state) do
+          :ok -> {:ok, state}
+          {:error, reason} -> {:error, reason, state}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
     end
   rescue
     exception -> {:error, Exception.message(exception), state}
   end
 
   defp ensure_runtime(%__MODULE__{} = state), do: {:ok, state}
+
+  # Compile the prefill/decode executables for every configured audio-token
+  # bucket up front so no live utterance pays JIT compilation latency.
+  defp maybe_warmup(state) do
+    if state.warmup? and Code.ensure_loaded?(state.runtime_module) and
+         function_exported?(state.runtime_module, :warmup, 2) do
+      state.runtime_module.warmup(state.runtime,
+        audio_token_counts: state.audio_token_buckets,
+        prompt: Keyword.fetch!(state.runtime_opts, :prompt),
+        system_message: Keyword.get(state.runtime_opts, :system_message)
+      )
+    else
+      :ok
+    end
+  end
 
   defp audio_token_bucket(state, sample_count) do
     actual_tokens = ceil_div(sample_count, AudioFeatureExtractor.samples_per_token())
@@ -496,9 +523,13 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     analysis.speech?
   end
 
+  defp utterance_samples(state) do
+    state.utterance_samples |> Enum.reverse() |> Enum.concat()
+  end
+
   defp utterance_speech?(state) do
     analysis =
-      SpeechGate.analyze(state.utterance_samples,
+      SpeechGate.analyze(utterance_samples(state),
         sample_rate: state.sample_rate,
         min_speech_seconds: state.min_utterance_ms / 1000,
         threshold: state.speech_threshold,
