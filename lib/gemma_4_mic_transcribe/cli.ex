@@ -16,6 +16,7 @@ defmodule Gemma4MicTranscribe.CLI do
               skip_windows: 0,
               max_windows: nil,
               stream_wav: false,
+              realtime: false,
               output: "text",
               chunk_ms: 100.0,
               system_message: nil,
@@ -57,6 +58,7 @@ defmodule Gemma4MicTranscribe.CLI do
     skip_windows: :integer,
     max_windows: :integer,
     stream_wav: :boolean,
+    realtime: :boolean,
     output: :string,
     chunk_ms: :float,
     system_message: :string,
@@ -184,6 +186,7 @@ defmodule Gemma4MicTranscribe.CLI do
       skip_windows: Keyword.get(opts, :skip_windows, 0),
       max_windows: Keyword.get(opts, :max_windows),
       stream_wav: Keyword.get(opts, :stream_wav, false),
+      realtime: Keyword.get(opts, :realtime, false),
       output: Keyword.get(opts, :output, "text"),
       chunk_ms: Keyword.get(opts, :chunk_ms, 100.0),
       system_message: Keyword.get(opts, :system_message),
@@ -296,14 +299,27 @@ defmodule Gemma4MicTranscribe.CLI do
     with {:ok, runtime_module} <- runtime_module(config, opts),
          {:ok, session} <-
            StreamingSession.start_link(streaming_session_opts(config, runtime_module)) do
-      event_sink = Keyword.get(opts, :event_sink, &print_stream_event(config, &1))
+      base_sink = Keyword.get(opts, :event_sink, &print_stream_event(config, &1))
+
+      # In realtime mode the audio clock starts at the first chunk; events are
+      # annotated with lag_ms = wall time since clock start - event end_ms,
+      # which is how far each event trails the live audio.
+      clock_start_ms = System.monotonic_time(:millisecond)
+
+      event_sink = fn event ->
+        event = annotate_lag(event, config, clock_start_ms)
+        base_sink.(event)
+        event
+      end
 
       try do
         counts =
-          %{finals: 0, errors: 0}
+          %{finals: 0, errors: 0, lags: %{}}
           |> emit_stream_events(maybe_push_tts(session, config), event_sink)
-          |> push_streaming_wav(session, config, event_sink)
+          |> push_streaming_wav(session, config, event_sink, clock_start_ms)
           |> emit_stream_events(flush_streaming_wav(session), event_sink)
+
+        print_lag_summary(config, counts)
 
         cond do
           counts.errors > 0 -> 1
@@ -320,6 +336,41 @@ defmodule Gemma4MicTranscribe.CLI do
     end
   end
 
+  defp annotate_lag(event, %RunConfig{realtime: true}, clock_start_ms) do
+    case event do
+      %{end_ms: end_ms} ->
+        lag_ms = System.monotonic_time(:millisecond) - clock_start_ms - round(end_ms)
+        Map.put(event, :lag_ms, lag_ms)
+
+      _event ->
+        event
+    end
+  end
+
+  defp annotate_lag(event, _config, _clock_start_ms), do: event
+
+  defp record_lag(counts, %{lag_ms: lag_ms, type: type}) do
+    update_in(counts.lags[type], &[lag_ms | &1 || []])
+  end
+
+  defp record_lag(counts, _event), do: counts
+
+  defp print_lag_summary(%RunConfig{realtime: true}, %{lags: lags}) when map_size(lags) > 0 do
+    Enum.each(Enum.sort(lags), fn {type, lag_list} ->
+      lag_list = Enum.sort(lag_list)
+      count = length(lag_list)
+      avg = round(Enum.sum(lag_list) / count)
+
+      IO.puts(
+        :stderr,
+        "bench: #{type} events=#{count} lag_ms min=#{List.first(lag_list)} " <>
+          "avg=#{avg} max=#{List.last(lag_list)}"
+      )
+    end)
+  end
+
+  defp print_lag_summary(_config, _counts), do: :ok
+
   defp streaming_session_opts(config, runtime_module) do
     [
       runtime_module: runtime_module,
@@ -327,6 +378,9 @@ defmodule Gemma4MicTranscribe.CLI do
       backend: config.backend,
       param_type: config.param_type,
       warmup: config.warmup,
+      # Lag numbers are only meaningful against a loaded, warmed model, so
+      # realtime mode loads before the audio clock starts.
+      preload_runtime: config.realtime,
       max_response_tokens: config.max_response_tokens,
       no_repeat_ngram_size: config.no_repeat_ngram,
       prompt: config.prompt,
@@ -356,11 +410,13 @@ defmodule Gemma4MicTranscribe.CLI do
     end
   end
 
-  defp push_streaming_wav(counts, session, config, event_sink) do
+  defp push_streaming_wav(counts, session, config, event_sink, clock_start_ms) do
     config.wav
     |> Audio.read_wav_samples!(config.sample_rate)
     |> Audio.stream_sample_chunks(config.sample_rate, config.chunk_ms)
     |> Enum.reduce(counts, fn {samples, timestamp_ms}, counts ->
+      maybe_pace(config, clock_start_ms, timestamp_ms)
+
       case StreamingSession.push_audio(session, samples, timestamp_ms) do
         {:ok, events} -> emit_stream_events(counts, events, event_sink)
       end
@@ -380,9 +436,21 @@ defmodule Gemma4MicTranscribe.CLI do
     end
   end
 
+  # A chunk is not pushed before its audio timestamp has elapsed on the wall
+  # clock, simulating a live microphone. When generation runs behind, pushes
+  # happen late and the lag becomes visible in lag_ms.
+  defp maybe_pace(%RunConfig{realtime: true}, clock_start_ms, timestamp_ms) do
+    target_ms = clock_start_ms + round(timestamp_ms)
+    delay_ms = target_ms - System.monotonic_time(:millisecond)
+    if delay_ms > 0, do: Process.sleep(delay_ms)
+  end
+
+  defp maybe_pace(_config, _clock_start_ms, _timestamp_ms), do: :ok
+
   defp emit_stream_events(counts, events, event_sink) do
     Enum.reduce(events, counts, fn event, counts ->
-      event_sink.(event)
+      event = event_sink.(event)
+      counts = record_lag(counts, event)
 
       cond do
         event[:type] == "final" and event[:send_to_llm] ->
@@ -548,6 +616,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --skip-windows INT                 Skip leading audio windows
       --max-windows INT                  Stop after N selected rolling audio windows, not audio tokens
       --stream-wav                       Process WAV audio as timed streaming chunks and emit utterance events
+      --realtime                         Pace stream chunks to the wall clock and report event lag_ms
       --output text|jsonl                Output format for stream events, default text
       --chunk-ms FLOAT                   Streaming WAV chunk duration, default 100.0
       --system-message TEXT              System instruction for every window

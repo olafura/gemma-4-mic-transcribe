@@ -96,6 +96,7 @@ defmodule Gemma4MicTranscribe.CLITest do
              ])
 
     assert config.stream_wav
+    refute config.realtime
     assert config.output == "jsonl"
     assert config.chunk_ms == 50.0
     assert config.speech_start_ms == 80.0
@@ -106,6 +107,10 @@ defmodule Gemma4MicTranscribe.CLITest do
     refute config.partials
     assert config.tts_text == "hello"
     assert config.tts_timestamp_ms == 1200.0
+  end
+
+  test "parses realtime streaming benchmark flag" do
+    assert {:ok, %RunConfig{realtime: true}} = CLI.parse(["--stream-wav", "--realtime"])
   end
 
   test "validates output format" do
