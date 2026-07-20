@@ -17,6 +17,7 @@ defmodule Gemma4MicTranscribe.CLI do
               max_windows: nil,
               stream_wav: false,
               realtime: false,
+              repeat: 1,
               output: "text",
               chunk_ms: 100.0,
               system_message: nil,
@@ -61,6 +62,7 @@ defmodule Gemma4MicTranscribe.CLI do
     max_windows: :integer,
     stream_wav: :boolean,
     realtime: :boolean,
+    repeat: :integer,
     output: :string,
     chunk_ms: :float,
     system_message: :string,
@@ -191,6 +193,7 @@ defmodule Gemma4MicTranscribe.CLI do
       max_windows: Keyword.get(opts, :max_windows),
       stream_wav: Keyword.get(opts, :stream_wav, false),
       realtime: Keyword.get(opts, :realtime, false),
+      repeat: Keyword.get(opts, :repeat, 1),
       output: Keyword.get(opts, :output, "text"),
       chunk_ms: Keyword.get(opts, :chunk_ms, 100.0),
       system_message: Keyword.get(opts, :system_message),
@@ -236,6 +239,7 @@ defmodule Gemma4MicTranscribe.CLI do
     with :ok <- validate_positive(config.window_seconds, "--window-seconds"),
          :ok <- validate_positive(config.stride_seconds, "--stride-seconds"),
          :ok <- validate_positive(config.chunk_ms, "--chunk-ms"),
+         :ok <- validate_positive(config.repeat, "--repeat"),
          :ok <- validate_positive(config.sample_rate, "--sample-rate"),
          :ok <- validate_positive(config.request_timeout_seconds, "--request-timeout-seconds"),
          :ok <- validate_positive(config.max_response_tokens, "--max-response-tokens"),
@@ -316,17 +320,32 @@ defmodule Gemma4MicTranscribe.CLI do
       clock_start_ms = System.monotonic_time(:millisecond)
 
       event_sink = fn event ->
-        event = annotate_lag(event, config, clock_start_ms)
+        event = annotate_lag(event, config, Process.get(:clock_start_ms, clock_start_ms))
         base_sink.(event)
         event
       end
 
       try do
         counts =
-          %{finals: 0, errors: 0, lags: %{}}
-          |> emit_stream_events(maybe_push_tts(session, config), event_sink)
-          |> push_streaming_wav(session, config, event_sink, clock_start_ms)
-          |> emit_stream_events(flush_streaming_wav(session), event_sink)
+          Enum.reduce(1..config.repeat, %{finals: 0, errors: 0, lags: %{}}, fn pass, counts ->
+            # Each pass restarts the audio clock, so lag stays comparable and
+            # repeated passes show whether the per-utterance cost is stable
+            # once the model is loaded and every shape is compiled.
+            pass_start_ms = System.monotonic_time(:millisecond)
+            Process.put(:clock_start_ms, pass_start_ms)
+
+            counts =
+              counts
+              |> emit_stream_events(maybe_push_tts(session, config), event_sink)
+              |> push_streaming_wav(session, config, event_sink, pass_start_ms)
+              |> emit_stream_events(flush_streaming_wav(session), event_sink)
+
+            if config.repeat > 1 do
+              IO.puts(:stderr, "bench: pass #{pass}/#{config.repeat} complete")
+            end
+
+            counts
+          end)
 
         print_lag_summary(config, counts)
 
@@ -648,6 +667,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --max-windows INT                  Stop after N selected rolling audio windows, not audio tokens
       --stream-wav                       Process WAV audio as timed streaming chunks and emit utterance events
       --realtime                         Pace stream chunks to the wall clock and report event lag_ms
+      --repeat INT                       Replay the audio N times against the loaded model, default 1
       --output text|jsonl                Output format for stream events, default text
       --chunk-ms FLOAT                   Streaming WAV chunk duration, default 100.0
       --system-message TEXT              System instruction for every window
