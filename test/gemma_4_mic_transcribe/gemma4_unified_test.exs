@@ -205,6 +205,70 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Nx.shape(outputs.logits) == {1, 3, 32}
   end
 
+  test "logits_last_only emits logits for only the final position" do
+    spec =
+      Bumblebee.configure(Model,
+        vocab_size: 32,
+        max_positions: 16,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_blocks: 2,
+        num_attention_heads: 2,
+        num_key_value_heads: 1,
+        num_global_key_value_heads: 1,
+        attention_head_size: 4,
+        global_attention_head_size: 4,
+        attention_window_size: 4,
+        layer_types: [:sliding_attention, :full_attention],
+        boa_token_id: 5,
+        audio_token_id: 7,
+        eoa_token_id: 9,
+        audio_embed_dim: 4,
+        final_logit_softcapping: nil
+      )
+
+    inputs = %{
+      "input_ids" => Nx.tensor([[2, 7, 3]], type: :s64),
+      "attention_mask" => Nx.tensor([[1, 1, 1]], type: :s64),
+      "position_ids" => Nx.tensor([[0, 1, 2]], type: :s64),
+      "input_features" => Nx.tensor([[[0.0, 0.1, 0.2, 0.3]]], type: {:f, 32}),
+      "input_features_mask" => Nx.tensor([[1]], type: :s64)
+    }
+
+    full_model = Bumblebee.build_model(spec)
+    {init_fun, full_predict_fun} = Axon.build(full_model)
+    params = init_fun.(inputs, Axon.ModelState.empty())
+    full_logits = full_predict_fun.(params, inputs).logits
+
+    last_model = Bumblebee.build_model(Bumblebee.configure(spec, logits_last_only: true))
+    {_init_fun, last_predict_fun} = Axon.build(last_model)
+    last_logits = last_predict_fun.(params, inputs).logits
+
+    assert Nx.shape(last_logits) == {1, 1, 32}
+
+    assert full_logits
+           |> Nx.slice_along_axis(2, 1, axis: 1)
+           |> Nx.all_close(last_logits)
+           |> Nx.to_number() == 1
+  end
+
+  test "init_cache uses the configured cache type" do
+    spec =
+      Bumblebee.configure(Model,
+        num_blocks: 1,
+        num_attention_heads: 2,
+        attention_head_size: 4,
+        layer_types: [:sliding_attention],
+        cache_type: {:bf, 16}
+      )
+
+    cache = Model.init_cache(spec, 1, 5, %{})
+    first_block = elem(cache.blocks, 0)
+
+    assert Nx.type(first_block.self_attention.key) == {:bf, 16}
+    assert Nx.type(first_block.self_attention.value) == {:bf, 16}
+  end
+
   test "local Gemma4Unified model graph advances KV cache across prefill and decode" do
     spec =
       Bumblebee.configure(Model,

@@ -41,7 +41,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             eoa_token_id: 258_883,
             audio_embed_dim: 640,
             audio_rms_norm_epsilon: 1.0e-6,
-            quantization_config: nil
+            quantization_config: nil,
+            logits_last_only: false,
+            cache_type: {:f, 32}
 
   @impl true
   def architectures, do: [:for_conditional_generation]
@@ -76,8 +78,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
         %{
           self_attention:
-            attention_cache(batch_size, max_length, spec.num_attention_heads, head_size),
-          cross_attention: attention_cache(batch_size, 1, 1, 1)
+            attention_cache(
+              batch_size,
+              max_length,
+              spec.num_attention_heads,
+              head_size,
+              spec.cache_type
+            ),
+          cross_attention: attention_cache(batch_size, 1, 1, 1, spec.cache_type)
         }
       end)
       |> List.to_tuple()
@@ -99,7 +107,18 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     inputs = inputs(spec)
 
     outputs = core(inputs, spec)
-    logits = language_modeling_head(outputs.hidden_state, spec, name: "language_modeling_head")
+
+    hidden_state =
+      if spec.logits_last_only do
+        Axon.nx(outputs.hidden_state, fn hidden_state ->
+          last = Nx.axis_size(hidden_state, 1) - 1
+          Nx.slice_along_axis(hidden_state, last, 1, axis: 1)
+        end)
+      else
+        outputs.hidden_state
+      end
+
+    logits = language_modeling_head(hidden_state, spec, name: "language_modeling_head")
 
     logits =
       if spec.final_logit_softcapping do
@@ -432,9 +451,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     {attention_output, block_cache}
   end
 
-  defp attention_cache(batch_size, sequence_length, num_heads, head_size) do
+  defp attention_cache(batch_size, sequence_length, num_heads, head_size, cache_type) do
     shape = {batch_size, sequence_length, num_heads, head_size}
-    zeros = Nx.broadcast(0.0, shape)
+    zeros = Nx.broadcast(Nx.tensor(0.0, type: cache_type), shape)
     %{key: zeros, value: zeros}
   end
 
