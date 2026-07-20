@@ -268,7 +268,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     # KV cache for one in-progress utterance. `cache` covers the prompt prefix
     # plus every audio chunk appended so far, so a partial transcript only has
     # to prefill the short suffix rather than the whole utterance again.
-    defstruct [:runtime, :cache, :offset, :audio_tokens, :pending_samples]
+    # `offset` counts cache slots consumed; `content_length` counts real
+    # positions. A padded flush consumes slots without advancing position, so
+    # the two diverge and position ids must follow content_length.
+    defstruct [:runtime, :cache, :offset, :content_length, :audio_tokens, :pending_samples]
   end
 
   @doc """
@@ -297,6 +300,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          runtime: runtime,
          cache: cache,
          offset: length,
+         content_length: length,
          audio_tokens: 0,
          pending_samples: []
        }}
@@ -334,12 +338,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, chunk_tokens)
 
         {_logits, cache} =
-          predict_chunk(runtime, audio_ids, input_features, acc.offset, acc.cache)
+          predict_chunk(runtime, audio_ids, input_features, acc.content_length, acc.cache)
 
         %{
           acc
           | cache: cache,
             offset: acc.offset + chunk_tokens,
+            content_length: acc.content_length + chunk_tokens,
             audio_tokens: acc.audio_tokens + chunk_tokens
         }
       end)
@@ -415,7 +420,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   # Prefills leftover audio as a full-size chunk padded with masked positions,
   # so the flush reuses the same compiled executable as a normal append.
   defp flush_pending_audio(%Utterance{pending_samples: []} = utterance) do
-    {utterance.offset, utterance.cache, 0}
+    {utterance.content_length, utterance.cache, 0}
   end
 
   defp flush_pending_audio(%Utterance{} = utterance) do
@@ -438,11 +443,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       List.duplicate(1, real_tokens) ++ List.duplicate(0, @audio_chunk_tokens - real_tokens)
 
     {_logits, cache} =
-      predict_chunk(runtime, audio_ids, input_features, utterance.offset, utterance.cache,
+      predict_chunk(runtime, audio_ids, input_features, utterance.content_length, utterance.cache,
         attention_mask: attention_mask
       )
 
-    {utterance.offset + @audio_chunk_tokens, cache, real_tokens}
+    # Padded slots are masked out, so they must not consume positions: the
+    # suffix has to sit immediately after the real audio, not after the pad.
+    {utterance.content_length + real_tokens, cache, real_tokens}
   end
 
   defp ceil_div(0, _denominator), do: 0
