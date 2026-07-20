@@ -284,6 +284,82 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Nx.type(first_block.self_attention.value) == {:bf, 16}
   end
 
+  test "chunked prefill matches one-shot prefill" do
+    # Incremental prefill appends several tokens to the cache at a non-zero
+    # offset, which the single-shot path never does. This isolates that.
+    spec =
+      Bumblebee.configure(Model,
+        vocab_size: 32,
+        max_positions: 16,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_blocks: 2,
+        num_attention_heads: 2,
+        num_key_value_heads: 1,
+        num_global_key_value_heads: 1,
+        attention_head_size: 4,
+        global_attention_head_size: 4,
+        attention_window_size: 8,
+        layer_types: [:sliding_attention, :full_attention],
+        audio_token_id: 7,
+        audio_embed_dim: 4,
+        final_logit_softcapping: nil
+      )
+
+    model = Bumblebee.build_model(spec)
+    {init_fun, predict_fun} = Axon.build(model)
+
+    token_ids = [2, 3, 4, 5, 6]
+    silent = Nx.broadcast(0.0, {1, 1, 4})
+
+    one_shot_inputs = %{
+      "input_ids" => Nx.tensor([token_ids], type: :s64),
+      "attention_mask" => Nx.tensor([List.duplicate(1, 5)], type: :s64),
+      "position_ids" => Nx.tensor([[0, 1, 2, 3, 4]], type: :s64),
+      "input_features" => silent,
+      "input_features_mask" => Nx.tensor([[0]], type: :s64),
+      "cache" => Model.init_cache(spec, 1, 8, %{})
+    }
+
+    params = init_fun.(one_shot_inputs, Axon.ModelState.empty())
+    one_shot = predict_fun.(params, one_shot_inputs)
+    one_shot_last = one_shot.logits[[0, 4]]
+
+    # Same tokens, prefilled as [2, 3] then [4, 5, 6] at offset 2.
+    first = %{
+      one_shot_inputs
+      | "input_ids" => Nx.tensor([[2, 3]], type: :s64),
+        "attention_mask" => Nx.tensor([[1, 1]], type: :s64),
+        "position_ids" => Nx.tensor([[0, 1]], type: :s64)
+    }
+
+    first_out = predict_fun.(params, first)
+
+    second = %{
+      "input_ids" => Nx.tensor([[4, 5, 6]], type: :s64),
+      "attention_mask" => Nx.tensor([[1, 1, 1]], type: :s64),
+      "position_ids" => Nx.tensor([[2, 3, 4]], type: :s64),
+      "input_features" => silent,
+      "input_features_mask" => Nx.tensor([[0]], type: :s64),
+      "cache" => first_out.cache
+    }
+
+    chunked = predict_fun.(params, second)
+    chunked_last = chunked.logits[[0, 2]]
+
+    assert Nx.to_number(chunked.cache.offset) == 5
+
+    max_diff =
+      one_shot_last
+      |> Nx.subtract(chunked_last)
+      |> Nx.abs()
+      |> Nx.reduce_max()
+      |> Nx.to_number()
+
+    assert max_diff < 1.0e-5,
+           "chunked prefill diverges from one-shot by #{max_diff}"
+  end
+
   test "local Gemma4Unified model graph advances KV cache across prefill and decode" do
     spec =
       Bumblebee.configure(Model,

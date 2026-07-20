@@ -405,7 +405,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
     value = rms_norm_no_scale(value_projection, epsilon: spec.layer_norm_epsilon)
 
-    {query, key} = rotary_embedding(query, key, position_ids, layer_type, head_size, spec)
+    {query, key} =
+      rotary_embedding(query, key, position_ids, attention_mask, layer_type, head_size, spec)
 
     num_key_value_groups = div(spec.num_attention_heads, num_key_value_heads)
     key = repeat_kv(key, num_key_value_groups)
@@ -459,14 +460,35 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     %{key: zeros, value: zeros}
   end
 
-  defp rotary_embedding(query, key, position_ids, :sliding_attention, head_size, spec) do
-    Layers.rotary_embedding(query, key, position_ids, Layers.none(), head_size,
+  # The attention mask must be passed through: it sizes the sinusoidal position
+  # table that position_ids index into. With Layers.none() the table is sized by
+  # the current call's token count, so a cached decode step (one token at
+  # position p) builds a one-row table and Nx.take clamps p to row 0, applying
+  # position-0 rotary to every generated token.
+  defp rotary_embedding(
+         query,
+         key,
+         position_ids,
+         attention_mask,
+         :sliding_attention,
+         head_size,
+         spec
+       ) do
+    Layers.rotary_embedding(query, key, position_ids, attention_mask, head_size,
       base: spec.rotary_embedding_base_local,
       max_positions: spec.max_positions
     )
   end
 
-  defp rotary_embedding(query, key, position_ids, :full_attention, head_size, spec) do
+  defp rotary_embedding(
+         query,
+         key,
+         position_ids,
+         _attention_mask,
+         :full_attention,
+         head_size,
+         spec
+       ) do
     Axon.layer(
       &proportional_rotary_embedding/4,
       [query, key, position_ids],
