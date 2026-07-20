@@ -7,6 +7,7 @@ defmodule Gemma4MicTranscribe.CLI do
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.StreamingSession
+  alias Gemma4MicTranscribe.Trace
   alias Gemma4MicTranscribe.Transcriber
 
   defmodule RunConfig do
@@ -43,7 +44,8 @@ defmodule Gemma4MicTranscribe.CLI do
               tts_text: nil,
               tts_timestamp_ms: 0.0,
               debug: false,
-              debug_top_k: 0
+              debug_top_k: 0,
+              trace: false
   end
 
   @switches [
@@ -81,7 +83,8 @@ defmodule Gemma4MicTranscribe.CLI do
     tts_text: :string,
     tts_timestamp_ms: :float,
     debug: :boolean,
-    debug_top_k: :integer
+    debug_top_k: :integer,
+    trace: :boolean
   ]
 
   @aliases [h: :help]
@@ -156,6 +159,14 @@ defmodule Gemma4MicTranscribe.CLI do
         "system_message_sha256=#{inspect(system_message_hash(config.system_message))}"
     end)
 
+    if config.trace do
+      Trace.with_tracing(fn -> run_mode(config, opts) end)
+    else
+      run_mode(config, opts)
+    end
+  end
+
+  defp run_mode(config, opts) do
     if config.stream_wav do
       run_stream_wav(config, opts)
     else
@@ -203,7 +214,8 @@ defmodule Gemma4MicTranscribe.CLI do
       tts_text: Keyword.get(opts, :tts_text),
       tts_timestamp_ms: Keyword.get(opts, :tts_timestamp_ms, 0.0),
       debug: Keyword.get(opts, :debug, false),
-      debug_top_k: Keyword.get(opts, :debug_top_k, 0)
+      debug_top_k: Keyword.get(opts, :debug_top_k, 0),
+      trace: Keyword.get(opts, :trace, false)
     }
 
     with :ok <- validate_positive(config.window_seconds, "--window-seconds"),
@@ -555,6 +567,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --tts-timestamp-ms FLOAT           Timestamp for --tts-text, default 0
       --debug                            Emit progress logs to stderr
       --debug-top-k INT                  Log top prefill token candidates after suppression, default 0
+      --trace                            Log per-call BEAM durations for pipeline modules to stderr
     """
   end
 end
