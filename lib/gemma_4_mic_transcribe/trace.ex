@@ -48,8 +48,10 @@ defmodule Gemma4MicTranscribe.Trace do
     {:ok, _} = :dbg.p(:all, [:call, :timestamp])
 
     for module <- modules do
-      # tpl also traces private functions, not just the exported API.
-      {:ok, _} = :dbg.tpl(module, :_, :_, [{:_, [], [{:return_trace}, {:exception_trace}]}])
+      # tp traces exported calls only. tpl would also match compiler-generated
+      # list-comprehension/anonymous lambdas, which fire per element on audio
+      # sample lists and flood the tracer mailbox until the BEAM is OOM-killed.
+      {:ok, _} = :dbg.tp(module, :_, :_, [{:_, [], [{:return_trace}, {:exception_trace}]}])
     end
 
     :ok
