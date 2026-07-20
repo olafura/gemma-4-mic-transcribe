@@ -188,7 +188,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
       backend: Keyword.get(opts, :backend, Config.backend()),
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
-      no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 3),
+      no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 4),
       request_timeout_seconds:
         Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
       param_type: Keyword.get(opts, :param_type),
@@ -411,7 +411,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   end
 
   defp final_transcript_event(state, start_ms, end_ms) do
-    case transcribe(state, utterance_samples_until(state, end_ms)) do
+    case transcribe(state, utterance_samples(state)) do
       {:ok, text, metrics, state} ->
         cond do
           normalize_text(text) == "" ->
@@ -539,20 +539,6 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
   defp utterance_samples(state) do
     state.utterance_samples |> Enum.reverse() |> Enum.concat()
-  end
-
-  # Final transcripts stop at the last active-speech frame. The buffer also
-  # holds the trailing silence that committed the utterance, and the model
-  # transcribes trailing silence as looping hallucinated speech.
-  defp utterance_samples_until(state, end_ms) do
-    samples = utterance_samples(state)
-    keep = round((end_ms - state.utterance_start_ms) * state.sample_rate / 1000)
-
-    if keep > 0 and keep < length(samples) do
-      Enum.take(samples, keep)
-    else
-      samples
-    end
   end
 
   defp utterance_speech?(state) do

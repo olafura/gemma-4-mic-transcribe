@@ -28,7 +28,7 @@ defmodule Gemma4MicTranscribe.CLI do
               request_timeout_seconds: Config.request_timeout_seconds(),
               model_name: Config.default_model_name(),
               max_response_tokens: Config.max_response_tokens(),
-              no_repeat_ngram: 3,
+              no_repeat_ngram: 4,
               backend: Config.backend(),
               param_type: "bf16",
               warmup: true,
@@ -198,7 +198,7 @@ defmodule Gemma4MicTranscribe.CLI do
         Keyword.get(opts, :request_timeout_seconds, Config.request_timeout_seconds()),
       model_name: Keyword.get(opts, :model_name, Config.default_model_name()),
       max_response_tokens: Keyword.get(opts, :max_response_tokens, Config.max_response_tokens()),
-      no_repeat_ngram: Keyword.get(opts, :no_repeat_ngram, 3),
+      no_repeat_ngram: Keyword.get(opts, :no_repeat_ngram, 4),
       backend: Keyword.get(opts, :backend, Config.backend()),
       param_type: Keyword.get(opts, :param_type, "bf16"),
       warmup: Keyword.get(opts, :warmup, true),
@@ -628,7 +628,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --request-timeout-seconds FLOAT    Maximum seconds for one generation
       --model-name NAME                  Model alias or Hugging Face repo; selects the required runtime
       --max-response-tokens INT          Maximum generated text tokens per window, default 512
-      --no-repeat-ngram INT              Ban repeating generated n-grams of this size, default 3, 0 disables
+      --no-repeat-ngram INT              Ban repeating generated n-grams of this size, default 4, 0 disables
       --backend host|torchx|torchx:cpu|torchx:cuda|exla|exla:host|exla:cuda|exla:rocm
                                         Nx/Bumblebee backend label, default torchx
       --param-type bf16|f16|f32          Model parameter/compute precision, default bf16
