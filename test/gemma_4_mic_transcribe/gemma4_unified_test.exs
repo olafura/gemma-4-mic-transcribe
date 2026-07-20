@@ -461,15 +461,19 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
         quantization_config: %{"quant_method" => "compressed-tensors"}
       })
 
+    # Weights stay packed, so each linear loads a packed tensor and its scales
+    # rather than one dequantized kernel.
     assert %{
-             "kernel" =>
-               {[
-                  {"model.language_model.layers.{n}.self_attn.q_proj", "weight_packed"},
-                  {"model.language_model.layers.{n}.self_attn.q_proj", "weight_scale"}
-                ], builder}
+             "packed" =>
+               {[{"model.language_model.layers.{n}.self_attn.q_proj", "weight_packed"}],
+                packed_builder},
+             "scales" =>
+               {[{"model.language_model.layers.{n}.self_attn.q_proj", "weight_scale"}],
+                scales_builder}
            } = mapping["decoder.blocks.{n}.self_attention.query"]
 
-    assert is_function(builder, 1)
+    assert is_function(packed_builder, 1)
+    assert is_function(scales_builder, 1)
     assert mapping["embedder.token_embedding"] == "model.language_model.embed_tokens"
   end
 

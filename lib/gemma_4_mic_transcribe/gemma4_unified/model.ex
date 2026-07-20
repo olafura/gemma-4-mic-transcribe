@@ -9,6 +9,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   import Bumblebee.Utils.Model, only: [join: 2]
 
   alias Bumblebee.Layers
+  alias Gemma4MicTranscribe.Gemma4Unified.CompressedTensors
+  alias Gemma4MicTranscribe.Gemma4Unified.Q4Gemv
 
   defstruct architecture: :for_conditional_generation,
             vocab_size: 262_144,
@@ -315,7 +317,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         name: join(name, "pre_ffn_norm"),
         epsilon: spec.layer_norm_epsilon
       )
-      |> gated_ffn(spec.intermediate_size, spec.hidden_size,
+      |> gated_ffn(spec.intermediate_size, spec.hidden_size, spec,
         name: join(name, "ffn"),
         activation: spec.activation,
         kernel_initializer: kernel_initializer(spec)
@@ -361,7 +363,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
     query =
       hidden_state
-      |> Axon.dense(spec.num_attention_heads * head_size,
+      |> linear(spec.num_attention_heads * head_size, spec,
         kernel_initializer: kernel_initializer(spec),
         name: join(name, "query"),
         use_bias: spec.use_attention_bias
@@ -374,7 +376,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
     key_projection =
       hidden_state
-      |> Axon.dense(num_key_value_heads * head_size,
+      |> linear(num_key_value_heads * head_size, spec,
         kernel_initializer: kernel_initializer(spec),
         name: join(name, "key"),
         use_bias: spec.use_attention_bias
@@ -393,7 +395,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         key_projection
       else
         hidden_state
-        |> Axon.dense(num_key_value_heads * head_size,
+        |> linear(num_key_value_heads * head_size, spec,
           kernel_initializer: kernel_initializer(spec),
           name: join(name, "value"),
           use_bias: spec.use_attention_bias
@@ -435,7 +437,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     attention_output =
       attention_output
       |> Layers.flatten_trailing()
-      |> Axon.dense(spec.hidden_size,
+      |> linear(spec.hidden_size, spec,
         kernel_initializer: kernel_initializer(spec),
         name: join(name, "output"),
         use_bias: spec.use_attention_bias
@@ -526,12 +528,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     )
   end
 
-  defp gated_ffn(hidden_state, intermediate_size, output_size, opts) do
+  defp gated_ffn(hidden_state, intermediate_size, output_size, spec, opts) do
     name = opts[:name]
 
     gate =
       hidden_state
-      |> Axon.dense(intermediate_size,
+      |> linear(intermediate_size, spec,
         name: join(name, "gate"),
         kernel_initializer: opts[:kernel_initializer],
         use_bias: false
@@ -539,14 +541,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       |> Layers.activation(opts[:activation])
 
     intermediate =
-      Axon.dense(hidden_state, intermediate_size,
+      linear(hidden_state, intermediate_size, spec,
         name: join(name, "intermediate"),
         kernel_initializer: opts[:kernel_initializer],
         use_bias: false
       )
 
     Axon.multiply(gate, intermediate)
-    |> Axon.dense(output_size,
+    |> linear(output_size, spec,
       name: join(name, "output"),
       kernel_initializer: opts[:kernel_initializer],
       use_bias: false
@@ -565,6 +567,83 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   defp kernel_initializer(spec) do
     Axon.Initializers.normal(scale: spec.initializer_scale)
   end
+
+  defp quantized?(%__MODULE__{quantization_config: %{"quant_method" => "compressed-tensors"}}),
+    do: true
+
+  defp quantized?(_spec), do: false
+
+  # Linear layers whose weights come from a compressed-tensors checkpoint keep
+  # their int4 weights packed instead of being dequantized at load, so decode
+  # can read 4-bit traffic through the GEMV kernel.
+  defp linear(input, units, spec, opts) do
+    if quantized?(spec) and not opts[:use_bias] do
+      quantized_dense(input, units, name: opts[:name])
+    else
+      Axon.dense(input, units,
+        kernel_initializer: opts[:kernel_initializer],
+        name: opts[:name],
+        use_bias: opts[:use_bias]
+      )
+    end
+  end
+
+  defp quantized_dense(input, units, opts) do
+    group_size = CompressedTensors.quant_group_size()
+
+    packed =
+      Axon.param(
+        "packed",
+        fn shape -> {div(elem(shape, tuple_size(shape) - 1), 8), units} end,
+        type: {:s, 32},
+        initializer: :zeros
+      )
+
+    scales =
+      Axon.param(
+        "scales",
+        fn shape -> {div(elem(shape, tuple_size(shape) - 1), group_size), units} end,
+        type: {:bf, 16},
+        initializer: :zeros
+      )
+
+    Axon.layer(&quantized_dense_impl/4, [input, packed, scales],
+      name: opts[:name],
+      op_name: :gemma4_q4_dense,
+      group_size: group_size
+    )
+  end
+
+  # Decode runs one token at a time, which is exactly the GEMV the kernel
+  # implements. Prefill multiplies a whole sequence, so it dequantizes and
+  # uses a regular GEMM.
+  defp quantized_dense_impl(input, packed, scales, opts) do
+    group_size = opts[:group_size]
+    shape = Nx.shape(input)
+    hidden_size = elem(shape, tuple_size(shape) - 1)
+    {_words, units} = Nx.shape(packed)
+    input_type = Nx.type(input)
+
+    if single_token?(shape) do
+      input
+      |> Nx.reshape({hidden_size})
+      |> Nx.as_type({:bf, 16})
+      |> Q4Gemv.dot(packed, scales, group_size: group_size)
+      |> Nx.reshape(put_elem(shape, tuple_size(shape) - 1, units))
+      |> Nx.as_type(input_type)
+    else
+      weights = Q4Gemv.dequantize(packed, scales, group_size)
+
+      input
+      |> Nx.as_type(:f32)
+      |> Nx.dot(weights)
+      |> Nx.as_type(input_type)
+    end
+  end
+
+  defp single_token?({1, 1, _hidden}), do: true
+  defp single_token?({1, _hidden}), do: true
+  defp single_token?(_shape), do: false
 
   defp normalize_layer_types(%__MODULE__{layer_types: nil} = spec) do
     layer_types =
@@ -731,12 +810,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       }
     end
 
+    # Weights stay packed: the layer reads int4 directly on decode instead of
+    # loading a dequantized bf16 matrix four times the size.
     defp linear_source_fun(%{quantization_config: %{"quant_method" => "compressed-tensors"}}) do
       fn layer_name ->
         %{
-          "kernel" =>
-            {[{layer_name, "weight_packed"}, {layer_name, "weight_scale"}],
-             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.linear_kernel/1}
+          "packed" =>
+            {[{layer_name, "weight_packed"}],
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.repack_kernel/1},
+          "scales" =>
+            {[{layer_name, "weight_scale"}],
+             &Gemma4MicTranscribe.Gemma4Unified.CompressedTensors.repack_scales/1}
         }
       end
     end

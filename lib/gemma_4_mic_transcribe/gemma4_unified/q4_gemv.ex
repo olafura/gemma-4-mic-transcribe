@@ -40,6 +40,37 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
     )
   end
 
+  @doc """
+  Dequantizes packed weights to a `{k, n}` f32 matrix.
+
+  Used by the prefill path, which multiplies a whole token sequence and so
+  cannot use the GEMV kernel.
+  """
+  def dequantize(packed, scales, group_size) do
+    {words, n} = Nx.shape(packed)
+    k = words * @nibbles_per_word
+
+    shifts = Nx.iota({1, @nibbles_per_word, 1}, axis: 1, type: :s32) |> Nx.multiply(4)
+
+    weights =
+      packed
+      |> Nx.new_axis(1)
+      |> Nx.right_shift(shifts)
+      |> Nx.bitwise_and(0xF)
+      |> Nx.subtract(8)
+      |> Nx.reshape({k, n})
+
+    expanded_scales =
+      scales
+      |> Nx.new_axis(1)
+      |> Nx.broadcast({div(k, group_size), group_size, n})
+      |> Nx.reshape({k, n})
+
+    weights
+    |> Nx.as_type(:f32)
+    |> Nx.multiply(Nx.as_type(expanded_scales, :f32))
+  end
+
   defnp dequantized_dot(x, packed, scales, opts \\ []) do
     opts = keyword!(opts, [:group_size, :k, :n])
     group_size = opts[:group_size]
