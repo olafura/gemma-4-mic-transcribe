@@ -28,6 +28,51 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
     def generate(:runtime, _input, _opts), do: {:ok, "hello world"}
   end
 
+  defmodule IncrementalRuntime do
+    defstruct appended: []
+
+    def load(_opts), do: {:ok, :runtime}
+
+    def start_utterance(:runtime, _opts) do
+      send(:incremental_test, :start_utterance)
+      {:ok, %__MODULE__{}}
+    end
+
+    def append_audio(%__MODULE__{} = utterance, samples, _opts \\ []) do
+      send(:incremental_test, {:append, length(samples)})
+      %{utterance | appended: utterance.appended ++ samples}
+    end
+
+    def transcribe_utterance(%__MODULE__{}, _opts), do: {:ok, "hello world"}
+
+    # audio_tokens is read for metrics
+    def audio_tokens(%__MODULE__{appended: appended}), do: length(appended)
+  end
+
+  test "incremental prefill appends only audio that arrived since the last transcript" do
+    Process.register(self(), :incremental_test)
+
+    {:ok, session} =
+      start_test_session(
+        runtime_module: IncrementalRuntime,
+        speech_end_silence_ms: 1_000.0,
+        partial_interval_ms: 40.0,
+        partials: true
+      )
+
+    # 100 samples of speech triggers a partial, then 60 more triggers another
+    assert {:ok, _events} = StreamingSession.push_audio(session, List.duplicate(0.2, 100), 0.0)
+    assert {:ok, _events} = StreamingSession.push_audio(session, List.duplicate(0.2, 60), 100.0)
+
+    assert_received :start_utterance
+    assert_received {:append, first}
+    assert_received {:append, second}
+
+    # The second append carries only the new samples, not the whole utterance.
+    assert second < first
+    refute_received :start_utterance
+  end
+
   test "warms the runtime for every configured audio-token bucket on load" do
     Process.register(self(), :streaming_warmup_test)
 

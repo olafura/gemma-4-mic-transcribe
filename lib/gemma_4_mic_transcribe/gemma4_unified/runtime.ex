@@ -8,6 +8,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   alias Gemma4MicTranscribe.Gemma4Unified.ChannelState
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
+  alias Gemma4MicTranscribe.Gemma4Unified.Prompt
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.Gemma4Unified.Transcript
   alias Gemma4MicTranscribe.ModelCatalog
@@ -17,6 +18,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   # same audio bucket reuses one compiled prefill executable and all buckets
   # share one compiled decode executable.
   @cache_length_step 512
+
+  # Audio is prefilled in fixed-size chunks so every append reuses one compiled
+  # executable (2 seconds at 640 samples per token).
+  @audio_chunk_tokens 50
+  @max_utterance_audio_tokens 750
+  @prompt_headroom_tokens 128
 
   defstruct [
     :model_name,
@@ -216,6 +223,187 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defmodule Utterance do
+    @moduledoc false
+    # KV cache for one in-progress utterance. `cache` covers the prompt prefix
+    # plus every audio chunk appended so far, so a partial transcript only has
+    # to prefill the short suffix rather than the whole utterance again.
+    defstruct [:runtime, :cache, :offset, :audio_tokens, :pending_samples]
+  end
+
+  @doc """
+  Starts an utterance and prefills the static prompt prefix.
+
+  Streaming re-transcribes the same growing audio once per partial; without a
+  reusable cache each of those pays a full prefill over all audio so far.
+  """
+  def start_utterance(%__MODULE__{} = runtime, opts \\ []) do
+    prompt = Keyword.get(opts, :prompt, Config.default_prompt())
+    system_message = Keyword.get(opts, :system_message)
+
+    prefix = Prompt.prefix(system_message, prompt)
+
+    with {:ok, prefix_ids} <- tokenize(runtime.tokenizer, prefix) do
+      cache = init_generation_cache(runtime, cache_length(0, max_utterance_cache_tokens(runtime)))
+      length = length(prefix_ids)
+
+      {_logits, cache} =
+        predict_chunk(runtime, prefix_ids, silent_audio(runtime, 0), 0, cache)
+
+      log_debug(runtime, fn -> "runtime: utterance started prefix_tokens=#{length}" end)
+
+      {:ok,
+       %Utterance{
+         runtime: runtime,
+         cache: cache,
+         offset: length,
+         audio_tokens: 0,
+         pending_samples: []
+       }}
+    end
+  end
+
+  @doc """
+  Appends audio samples, prefilling whole chunks into the cache.
+
+  Chunks are a fixed number of audio tokens so one compiled executable serves
+  every append; leftover samples stay pending until the next call.
+  """
+  def append_audio(%Utterance{} = utterance, samples, opts \\ []) do
+    chunk_tokens = Keyword.get(opts, :chunk_tokens, @audio_chunk_tokens)
+    samples_per_chunk = chunk_tokens * AudioFeatureExtractor.samples_per_token()
+    runtime = utterance.runtime
+
+    pending = utterance.pending_samples ++ samples
+    chunk_count = div(length(pending), samples_per_chunk)
+    {ready, leftover} = Enum.split(pending, chunk_count * samples_per_chunk)
+
+    utterance =
+      ready
+      |> Enum.chunk_every(samples_per_chunk)
+      |> Enum.reduce(utterance, fn chunk, acc ->
+        features =
+          AudioFeatureExtractor.extract(chunk,
+            audio_token_count: chunk_tokens,
+            max_tokens: chunk_tokens
+          )
+
+        {input_features, _mask} =
+          prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+
+        audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, chunk_tokens)
+
+        {_logits, cache} =
+          predict_chunk(runtime, audio_ids, input_features, acc.offset, acc.cache)
+
+        %{
+          acc
+          | cache: cache,
+            offset: acc.offset + chunk_tokens,
+            audio_tokens: acc.audio_tokens + chunk_tokens
+        }
+      end)
+
+    %{utterance | pending_samples: leftover}
+  end
+
+  @doc """
+  Produces a transcript from the audio cached so far.
+
+  Prefills the prompt suffix on top of the cached audio and decodes. The
+  utterance is returned unchanged, because the suffix and generated tokens
+  must not be part of the cache the next chunk of audio appends to.
+  """
+  def transcribe_utterance(%Utterance{} = utterance, opts \\ []) do
+    runtime = utterance.runtime
+
+    with {:ok, suffix_ids} <- tokenize_suffix(runtime) do
+      started_at = System.monotonic_time(:millisecond)
+
+      {logits, cache} =
+        predict_chunk(
+          runtime,
+          suffix_ids,
+          silent_audio(runtime, 0),
+          utterance.offset,
+          utterance.cache
+        )
+
+      limits = generate_limits(runtime, opts)
+      channel_state = ChannelState.content()
+      suppression_mask = suppression_mask_for_state(runtime, channel_state)
+      token_id = TokenSelection.next_token_id_from_sequence(logits, suppression_mask)
+      prompt_length = utterance.offset + length(suffix_ids)
+
+      log_debug(runtime, fn ->
+        "runtime: utterance suffix prefilled audio_tokens=#{utterance.audio_tokens} " <>
+          "context_tokens=#{prompt_length} elapsed_ms=#{System.monotonic_time(:millisecond) - started_at}"
+      end)
+
+      token_ids =
+        if stop?(eos?(token_id, runtime.generation_config.eos_token_id), false, 1, limits) do
+          []
+        else
+          greedy_decode(
+            runtime,
+            cache,
+            token_id,
+            prompt_length,
+            [token_id],
+            1,
+            limits,
+            channel_state
+          )
+        end
+
+      {:ok, Transcript.decode(runtime.tokenizer, token_ids)}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  defp tokenize_suffix(runtime) do
+    tokenize(runtime.tokenizer, Prompt.suffix())
+  end
+
+  defp max_utterance_cache_tokens(runtime) do
+    @max_utterance_audio_tokens + runtime.max_response_tokens + @prompt_headroom_tokens
+  end
+
+  defp silent_audio(runtime, token_count) do
+    Nx.broadcast(
+      Nx.tensor(0.0, type: {:f, 32}, backend: runtime_backend(runtime)),
+      {max(token_count, 1), runtime.model_info.spec.audio_embed_dim}
+    )
+  end
+
+  # One forward pass over a chunk of tokens starting at `offset`.
+  defp predict_chunk(runtime, input_ids, input_features, offset, cache) do
+    backend = runtime_backend(runtime)
+    count = length(input_ids)
+    audio_token_id = runtime.model_info.spec.audio_token_id
+    audio_count = Enum.count(input_ids, &(&1 == audio_token_id))
+
+    input_features =
+      if audio_count == 0, do: silent_audio(runtime, 0), else: input_features
+
+    inputs =
+      Nx.with_default_backend(backend, fn ->
+        %{
+          "input_ids" => Nx.tensor([input_ids], type: :s64),
+          "attention_mask" => Nx.tensor([List.duplicate(1, count)], type: :s64),
+          "position_ids" => Nx.tensor([Enum.to_list(offset..(offset + count - 1))], type: :s64),
+          "input_features" => Nx.new_axis(input_features, 0),
+          "input_features_mask" =>
+            Nx.tensor([List.duplicate(1, Nx.axis_size(input_features, 0))], type: :s64),
+          "cache" => cache
+        }
+      end)
+
+    %{logits: logits, cache: cache} = runtime.predict_fun.(runtime.model_info.params, inputs)
+    {logits, cache}
   end
 
   def generate(%__MODULE__{} = runtime, input, opts \\ []) do

@@ -43,6 +43,9 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     :tts_similarity_threshold,
     :audio_token_buckets,
     :warmup?,
+    :incremental?,
+    :utterance_cache,
+    :utterance_cached_samples,
     :pending_samples,
     :next_frame_start_ms,
     :candidate_samples,
@@ -113,6 +116,9 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         Keyword.get(opts, :tts_similarity_threshold, @default_tts_similarity_threshold),
       audio_token_buckets: Keyword.get(opts, :audio_token_buckets, @default_audio_token_buckets),
       warmup?: Keyword.get(opts, :warmup, true),
+      incremental?: Keyword.get(opts, :incremental_prefill, true),
+      utterance_cache: nil,
+      utterance_cached_samples: 0,
       pending_samples: [],
       next_frame_start_ms: nil,
       candidate_samples: [],
@@ -440,6 +446,78 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
   defp transcribe(state, samples, generate_opts \\ []) do
     with {:ok, state} <- ensure_runtime(state) do
+      if incremental?(state) do
+        incremental_transcribe(state, samples, generate_opts)
+      else
+        full_transcribe(state, samples, generate_opts)
+      end
+    else
+      {:error, reason, state} -> {:error, reason, state}
+    end
+  end
+
+  defp incremental?(state) do
+    state.incremental? and Code.ensure_loaded?(state.runtime_module) and
+      function_exported?(state.runtime_module, :start_utterance, 2)
+  end
+
+  # Only the audio that arrived since the last call is prefilled; the cache
+  # already covers everything before it.
+  defp incremental_transcribe(state, samples, generate_opts) do
+    {state, append_ms} =
+      timed(fn ->
+        state = ensure_utterance_cache(state)
+        new_samples = Enum.drop(samples, state.utterance_cached_samples)
+
+        cache =
+          state.runtime_module.append_audio(state.utterance_cache, new_samples)
+
+        %{
+          state
+          | utterance_cache: cache,
+            utterance_cached_samples: state.utterance_cached_samples + length(new_samples)
+        }
+      end)
+
+    {{status, text_or_reason}, generate_ms} =
+      timed(fn ->
+        case state.runtime_module.transcribe_utterance(state.utterance_cache, generate_opts) do
+          {:ok, text} -> {:ok, String.trim(text)}
+          {:error, reason} -> {:error, reason}
+        end
+      end)
+
+    audio_tokens = Map.get(state.utterance_cache, :audio_tokens, 0)
+
+    metrics = %{
+      input_build_ms: append_ms,
+      generate_ms: generate_ms,
+      audio_tokens: audio_tokens,
+      bucket_seconds:
+        audio_tokens * AudioFeatureExtractor.samples_per_token() / state.sample_rate,
+      incremental: true
+    }
+
+    case status do
+      :ok -> {:ok, text_or_reason, metrics, state}
+      :error -> {:error, text_or_reason, state}
+    end
+  end
+
+  defp ensure_utterance_cache(%__MODULE__{utterance_cache: nil} = state) do
+    {:ok, cache} =
+      state.runtime_module.start_utterance(state.runtime,
+        prompt: Keyword.fetch!(state.runtime_opts, :prompt),
+        system_message: Keyword.get(state.runtime_opts, :system_message)
+      )
+
+    %{state | utterance_cache: cache, utterance_cached_samples: 0}
+  end
+
+  defp ensure_utterance_cache(state), do: state
+
+  defp full_transcribe(state, samples, generate_opts) do
+    with {:ok, state} <- ensure_runtime(state) do
       {input, input_build_ms} =
         timed(fn ->
           Input.build(samples,
@@ -581,7 +659,9 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   defp reset_utterance(state) do
     %{
       state
-      | in_speech?: false,
+      | utterance_cache: nil,
+        utterance_cached_samples: 0,
+        in_speech?: false,
         utterance_id: nil,
         utterance_samples: [],
         utterance_start_ms: nil,
