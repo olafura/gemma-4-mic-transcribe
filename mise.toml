@@ -1,0 +1,7 @@
+[tasks."trace:bpf"]
+description = "HIP kernel/memcpy/sync latency histograms via bpftrace (sudo; args after -- are passed through, e.g. a pid)"
+run = "sudo --preserve-env=ROCM_PATH,HIP_LIB scripts/trace/hip-latency.sh"
+
+[tasks."trace:elixir"]
+description = "Run the CLI with BEAM call tracing, no root needed (pass CLI args after --)"
+run = "./gemma_4_mic_transcribe --trace --debug"

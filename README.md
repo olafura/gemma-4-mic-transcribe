@@ -238,6 +238,32 @@ events have `send_to_llm: true`. `Gemma4MicTranscribe.WebRTC.TestHarness`
 contains the Elixir WebRTC-facing adapter used for browser/WebRTC testing; see
 https://elixir-webrtc.org/ for the WebRTC project.
 
+## Tracing
+
+Two tracing paths are available for performance investigation:
+
+BEAM call tracing needs no root. It uses `:dbg` from `runtime_tools` (see
+[A guide to tracing in Elixir](https://www.erlang-solutions.com/blog/a-guide-to-tracing-in-elixir/))
+and logs per-call wall durations for the pipeline modules to stderr:
+
+```bash
+./gemma_4_mic_transcribe --wav journal1.wav --trace
+mise run trace:elixir -- --wav journal1.wav --backend exla:rocm
+```
+
+GPU-side tracing uses [bpftrace](https://bpftrace.org/) uprobes on the HIP
+runtime to histogram `hipLaunchKernel`, `hipMemcpy*`, and
+`hipStreamSynchronize` latencies for a running transcription. bpftrace needs
+root, so it is wrapped in a mise task that attaches to the running `beam.smp`
+(start a transcription first, then in another terminal):
+
+```bash
+mise run trace:bpf            # oldest beam.smp
+mise run trace:bpf -- <pid>   # specific pid
+```
+
+Set `ROCM_PATH` or `HIP_LIB` if the HIP runtime is not under `/opt/rocm`.
+
 ## Implementation Status
 
 Implemented:
