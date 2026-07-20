@@ -300,6 +300,16 @@ BEAM TLS is implemented in Erlang rather than libssl, so OBI reports HTTPS
 connections at the TCP level without decoding request contents; plain HTTP,
 gRPC, and proxied traffic decode fully.
 
+## Measurement reliability
+
+`--repeat N` replays the audio N times against the loaded model, advancing the
+audio timeline so lag stays comparable across passes. Four passes on
+`journal1.wav` with `--no-partials`: a 2s utterance measured 2081/2083/2061/2087
+ms and a 5s utterance 3561/3620/3505/3516 ms, so run to run spread is 26 ms and
+115 ms. Per-utterance cost is stable once the model is loaded and every shape is
+compiled, and differences above roughly 150 ms in the comparisons below are
+signal rather than noise.
+
 ## Latency budget
 
 Streaming ASR services report two separate numbers, and mixing them hides which
