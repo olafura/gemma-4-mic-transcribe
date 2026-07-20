@@ -22,6 +22,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   # Audio is prefilled in fixed-size chunks so every append reuses one compiled
   # executable (2 seconds at 640 samples per token).
   @audio_chunk_tokens 50
+  # Leftover audio is decomposed into these sizes instead of being padded up to
+  # a whole chunk, so a short utterance prefills the tokens it actually has.
+  # Each size is one more compiled executable, all warmed at startup.
+  @audio_chunk_sizes [50, 25, 10, 5, 2, 1]
   @max_utterance_audio_tokens 750
   @prompt_headroom_tokens 128
 
@@ -226,9 +230,21 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
              start_utterance(runtime, prompt: prompt, system_message: system_message) do
         utterance = append_audio(utterance, List.duplicate(0.0, samples_per_chunk))
 
-        # A partial chunk exercises the padded flush shape too.
+        # Every flush size is a separate executable, so exercise them all here
+        # rather than compiling one mid-utterance.
+        samples_per_token = AudioFeatureExtractor.samples_per_token()
+
         utterance =
-          %{utterance | pending_samples: List.duplicate(0.0, div(samples_per_chunk, 2))}
+          Enum.reduce(@audio_chunk_sizes, utterance, fn size, acc ->
+            %{acc | pending_samples: List.duplicate(0.0, size * samples_per_token)}
+            |> transcribe_utterance(max_new_tokens: 1, min_new_tokens: 1)
+            |> case do
+              {:ok, _} -> acc
+              _ -> acc
+            end
+          end)
+
+        utterance = %{utterance | pending_samples: List.duplicate(0.0, samples_per_token)}
 
         case transcribe_utterance(utterance, max_new_tokens: 2, min_new_tokens: 2) do
           {:ok, _text} -> :ok
@@ -426,30 +442,41 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp flush_pending_audio(%Utterance{} = utterance) do
     runtime = utterance.runtime
     samples_per_token = AudioFeatureExtractor.samples_per_token()
-    real_tokens = ceil_div(length(utterance.pending_samples), samples_per_token)
+    total_tokens = ceil_div(length(utterance.pending_samples), samples_per_token)
 
-    features =
-      AudioFeatureExtractor.extract(utterance.pending_samples,
-        audio_token_count: @audio_chunk_tokens,
-        max_tokens: @audio_chunk_tokens
-      )
+    total_tokens
+    |> decompose_tokens()
+    |> Enum.reduce({utterance.content_length, utterance.cache, 0}, fn size,
+                                                                      {offset, cache, flushed} ->
+      chunk =
+        Enum.slice(
+          utterance.pending_samples,
+          flushed * samples_per_token,
+          size * samples_per_token
+        )
 
-    {input_features, _mask} =
-      prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+      features =
+        AudioFeatureExtractor.extract(chunk, audio_token_count: size, max_tokens: size)
 
-    audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, @audio_chunk_tokens)
+      {input_features, _mask} =
+        prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
 
-    attention_mask =
-      List.duplicate(1, real_tokens) ++ List.duplicate(0, @audio_chunk_tokens - real_tokens)
+      audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, size)
 
-    {_logits, cache} =
-      predict_chunk(runtime, audio_ids, input_features, utterance.content_length, utterance.cache,
-        attention_mask: attention_mask
-      )
+      {_logits, cache} = predict_chunk(runtime, audio_ids, input_features, offset, cache)
 
-    # Padded slots are masked out, so they must not consume positions: the
-    # suffix has to sit immediately after the real audio, not after the pad.
-    {utterance.content_length + real_tokens, cache, real_tokens}
+      {offset + size, cache, flushed + size}
+    end)
+  end
+
+  # Largest size first, so a 37 token remainder becomes 25 + 10 + 2 rather than
+  # 37 single token prefills.
+  @doc false
+  def decompose_tokens(0), do: []
+
+  def decompose_tokens(count) do
+    size = Enum.find(@audio_chunk_sizes, 1, &(&1 <= count))
+    [size | decompose_tokens(count - size)]
   end
 
   defp ceil_div(0, _denominator), do: 0

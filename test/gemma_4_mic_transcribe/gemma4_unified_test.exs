@@ -886,6 +886,16 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Runtime.banned_ngram_token_ids([6, 5, 9, 7, 6, 5], 1) == []
   end
 
+  test "leftover audio decomposes into whole chunk sizes without padding" do
+    # 37 tokens should become 25 + 10 + 2, not 37 single-token prefills and not
+    # one padded 50-token chunk.
+    assert Runtime.decompose_tokens(37) == [25, 10, 2]
+    assert Runtime.decompose_tokens(50) == [50]
+    assert Runtime.decompose_tokens(1) == [1]
+    assert Runtime.decompose_tokens(0) == []
+    assert Enum.sum(Runtime.decompose_tokens(123)) == 123
+  end
+
   test "prefill masks exclude padded audio tokens and keep positions contiguous" do
     # prompt: [text, text, audio, audio, PAD, PAD, text] -> 7 tokens,
     # audio span starts at 2 with 2 real of 4 bucketed tokens
