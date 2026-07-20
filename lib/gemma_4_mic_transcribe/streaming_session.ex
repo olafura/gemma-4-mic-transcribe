@@ -116,10 +116,10 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         Keyword.get(opts, :tts_similarity_threshold, @default_tts_similarity_threshold),
       audio_token_buckets: Keyword.get(opts, :audio_token_buckets, @default_audio_token_buckets),
       warmup?: Keyword.get(opts, :warmup, true),
-      # Prefills audio during speech, so end-of-speech only pays the suffix and
-      # decode. Pair with --no-partials: a partial triggers a full transcribe,
-      # and those queue up faster than they complete.
-      incremental?: Keyword.get(opts, :incremental_prefill, true),
+      # Off by default: measured worse than whole-utterance prefill even with
+      # partials disabled and audio prefilled during speech (3.7s/4.6s vs
+      # 2.0s/3.5s), and short utterances can come back as refusals. See README.
+      incremental?: Keyword.get(opts, :incremental_prefill, false),
       utterance_cache: nil,
       utterance_cached_samples: 0,
       pending_samples: [],
