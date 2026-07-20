@@ -47,6 +47,14 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert Nx.shape(features.input_features) == {2, 640}
   end
 
+  test "audio feature extractor pads to a requested token bucket" do
+    features = AudioFeatureExtractor.extract(List.duplicate(0.5, 641), audio_token_count: 4)
+
+    assert features.token_count == 4
+    assert Nx.shape(features.input_features) == {4, 640}
+    assert Nx.to_flat_list(features.attention_mask) == [1, 1, 0, 0]
+  end
+
   test "prompt expands Gemma4 audio marker and opens the model turn" do
     prompt = Prompt.build("System", "Transcribe.", 3)
 

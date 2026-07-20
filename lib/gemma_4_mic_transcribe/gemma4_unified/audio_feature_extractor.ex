@@ -10,9 +10,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor do
   def extract(samples, opts \\ []) do
     samples_per_token = Keyword.get(opts, :samples_per_token, @samples_per_token)
     max_tokens = Keyword.get(opts, :max_tokens, @default_max_tokens)
+    requested_token_count = Keyword.get(opts, :audio_token_count)
 
     samples = samples |> Enum.to_list() |> truncate_samples(samples_per_token, max_tokens)
-    token_count = ceil_div(length(samples), samples_per_token)
+    actual_token_count = ceil_div(length(samples), samples_per_token)
+    token_count = token_count(actual_token_count, requested_token_count)
     padded = samples ++ List.duplicate(0.0, token_count * samples_per_token - length(samples))
 
     frames =
@@ -21,7 +23,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor do
       |> Nx.tensor(type: {:f, 32})
 
     attention_mask =
-      List.duplicate(1, token_count)
+      (List.duplicate(1, actual_token_count) ++
+         List.duplicate(0, token_count - actual_token_count))
       |> Nx.tensor(type: {:s, 64})
 
     %{
@@ -38,6 +41,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor do
        when is_integer(max_tokens) and max_tokens > 0 do
     Enum.take(samples, samples_per_token * max_tokens)
   end
+
+  defp token_count(actual_token_count, requested_token_count)
+       when is_integer(requested_token_count) and requested_token_count > actual_token_count,
+       do: requested_token_count
+
+  defp token_count(actual_token_count, _requested_token_count), do: actual_token_count
 
   defp ceil_div(0, _denominator), do: 0
   defp ceil_div(numerator, denominator), do: div(numerator + denominator - 1, denominator)
