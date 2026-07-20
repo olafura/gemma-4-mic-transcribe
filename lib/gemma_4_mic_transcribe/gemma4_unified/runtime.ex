@@ -707,21 +707,34 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp param_type({_kind, _size} = type), do: {:ok, type}
   defp param_type(other), do: {:error, "unsupported param type #{inspect(other)}"}
 
-  # ROCm gfx1151 crashes on the eager GPU kernels generated while unpacking
-  # compressed-tensors weights and casting them to bf16, so checkpoint loading
-  # is staged on the EXLA host client and only the finished parameters are
-  # transferred to the GPU.
+  # ROCm gfx1151 segfaults in the eager GPU kernels generated while unpacking
+  # compressed-tensors weights and casting them to bf16, and the EXLA host
+  # client has crashed in its own JIT code doing the same unpack, so
+  # checkpoint loading is staged on Torchx CPU (libtorch) when available and
+  # only the finished parameters are transferred to the GPU.
   defp stage_params_on_host?({EXLA.Backend, backend_opts}),
     do: backend_opts[:client] == :rocm
 
   defp stage_params_on_host?(_backend), do: false
 
   defp param_load_backend(backend) do
-    if stage_params_on_host?(backend), do: {EXLA.Backend, client: :host}, else: backend
+    cond do
+      not stage_params_on_host?(backend) -> backend
+      Code.ensure_loaded?(Torchx.Backend) -> {Torchx.Backend, device: :cpu}
+      true -> {EXLA.Backend, client: :host}
+    end
   end
 
   defp transfer_params(params, backend) do
     if stage_params_on_host?(backend), do: deep_transfer(params, backend), else: params
+  end
+
+  defp deep_transfer(%Axon.ModelState{} = model_state, backend) do
+    %{
+      model_state
+      | data: deep_transfer(model_state.data, backend),
+        state: deep_transfer(model_state.state, backend)
+    }
   end
 
   defp deep_transfer(%Nx.Tensor{} = tensor, backend), do: Nx.backend_transfer(tensor, backend)
@@ -819,7 +832,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     case RocmPreflight.apply_runtime_workarounds() do
       {:ok, true} ->
         Logger.warning(
-          "runtime: applied ROCm gfx1151 XLA workaround: appended --xla_gpu_autotune_level=0"
+          "runtime: applied ROCm gfx1151 XLA workarounds: XLA_FLAGS=#{System.get_env("XLA_FLAGS")}"
         )
 
         :ok
