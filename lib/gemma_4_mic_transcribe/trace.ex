@@ -45,7 +45,11 @@ defmodule Gemma4MicTranscribe.Trace do
     }
 
     {:ok, _tracer} = :dbg.tracer(:process, {&handle_event/2, state})
-    {:ok, _} = :dbg.p(:all, [:call, :timestamp])
+    # :arity puts {m, f, arity} instead of {m, f, args} in call messages.
+    # Without it every traced call copies its full arguments into the trace
+    # message; streaming audio passes 100k+ element sample lists through
+    # these modules constantly, which OOM-killed the VM within a minute.
+    {:ok, _} = :dbg.p(:all, [:call, :timestamp, :arity])
 
     for module <- modules do
       # tp traces exported calls only. tpl would also match compiler-generated
@@ -62,8 +66,9 @@ defmodule Gemma4MicTranscribe.Trace do
     :ok
   end
 
-  defp handle_event({:trace_ts, pid, :call, {module, fun, args}, ts}, state) do
-    key = {pid, module, fun, length(args)}
+  defp handle_event({:trace_ts, pid, :call, {module, fun, arity_or_args}, ts}, state) do
+    arity = if is_integer(arity_or_args), do: arity_or_args, else: length(arity_or_args)
+    key = {pid, module, fun, arity}
     update_in(state.stacks[key], &[ts | &1 || []])
   end
 
