@@ -74,13 +74,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
                debug?,
                "runtime: Bumblebee.load_model #{repo_id} (checkpoint download/load)",
                fn ->
-                 Bumblebee.load_model(
-                   repo,
-                   model_opts
-                   |> Keyword.put(:spec, spec)
-                   |> Keyword.put(:type, param_type)
-                   |> Keyword.replace_lazy(:backend, &param_load_backend/1)
-                 )
+                 model_opts
+                 |> Keyword.put(:spec, spec)
+                 |> maybe_put_param_type(spec, param_type)
+                 |> Keyword.replace_lazy(:backend, &param_load_backend/1)
+                 |> then(&Bumblebee.load_model(repo, &1))
                end
              ),
            {:ok, tokenizer} <-
@@ -805,6 +803,18 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp log_debug(%__MODULE__{debug: debug?}, message_fun), do: log_debug(debug?, message_fun)
   defp log_debug(true, message_fun), do: Logger.debug(message_fun)
   defp log_debug(false, _message_fun), do: :ok
+
+  # A quantized checkpoint keeps its int4 weights packed in integer tensors, and
+  # a global mixed-precision policy would rewrite those packed words as floats,
+  # destroying them. Such checkpoints keep their stored dtypes instead.
+  defp maybe_put_param_type(
+         opts,
+         %{quantization_config: %{"quant_method" => "compressed-tensors"}},
+         _type
+       ),
+       do: opts
+
+  defp maybe_put_param_type(opts, _spec, type), do: Keyword.put(opts, :type, type)
 
   defp param_type(nil), do: {:ok, {:bf, 16}}
   defp param_type("bf16"), do: {:ok, {:bf, 16}}
