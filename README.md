@@ -292,22 +292,22 @@ BEAM TLS is implemented in Erlang rather than libssl, so OBI reports HTTPS
 connections at the TCP level without decoding request contents; plain HTTP,
 gRPC, and proxied traffic decode fully.
 
-## Incremental prefill (experimental, off by default)
+## Incremental prefill
 
-Streaming re-transcribes the whole utterance for every partial, so each
-partial pays a full prefill over all audio so far. `Gemma4Unified.Runtime`
+Without it, streaming re-transcribes the whole utterance for every partial, so
+each partial pays a full prefill over all audio so far. `Gemma4Unified.Runtime`
 exposes an utterance cache (`start_utterance/2`, `append_audio/3`,
 `transcribe_utterance/2`) that prefills the prompt prefix once, appends new
-audio in fixed 50-token chunks, and prefills only the short prompt suffix per
-transcript. Enable with `incremental_prefill: true` on a streaming session.
+audio in fixed 50-token chunks so a single compiled executable serves every
+append, and prefills only the short prompt suffix per transcript. The cache
+returned by a transcript is discarded, because the suffix and generated tokens
+must not be visible to the next audio append; Nx tensors being immutable makes
+that rollback free. Disable with `incremental_prefill: false`.
 
-It is **not correct yet**: transcripts come back empty once audio chunks are
-appended, while the same prompt tokenizes identically to the working
-single-shot path (verified: prefix ends at the audio-begin marker, suffix
-starts at audio-end, and their concatenation matches the full prompt exactly).
-The remaining suspect is appending several tokens to the KV cache at a
-non-zero offset, which the single-shot path never does — it only ever
-prefills at offset 0 and then decodes one token at a time.
+This depends on appending several tokens to the KV cache at a non-zero offset,
+which the single-shot path never does. That path was broken by a rotary
+position bug (see below) and is covered by a test asserting chunked prefill
+and one-token-at-a-time decode both match a single-shot prefill exactly.
 
 ## Implementation Status
 

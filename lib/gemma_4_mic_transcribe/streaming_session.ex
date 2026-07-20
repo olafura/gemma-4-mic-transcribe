@@ -116,9 +116,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         Keyword.get(opts, :tts_similarity_threshold, @default_tts_similarity_threshold),
       audio_token_buckets: Keyword.get(opts, :audio_token_buckets, @default_audio_token_buckets),
       warmup?: Keyword.get(opts, :warmup, true),
-      # Off by default: appending multiple tokens to the KV cache at a
-      # non-zero offset currently yields empty transcripts (see README).
-      incremental?: Keyword.get(opts, :incremental_prefill, false),
+      incremental?: Keyword.get(opts, :incremental_prefill, true),
       utterance_cache: nil,
       utterance_cached_samples: 0,
       pending_samples: [],
