@@ -260,8 +260,8 @@ BEAM call tracing needs no root. It uses `:dbg` from `runtime_tools` (see
 and logs per-call wall durations for the pipeline modules to stderr:
 
 ```bash
-./gemma_4_mic_transcribe --wav journal1.wav --trace
-mise run trace:elixir -- --wav journal1.wav --backend exla:rocm
+./gemma_4_mic_transcribe --wav journal1.wav --trace 2>&1 | tee trace.log
+mise run trace:elixir -- --wav journal1.wav --backend exla:rocm 2>&1 | tee trace.log
 ```
 
 GPU-side tracing uses [bpftrace](https://bpftrace.org/) uprobes on the HIP
@@ -271,9 +271,24 @@ root, so it is wrapped in a mise task that attaches to the running `beam.smp`
 (start a transcription first, then in another terminal):
 
 ```bash
-mise run trace:bpf            # oldest beam.smp
-mise run trace:bpf -- <pid>   # specific pid
+# terminal 1: the run under test, both streams captured
+./gemma_4_mic_transcribe --wav journal1.wav --stream-wav --realtime --repeat 8 \
+  --output jsonl --backend exla:rocm --model-name gemma4-12b-qat-w4a16-ct \
+  --max-response-tokens 32 --no-partials --debug 2>&1 | tee run.log
+
+# terminal 2: once "generation prefill start" appears in run.log
+mise run trace:bpf | tee hip-trace.txt          # oldest beam.smp
+mise run trace:bpf -- <pid> | tee hip-trace.txt # specific pid
 ```
+
+Pipe through `tee`, not `tail`: `tail` buffers until its input closes, so
+interrupting the tracer discards everything it had collected. `tee` writes
+each histogram as it prints.
+
+Read the histograms as: many `@kernel_launch_us` entries at tens of
+microseconds means per-call dispatch dominates and batching work differently
+would help; `@sync_wait_us` dominating means the GPU is genuinely busy and the
+per-call cost is real compute.
 
 Set `ROCM_PATH` or `HIP_LIB` if the HIP runtime is not under `/opt/rocm`.
 
@@ -287,7 +302,7 @@ installed `obi` binary carries file capabilities (`getcap $(which obi)`), no
 root is needed:
 
 ```bash
-mise run trace:obi   # attaches to beam.smp processes, prints spans to stdout
+mise run trace:obi | tee obi-spans.txt   # attaches to beam.smp processes
 ```
 
 Example span for a BEAM HTTP client call:
