@@ -711,6 +711,67 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert message =~ xla_extension
   end
 
+  test "repacked int4 weights dequantize to the same matrix as the dequant path" do
+    out_features = 4
+    # in_features must cover whole 32-element quant groups
+    packed_cols = 8
+    in_features = packed_cols * 8
+    group_size = CompressedTensors.quant_group_size()
+    scale_cols = div(in_features, group_size)
+
+    # Deterministic biased nibbles 0..15 packed 8-per-word along in_features.
+    nibbles =
+      Nx.iota({out_features, packed_cols, 8}, type: :u32)
+      |> Nx.multiply(7)
+      |> Nx.remainder(16)
+
+    multipliers =
+      Enum.map(0..7, &:erlang.bsl(1, &1 * 4))
+      |> Nx.tensor(type: :u32)
+      |> Nx.reshape({1, 1, 8})
+
+    packed =
+      nibbles
+      |> Nx.multiply(multipliers)
+      |> Nx.sum(axes: [2])
+      |> Nx.bitcast(:s32)
+
+    scales =
+      Nx.iota({out_features, scale_cols}, type: {:f, 32})
+      |> Nx.add(1)
+      |> Nx.divide(100)
+
+    # Reference: existing dequant path, {in_features, out_features}
+    reference = CompressedTensors.linear_kernel([packed, scales])
+    assert Nx.shape(reference) == {in_features, out_features}
+
+    repacked = CompressedTensors.repack_kernel([packed])
+    repacked_scales = CompressedTensors.repack_scales([scales])
+
+    assert Nx.shape(repacked) == {div(in_features, 8), out_features}
+    assert Nx.shape(repacked_scales) == {scale_cols, out_features}
+
+    # Dequantize the repacked layout the way the kernel does.
+    shifts = Nx.iota({1, 8, 1}, axis: 1, type: :s32) |> Nx.multiply(4)
+
+    dequantized =
+      repacked
+      |> Nx.new_axis(1)
+      |> Nx.right_shift(shifts)
+      |> Nx.bitwise_and(0xF)
+      |> Nx.subtract(8)
+      |> Nx.reshape({in_features, out_features})
+      |> Nx.as_type({:f, 32})
+      |> Nx.multiply(
+        repacked_scales
+        |> Nx.new_axis(1)
+        |> Nx.broadcast({scale_cols, group_size, out_features})
+        |> Nx.reshape({in_features, out_features})
+      )
+
+    assert Nx.to_number(Nx.reduce_max(Nx.abs(Nx.subtract(dequantized, reference)))) < 1.0e-5
+  end
+
   test "banned ngram tokens block completing an already-generated trigram" do
     # sequence in order: [5, 6, 7, 9, 5, 6] -> reversed [6, 5, 9, 7, 6, 5]
     # last bigram [5, 6] previously continued with 7, so 7 is banned
