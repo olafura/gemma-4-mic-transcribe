@@ -116,10 +116,10 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         Keyword.get(opts, :tts_similarity_threshold, @default_tts_similarity_threshold),
       audio_token_buckets: Keyword.get(opts, :audio_token_buckets, @default_audio_token_buckets),
       warmup?: Keyword.get(opts, :warmup, true),
-      # Off by default: measured slower than whole-utterance prefill (final lag
-      # 9.3s/18.2s vs 4.7s/11.9s) because each partial still costs more than the
-      # partial interval, so the backlog grows. See README.
-      incremental?: Keyword.get(opts, :incremental_prefill, false),
+      # Prefills audio during speech, so end-of-speech only pays the suffix and
+      # decode. Pair with --no-partials: a partial triggers a full transcribe,
+      # and those queue up faster than they complete.
+      incremental?: Keyword.get(opts, :incremental_prefill, true),
       utterance_cache: nil,
       utterance_cached_samples: 0,
       pending_samples: [],
@@ -325,12 +325,14 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         state.utterance_last_active_end_ms
       end
 
-    state = %{
-      state
-      | utterance_samples: [frame | state.utterance_samples],
-        trailing_silence_ms: trailing_silence_ms,
-        utterance_last_active_end_ms: utterance_last_active_end_ms
-    }
+    state =
+      %{
+        state
+        | utterance_samples: [frame | state.utterance_samples],
+          trailing_silence_ms: trailing_silence_ms,
+          utterance_last_active_end_ms: utterance_last_active_end_ms
+      }
+      |> stream_audio_into_cache(frame)
 
     duration_ms = frame_end_ms - state.utterance_start_ms
 
@@ -505,6 +507,23 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     case status do
       :ok -> {:ok, text_or_reason, metrics, state}
       :error -> {:error, text_or_reason, state}
+    end
+  end
+
+  # Prefills audio while the speaker is still talking, so end-of-speech only
+  # has to prefill the prompt suffix and decode. Whole chunks are prefilled at
+  # several times realtime, so this keeps up with arriving audio.
+  defp stream_audio_into_cache(state, frame) do
+    if incremental?(state) and state.runtime do
+      state = ensure_utterance_cache(state)
+
+      %{
+        state
+        | utterance_cache: state.runtime_module.append_audio(state.utterance_cache, frame),
+          utterance_cached_samples: state.utterance_cached_samples + length(frame)
+      }
+    else
+      state
     end
   end
 
