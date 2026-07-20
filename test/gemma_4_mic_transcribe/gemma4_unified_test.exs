@@ -696,6 +696,24 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert message =~ xla_extension
   end
 
+  test "prefill masks exclude padded audio tokens and keep positions contiguous" do
+    # prompt: [text, text, audio, audio, PAD, PAD, text] -> 7 tokens,
+    # audio span starts at 2 with 2 real of 4 bucketed tokens
+    masks = Runtime.prefill_masks(7, 2, 2, 4)
+
+    assert masks.attention_mask == [1, 1, 1, 1, 0, 0, 1]
+    assert masks.position_ids == [0, 1, 2, 3, 0, 0, 4]
+    assert masks.content_length == 5
+  end
+
+  test "prefill masks are all-ones without padding" do
+    masks = Runtime.prefill_masks(4, 1, 2, 2)
+
+    assert masks.attention_mask == [1, 1, 1, 1]
+    assert masks.position_ids == [0, 1, 2, 3]
+    assert masks.content_length == 4
+  end
+
   test "ROCm preflight adds gfx1151 XLA workarounds" do
     all_flags =
       "--xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= " <>

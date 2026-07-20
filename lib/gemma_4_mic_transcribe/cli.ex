@@ -40,6 +40,7 @@ defmodule Gemma4MicTranscribe.CLI do
               min_utterance_ms: 350.0,
               max_utterance_ms: 8_000.0,
               partial_interval_ms: 1_000.0,
+              partial_max_response_tokens: 16,
               partials: true,
               tts_text: nil,
               tts_timestamp_ms: 0.0,
@@ -79,6 +80,7 @@ defmodule Gemma4MicTranscribe.CLI do
     min_utterance_ms: :float,
     max_utterance_ms: :float,
     partial_interval_ms: :float,
+    partial_max_response_tokens: :integer,
     partials: :boolean,
     tts_text: :string,
     tts_timestamp_ms: :float,
@@ -210,6 +212,7 @@ defmodule Gemma4MicTranscribe.CLI do
       min_utterance_ms: Keyword.get(opts, :min_utterance_ms, 350.0),
       max_utterance_ms: Keyword.get(opts, :max_utterance_ms, 8_000.0),
       partial_interval_ms: Keyword.get(opts, :partial_interval_ms, 1_000.0),
+      partial_max_response_tokens: Keyword.get(opts, :partial_max_response_tokens, 16),
       partials: Keyword.get(opts, :partials, true),
       tts_text: Keyword.get(opts, :tts_text),
       tts_timestamp_ms: Keyword.get(opts, :tts_timestamp_ms, 0.0),
@@ -231,6 +234,8 @@ defmodule Gemma4MicTranscribe.CLI do
          :ok <- validate_positive(config.min_utterance_ms, "--min-utterance-ms"),
          :ok <- validate_positive(config.max_utterance_ms, "--max-utterance-ms"),
          :ok <- validate_positive(config.partial_interval_ms, "--partial-interval-ms"),
+         :ok <-
+           validate_positive(config.partial_max_response_tokens, "--partial-max-response-tokens"),
          :ok <- validate_ratio(config.speech_min_active_ratio, "--speech-min-active-ratio"),
          :ok <-
            validate_ratio(
@@ -330,6 +335,7 @@ defmodule Gemma4MicTranscribe.CLI do
       min_utterance_ms: config.min_utterance_ms,
       max_utterance_ms: config.max_utterance_ms,
       partial_interval_ms: config.partial_interval_ms,
+      partial_max_response_tokens: config.partial_max_response_tokens,
       partials: config.partials,
       debug: config.debug,
       debug_top_k: config.debug_top_k
@@ -562,6 +568,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --min-utterance-ms FLOAT           Suppress shorter utterances, default 350
       --max-utterance-ms FLOAT           Force-commit long utterances, default 8000
       --partial-interval-ms FLOAT        Minimum time between partial transcripts, default 1000
+      --partial-max-response-tokens INT  Token cap for partial transcripts, default 16
       --no-partials                      Disable unstable partial transcript events
       --tts-text TEXT                    Recent TTS text to suppress as echo in stream mode
       --tts-timestamp-ms FLOAT           Timestamp for --tts-text, default 0

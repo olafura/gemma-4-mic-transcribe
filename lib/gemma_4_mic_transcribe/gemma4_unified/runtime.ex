@@ -248,12 +248,29 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           prepare_audio_tensors(runtime, input.audio.input_features, input.audio.attention_mask)
         end)
 
+      actual_audio_tokens =
+        input.audio.attention_mask |> Nx.sum() |> Nx.to_number()
+
+      masks =
+        prefill_masks(
+          length(input_ids),
+          audio_tokens.audio_start_index,
+          actual_audio_tokens,
+          audio_tokens.audio
+        )
+
+      log_debug(runtime, fn ->
+        "runtime: audio padding masked_tokens=#{audio_tokens.audio - actual_audio_tokens} " <>
+          "content_tokens=#{masks.content_length}"
+      end)
+
       token_ids =
         cached_greedy_generate(
           runtime,
           input_ids,
           input_features,
           input_features_mask,
+          masks,
           generate_limits(runtime, opts)
         )
 
@@ -283,14 +300,55 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     }
   end
 
-  defp cached_greedy_generate(_runtime, _input_ids, _input_features, _input_features_mask, %{
-         max_new_tokens: max_new_tokens
-       })
+  @doc """
+  Builds the prefill attention mask and position ids for a prompt whose audio
+  soft tokens are padded to a bucket.
+
+  Padded audio positions are masked out of attention so the model never
+  attends to the zero-padding (which it otherwise transcribes as looping
+  hallucinated speech), and positions stay contiguous over the real tokens.
+  """
+  def prefill_masks(prompt_length, audio_start_index, actual_audio_tokens, prompt_audio_tokens) do
+    padding_start = (audio_start_index || 0) + actual_audio_tokens
+    padding_count = max(prompt_audio_tokens - actual_audio_tokens, 0)
+    padding_range = padding_start..(padding_start + padding_count - 1)//1
+
+    {attention_mask, position_ids, content_length} =
+      Enum.reduce(0..(prompt_length - 1), {[], [], 0}, fn index, {mask, positions, position} ->
+        if padding_count > 0 and index in padding_range do
+          {[0 | mask], [0 | positions], position}
+        else
+          {[1 | mask], [position | positions], position + 1}
+        end
+      end)
+
+    %{
+      attention_mask: Enum.reverse(attention_mask),
+      position_ids: Enum.reverse(position_ids),
+      content_length: content_length
+    }
+  end
+
+  defp cached_greedy_generate(
+         _runtime,
+         _input_ids,
+         _input_features,
+         _input_features_mask,
+         _masks,
+         %{max_new_tokens: max_new_tokens}
+       )
        when max_new_tokens <= 0 do
     []
   end
 
-  defp cached_greedy_generate(runtime, input_ids, input_features, input_features_mask, limits) do
+  defp cached_greedy_generate(
+         runtime,
+         input_ids,
+         input_features,
+         input_features_mask,
+         masks,
+         limits
+       ) do
     prompt_length = length(input_ids)
     max_cache_length = cache_length(prompt_length, runtime.max_response_tokens)
 
@@ -306,7 +364,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     started_at = System.monotonic_time(:millisecond)
 
     {logits, cache} =
-      predict_prefill_next_logits(runtime, input_ids, input_features, input_features_mask, cache)
+      predict_prefill_next_logits(
+        runtime,
+        input_ids,
+        input_features,
+        input_features_mask,
+        masks,
+        cache
+      )
 
     channel_state = ChannelState.content()
     suppression_mask = suppression_mask_for_state(runtime, channel_state)
@@ -326,7 +391,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     if stop?(eos?, pad?, 1, limits) do
       []
     else
-      greedy_decode(runtime, cache, token_id, prompt_length, [token_id], 1, limits, channel_state)
+      greedy_decode(
+        runtime,
+        cache,
+        token_id,
+        masks.content_length,
+        [token_id],
+        1,
+        limits,
+        channel_state
+      )
     end
   end
 
@@ -414,16 +488,22 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     end)
   end
 
-  defp predict_prefill_next_logits(runtime, input_ids, input_features, input_features_mask, cache) do
-    sequence_length = length(input_ids)
+  defp predict_prefill_next_logits(
+         runtime,
+         input_ids,
+         input_features,
+         input_features_mask,
+         masks,
+         cache
+       ) do
     backend = runtime_backend(runtime)
 
     inputs =
       Nx.with_default_backend(backend, fn ->
         %{
           "input_ids" => Nx.tensor([input_ids], type: :s64),
-          "attention_mask" => Nx.tensor([List.duplicate(1, sequence_length)], type: :s64),
-          "position_ids" => Nx.tensor([Enum.to_list(0..(sequence_length - 1))], type: :s64),
+          "attention_mask" => Nx.tensor([masks.attention_mask], type: :s64),
+          "position_ids" => Nx.tensor([masks.position_ids], type: :s64),
           "input_features" => Nx.new_axis(input_features, 0),
           "input_features_mask" => Nx.new_axis(input_features_mask, 0),
           "cache" => cache

@@ -15,6 +15,9 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   @default_min_utterance_ms 350.0
   @default_max_utterance_ms 8_000.0
   @default_partial_interval_ms 1_000.0
+  # Partials are throwaway UI feedback; cap their generation cost so a
+  # rambling partial cannot burn the full max_response_tokens budget.
+  @default_partial_max_response_tokens 16
   @default_tts_echo_window_ms 12_000.0
   @default_tts_similarity_threshold 0.78
   @default_audio_token_buckets [50, 100, 200]
@@ -31,6 +34,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     :min_utterance_ms,
     :max_utterance_ms,
     :partial_interval_ms,
+    :partial_max_response_tokens,
     :partials?,
     :speech_threshold,
     :speech_min_active_ratio,
@@ -92,6 +96,8 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       min_utterance_ms: Keyword.get(opts, :min_utterance_ms, @default_min_utterance_ms),
       max_utterance_ms: Keyword.get(opts, :max_utterance_ms, @default_max_utterance_ms),
       partial_interval_ms: Keyword.get(opts, :partial_interval_ms, @default_partial_interval_ms),
+      partial_max_response_tokens:
+        Keyword.get(opts, :partial_max_response_tokens, @default_partial_max_response_tokens),
       partials?: Keyword.get(opts, :partials, true),
       speech_threshold: Keyword.get(opts, :speech_threshold, Config.speech_threshold()),
       speech_min_active_ratio:
@@ -349,7 +355,9 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   end
 
   defp emit_partial(state, frame_end_ms, events) do
-    case transcribe(state, utterance_samples(state)) do
+    case transcribe(state, utterance_samples(state),
+           max_new_tokens: state.partial_max_response_tokens
+         ) do
       {:ok, text, metrics, state} ->
         event = %{
           type: "partial",
@@ -429,7 +437,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     end
   end
 
-  defp transcribe(state, samples) do
+  defp transcribe(state, samples, generate_opts \\ []) do
     with {:ok, state} <- ensure_runtime(state) do
       {input, input_build_ms} =
         timed(fn ->
@@ -442,8 +450,13 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
       {{status, text_or_reason}, generate_ms} =
         timed(fn ->
-          case state.runtime_module.generate(state.runtime, input,
-                 timeout_seconds: Keyword.get(state.runtime_opts, :request_timeout_seconds)
+          case state.runtime_module.generate(
+                 state.runtime,
+                 input,
+                 Keyword.merge(
+                   [timeout_seconds: Keyword.get(state.runtime_opts, :request_timeout_seconds)],
+                   generate_opts
+                 )
                ) do
             {:ok, text} -> {:ok, String.trim(text)}
             {:error, reason} -> {:error, reason}
