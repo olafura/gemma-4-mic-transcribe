@@ -27,8 +27,16 @@ if [ -z "$PID" ]; then
   exit 1
 fi
 
+# bpftrace cannot raise its own memlock limit without cap_sys_resource. Since
+# Linux 5.11 BPF memory is charged to the cgroup instead, so the warning it
+# prints is harmless; raise the soft limit anyway where the hard limit allows.
+ulimit -l "$(ulimit -Hl)" 2>/dev/null || true
+
+echo "tracing HIP calls in pid $PID (histograms print every 5s while the GPU is busy)" >&2
+echo "if nothing appears, the target is idle: start a transcription first" >&2
+
 exec bpftrace -p "$PID" -e "
-uprobe:${HIP_LIB}:hipLaunchKernel { @launch[tid] = nsecs; }
+uprobe:${HIP_LIB}:hipLaunchKernel { @launch[tid] = nsecs; @launch_count++; }
 uretprobe:${HIP_LIB}:hipLaunchKernel /@launch[tid]/ {
   @kernel_launch_us = hist((nsecs - @launch[tid]) / 1000);
   delete(@launch[tid]);
@@ -44,7 +52,8 @@ uretprobe:${HIP_LIB}:hipStreamSynchronize /@sync[tid]/ {
   delete(@sync[tid]);
 }
 interval:s:5 {
-  time(\"%H:%M:%S\n\");
+  time(\"%H:%M:%S \");
+  printf(\"launches=%d\n\", @launch_count);
   print(@kernel_launch_us);
   print(@memcpy_us);
   print(@sync_wait_us);
