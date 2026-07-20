@@ -319,10 +319,17 @@ levers that matter are, in order: how many tokens a final generates, prefill,
 and the end-of-speech wait.
 
 Prefill is the one place where packed int4 loses: it gives up rocBLAS matrix
-cores for a hand kernel (~1100 ms versus ~240 ms). Decode more than repays it
-here, but on a machine with enough memory to hold both representations
-(~31 GB), dequantized weights for prefill plus packed weights for decode would
-beat either single choice.
+cores for a hand kernel (~1100 ms versus ~240 ms measured on the older
+`Axon.dense` path).
+
+`--weights hybrid` loads both representations (~31 GB) so prefill can use the
+dequantized kernel while decode keeps packed int4. **Measured slower than
+packed alone**: 2.6s/4.2s versus 2.0s/3.5s, with the dispatch verified correct
+(no `exla_q4_gemm` calls, so prefill really did leave the hand kernel) and the
+same result whether the dequantized kernel is f32 or bf16. The 240 ms figure
+came from `Axon.dense`, which XLA fuses; the plain `Nx.dot` in the hybrid layer
+does not reach the same path. Recovering it would mean matching that lowering,
+not just holding a dequantized copy.
 
 ## Incremental prefill
 
