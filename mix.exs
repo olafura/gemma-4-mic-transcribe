@@ -28,6 +28,9 @@ defmodule Gemma4MicTranscribe.MixProject do
       # override: bumblebee 0.7.0 (latest) pins nx ~> 0.12.0, but nx 0.13
       # works with it and is required by exla/torchx 0.13
       {:nx, "~> 0.13.0", override: true},
+      # override: ex_hls/membrane_webrtc_plugin pin req 0.5.x, but the fixes
+      # for CVE-2026-49755 and the multipart injection advisory are 0.6-only
+      {:req, "~> 0.6.3", override: true},
       {:torchx, "~> 0.13.0"},
       {:xla, path: "vendor/xla", override: true, runtime: false}
     ]
