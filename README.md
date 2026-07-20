@@ -269,12 +269,23 @@ Set `ROCM_PATH` or `HIP_LIB` if the HIP runtime is not under `/opt/rocm`.
 protocol-level spans (HTTP/S, gRPC, SQL, ...) for a target process, exported
 as OpenTelemetry data. It cannot hook arbitrary native functions, so it does
 not replace the HIP histograms; it becomes useful for the WebRTC/signaling
-path and any outbound HTTP (for example Hugging Face downloads). With the
-`obi` binary installed:
+path and any outbound HTTP (for example Hugging Face downloads). If the
+installed `obi` binary carries file capabilities (`getcap $(which obi)`), no
+root is needed:
 
 ```bash
-mise run trace:obi   # attaches to beam.smp, prints spans to stdout
+mise run trace:obi   # attaches to beam.smp processes, prints spans to stdout
 ```
+
+Example span for a BEAM HTTP client call:
+
+```text
+2026-07-20 04:08:36 (11.5ms) HTTPClient 200 GET / [beam.smp:35280]->[104.20.23.154:80] traceparent=[00-dc61...]
+```
+
+BEAM TLS is implemented in Erlang rather than libssl, so OBI reports HTTPS
+connections at the TCP level without decoding request contents; plain HTTP,
+gRPC, and proxied traffic decode fully.
 
 ## Implementation Status
 

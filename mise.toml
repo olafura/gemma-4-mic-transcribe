@@ -6,6 +6,8 @@ run = "sudo --preserve-env=ROCM_PATH,HIP_LIB scripts/trace/hip-latency.sh"
 description = "Run the CLI with BEAM call tracing, no root needed (pass CLI args after --)"
 run = "./gemma_4_mic_transcribe --trace --debug"
 
+# The obi binary carries file capabilities (cap_bpf, cap_perfmon, ...), so
+# unlike bpftrace this needs no sudo.
 [tasks."trace:obi"]
-description = "OpenTelemetry eBPF protocol spans (HTTP/gRPC/...) for the running beam.smp via OBI (sudo)"
-run = "sudo env OTEL_EBPF_AUTO_TARGET_EXE='*beam.smp' OTEL_EBPF_TRACE_PRINTER=text OTEL_EBPF_LOG_LEVEL=INFO obi"
+description = "OpenTelemetry eBPF protocol spans (HTTP/gRPC/...) for running beam.smp processes via OBI (no sudo)"
+run = "env OTEL_EBPF_AUTO_TARGET_EXE='*beam.smp' OTEL_EBPF_TRACE_PRINTER=text OTEL_EBPF_LOG_LEVEL=INFO obi"
