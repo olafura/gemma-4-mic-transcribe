@@ -201,6 +201,39 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     prompt = Keyword.get(opts, :prompt, Config.default_prompt())
     system_message = Keyword.get(opts, :system_message)
 
+    result = warmup_incremental(runtime, prompt, system_message)
+
+    if result != :ok do
+      result
+    else
+      warmup_buckets(runtime, token_counts, prompt, system_message)
+    end
+  end
+
+  # The incremental path has its own shapes (prompt prefix, fixed audio chunk,
+  # prompt suffix). Without warming them, each compiles during a live
+  # utterance, which costs far more than the prefill it saves.
+  defp warmup_incremental(runtime, prompt, system_message) do
+    samples_per_chunk = @audio_chunk_tokens * AudioFeatureExtractor.samples_per_token()
+
+    timed_debug(runtime, "runtime: warmup incremental prefill (prefix/append/suffix)", fn ->
+      with {:ok, utterance} <-
+             start_utterance(runtime, prompt: prompt, system_message: system_message) do
+        utterance = append_audio(utterance, List.duplicate(0.0, samples_per_chunk))
+
+        # A partial chunk exercises the padded flush shape too.
+        utterance =
+          %{utterance | pending_samples: List.duplicate(0.0, div(samples_per_chunk, 2))}
+
+        case transcribe_utterance(utterance, max_new_tokens: 2, min_new_tokens: 2) do
+          {:ok, _text} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+      end
+    end)
+  end
+
+  defp warmup_buckets(runtime, token_counts, prompt, system_message) do
     Enum.reduce_while(token_counts, :ok, fn token_count, :ok ->
       samples = List.duplicate(0.0, token_count * AudioFeatureExtractor.samples_per_token())
 
@@ -322,24 +355,30 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     with {:ok, suffix_ids} <- tokenize_suffix(runtime) do
       started_at = System.monotonic_time(:millisecond)
 
+      # Audio below a whole chunk has not been prefilled yet. Flushing it into
+      # the throwaway cache keeps the utterance tail in the transcript without
+      # committing a short chunk to the cache the next append builds on.
+      {offset, cache, flushed_tokens} = flush_pending_audio(utterance)
+
       {logits, cache} =
         predict_chunk(
           runtime,
           suffix_ids,
           silent_audio(runtime, 0),
-          utterance.offset,
-          utterance.cache
+          offset,
+          cache
         )
 
       limits = generate_limits(runtime, opts)
       channel_state = ChannelState.content()
       suppression_mask = suppression_mask_for_state(runtime, channel_state)
       token_id = TokenSelection.next_token_id_from_sequence(logits, suppression_mask)
-      prompt_length = utterance.offset + length(suffix_ids)
+      prompt_length = offset + length(suffix_ids)
 
       log_debug(runtime, fn ->
-        "runtime: utterance suffix prefilled audio_tokens=#{utterance.audio_tokens} " <>
-          "context_tokens=#{prompt_length} elapsed_ms=#{System.monotonic_time(:millisecond) - started_at}"
+        "runtime: utterance suffix prefilled audio_tokens=#{utterance.audio_tokens + flushed_tokens} " <>
+          "flushed=#{flushed_tokens} context_tokens=#{prompt_length} " <>
+          "elapsed_ms=#{System.monotonic_time(:millisecond) - started_at}"
       end)
 
       token_ids =
@@ -368,6 +407,42 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     tokenize(runtime.tokenizer, Prompt.suffix())
   end
 
+  # Prefills leftover audio as a full-size chunk padded with masked positions,
+  # so the flush reuses the same compiled executable as a normal append.
+  defp flush_pending_audio(%Utterance{pending_samples: []} = utterance) do
+    {utterance.offset, utterance.cache, 0}
+  end
+
+  defp flush_pending_audio(%Utterance{} = utterance) do
+    runtime = utterance.runtime
+    samples_per_token = AudioFeatureExtractor.samples_per_token()
+    real_tokens = ceil_div(length(utterance.pending_samples), samples_per_token)
+
+    features =
+      AudioFeatureExtractor.extract(utterance.pending_samples,
+        audio_token_count: @audio_chunk_tokens,
+        max_tokens: @audio_chunk_tokens
+      )
+
+    {input_features, _mask} =
+      prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+
+    audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, @audio_chunk_tokens)
+
+    attention_mask =
+      List.duplicate(1, real_tokens) ++ List.duplicate(0, @audio_chunk_tokens - real_tokens)
+
+    {_logits, cache} =
+      predict_chunk(runtime, audio_ids, input_features, utterance.offset, utterance.cache,
+        attention_mask: attention_mask
+      )
+
+    {utterance.offset + @audio_chunk_tokens, cache, real_tokens}
+  end
+
+  defp ceil_div(0, _denominator), do: 0
+  defp ceil_div(numerator, denominator), do: div(numerator + denominator - 1, denominator)
+
   defp max_utterance_cache_tokens(runtime) do
     @max_utterance_audio_tokens + runtime.max_response_tokens + @prompt_headroom_tokens
   end
@@ -380,9 +455,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   # One forward pass over a chunk of tokens starting at `offset`.
-  defp predict_chunk(runtime, input_ids, input_features, offset, cache) do
+  defp predict_chunk(runtime, input_ids, input_features, offset, cache, opts \\ []) do
     backend = runtime_backend(runtime)
     count = length(input_ids)
+    attention_mask = Keyword.get(opts, :attention_mask, List.duplicate(1, count))
     audio_token_id = runtime.model_info.spec.audio_token_id
     audio_count = Enum.count(input_ids, &(&1 == audio_token_id))
 
@@ -393,7 +469,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       Nx.with_default_backend(backend, fn ->
         %{
           "input_ids" => Nx.tensor([input_ids], type: :s64),
-          "attention_mask" => Nx.tensor([List.duplicate(1, count)], type: :s64),
+          "attention_mask" => Nx.tensor([attention_mask], type: :s64),
           "position_ids" => Nx.tensor([Enum.to_list(offset..(offset + count - 1))], type: :s64),
           "input_features" => Nx.new_axis(input_features, 0),
           "input_features_mask" =>
