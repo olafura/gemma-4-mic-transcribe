@@ -52,6 +52,11 @@ NVCCFLAGS = $(CFLAGS)
 LDFLAGS += -L$(XLA_EXTENSION_LIB) -lxla_extension -shared -fvisibility=hidden
 EXLA_SKIP_CUDA =
 XLA_SNAPSHOT = $(shell cat cache/xla_snapshot.txt 2> /dev/null)
+# Local GPU ISA for HIP kernels; override to cross-compile.
+EXLA_HIP_ARCH ?= $(shell $(ROCM_PATH)/bin/rocm_agent_enumerator 2> /dev/null | grep -v gfx000 | head -1)
+ifeq ($(EXLA_HIP_ARCH),)
+EXLA_HIP_ARCH = gfx1151
+endif
 
 ifdef EXLA_CPU_ONLY
 EXLA_SKIP_CUDA = 1
@@ -139,6 +144,25 @@ SOURCES = $(EXLA_DIR)/exla.cc $(EXLA_DIR)/exla_client.cc $(EXLA_DIR)/exla_mlir.c
 SOURCES += $(wildcard $(EXLA_DIR)/custom_calls/*.cc)
 HEADERS = $(EXLA_DIR)/exla_mlir.h $(EXLA_DIR)/custom_calls/runtime_callback_bridge.h $(EXLA_DIR)/exla_client.h $(EXLA_DIR)/exla_nif_util.h $(EXLA_DIR)/exla_log_sink.h $(EXLA_DIR)/ipc.h
 OBJECTS = $(patsubst $(EXLA_DIR)/%.cc,$(EXLA_CACHE_OBJ_DIR)/%.o,$(SOURCES)) $(EXLA_CACHE_OBJ_DIR)/exla_cuda.o
+
+# Hand-written HIP kernels (int4 GEMV) are compiled with hipcc and linked into
+# libexla.so when building against a ROCm XLA extension. XLA's generic codegen
+# dequantizes int4 weights before the GEMM; these kernels read packed nibbles.
+HIPCC ?= $(ROCM_PATH)/bin/hipcc
+ROCM_PATH ?= /opt/rocm
+HIP_SOURCES = $(wildcard $(EXLA_DIR)/custom_calls/*.hip)
+HIP_OBJECTS = $(patsubst $(EXLA_DIR)/%.hip,$(EXLA_CACHE_OBJ_DIR)/%.hip.o,$(HIP_SOURCES))
+
+ifneq ($(EXLA_SKIP_CUDA),)
+ifneq ($(wildcard $(HIPCC)),)
+OBJECTS += $(HIP_OBJECTS)
+LDFLAGS += -L$(ROCM_PATH)/lib -lamdhip64
+endif
+endif
+
+$(EXLA_CACHE_OBJ_DIR)/%.hip.o: $(EXLA_DIR)/%.hip $(HEADERS)
+	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)/custom_calls
+	$(HIPCC) $(CFLAGS) --offload-arch=$(EXLA_HIP_ARCH) -fPIC -c $< -o $@
 
 $(EXLA_CACHE_OBJ_DIR)/exla_cuda.o: $(EXLA_DIR)/exla_cuda.cc $(EXLA_DIR)/exla_cuda.h
 	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)

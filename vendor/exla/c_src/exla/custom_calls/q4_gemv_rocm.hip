@@ -1,0 +1,130 @@
+// int4 weight-only GEMV for ROCm.
+//
+// XLA's generic codegen dequantizes packed int4 weights into bf16 before the
+// GEMM, so a 4-bit model reads 16-bit traffic and decode is bandwidth-bound at
+// the dequantized size. This kernel reads the packed nibbles directly: each
+// workgroup owns one output column and streams that column's packed weights,
+// unpacking in registers.
+//
+// Layout (matches compressed-tensors w4a16 after our loader):
+//   packed : {k/8, n} int32, row-major, 8 nibbles per int32 along k
+//   scales : {k/group_size, n} bf16, one scale per (group, column)
+//   x      : {k} bf16 activations
+//   out    : {n} f32
+//
+// Nibbles are stored low-to-high within each int32 and biased by 8.
+
+#include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
+
+#include <cstdint>
+
+#include "xla/ffi/api/ffi.h"
+#include "xla/ffi/ffi_api.h"
+
+namespace ffi = xla::ffi;
+
+namespace {
+
+constexpr int kBlockSize = 256;
+constexpr int kNibblesPerWord = 8;
+
+// One lane owns one output column and accumulates that column's whole dot
+// product, so there is no cross-lane reduction (which would have to know the
+// wavefront size; RDNA defaults to wave32, CDNA to wave64). Adjacent lanes own
+// adjacent columns, and the packed/scale layouts are row-major with n as the
+// fast axis, so each lane step is a fully coalesced read. x is identical
+// across lanes and comes from the broadcast path.
+__global__ void q4_gemv_kernel(const int32_t *__restrict__ packed,
+                               const __hip_bfloat16 *__restrict__ scales,
+                               const __hip_bfloat16 *__restrict__ x,
+                               float *__restrict__ out, int k, int n,
+                               int group_size) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (col >= n) return;
+
+  const int words_per_col = k / kNibblesPerWord;
+  const int words_per_group = group_size / kNibblesPerWord;
+
+  float acc = 0.0f;
+
+  for (int word = 0; word < words_per_col; ++word) {
+    const int32_t packed_word = packed[word * n + col];
+    const int k_base = word * kNibblesPerWord;
+
+    // group_size is a multiple of 8, so all nibbles in a word share a scale.
+    const float scale =
+        __bfloat162float(scales[(word / words_per_group) * n + col]);
+
+    float partial = 0.0f;
+
+#pragma unroll
+    for (int nib = 0; nib < kNibblesPerWord; ++nib) {
+      const int weight = ((packed_word >> (nib * 4)) & 0xF) - 8;
+      partial += static_cast<float>(weight) * __bfloat162float(x[k_base + nib]);
+    }
+
+    acc += partial * scale;
+  }
+
+  out[col] = acc;
+}
+
+ffi::Error q4_gemv_impl(hipStream_t stream, ffi::AnyBuffer x,
+                        ffi::AnyBuffer packed, ffi::AnyBuffer scales,
+                        int64_t group_size, ffi::Result<ffi::AnyBuffer> out) {
+  auto packed_dims = packed.dimensions();
+  auto x_dims = x.dimensions();
+
+  if (packed_dims.size() != 2 || x_dims.size() != 1) {
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                      "q4_gemv expects packed {k/8, n} and x {k}");
+  }
+
+  const int64_t n = packed_dims[1];
+  const int64_t k = x_dims[0];
+
+  if (packed_dims[0] * kNibblesPerWord != k) {
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                      "q4_gemv packed rows must equal k/8");
+  }
+
+  if (group_size <= 0 || k % group_size != 0 ||
+      group_size % kNibblesPerWord != 0) {
+    return ffi::Error(
+        ffi::ErrorCode::kInvalidArgument,
+        "q4_gemv group_size must divide k and be a multiple of 8");
+  }
+
+  const uint32_t blocks =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+
+  hipLaunchKernelGGL(q4_gemv_kernel, dim3(blocks), dim3(kBlockSize), 0, stream,
+                     static_cast<const int32_t *>(packed.untyped_data()),
+                     static_cast<const __hip_bfloat16 *>(scales.untyped_data()),
+                     static_cast<const __hip_bfloat16 *>(x.untyped_data()),
+                     static_cast<float *>(out->untyped_data()),
+                     static_cast<int>(k), static_cast<int>(n),
+                     static_cast<int>(group_size));
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    return ffi::Error(ffi::ErrorCode::kInternal, hipGetErrorString(err));
+  }
+
+  return ffi::Error::Success();
+}
+
+}  // namespace
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_q4_gemv_rocm, q4_gemv_impl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<hipStream_t>>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Arg<ffi::AnyBuffer>()
+                                  .Attr<int64_t>("group_size")
+                                  .Ret<ffi::AnyBuffer>());
+
+XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), "exla_q4_gemv", "ROCM",
+                         exla_q4_gemv_rocm);
