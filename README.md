@@ -87,6 +87,19 @@ After `scripts/setup.sh` or `mix compile`:
 ./gemma_4_mic_transcribe --wav journal1.wav --max-windows 1
 ```
 
+For LLM-bound events, use streaming WAV mode. It forms speech utterances first
+and only marks committed final transcripts as safe to send downstream:
+
+```bash
+./gemma_4_mic_transcribe \
+  --wav journal1.wav \
+  --stream-wav \
+  --output jsonl \
+  --backend exla:rocm \
+  --model-name gemma4-12b-qat-w4a16-ct \
+  --max-response-tokens 32
+```
+
 Useful options:
 
 ```text
@@ -94,6 +107,9 @@ Useful options:
 --wav PATH                     read PCM WAV audio from a file
 --skip-windows INT             skip leading windows
 --max-windows INT              stop after N selected windows
+--stream-wav                   process WAV audio as timed streaming chunks
+--output text|jsonl            output format for streaming events, default text
+--chunk-ms FLOAT               streaming WAV chunk duration, default 100.0
 --system-message TEXT          system instruction for every window
 --system-message-file PATH     read system instruction from a file
 --prompt TEXT                  user prompt paired with every audio window
@@ -111,6 +127,14 @@ Useful options:
                                required active-frame ratio per window, default 0.2
 --speech-max-zero-crossing-rate FLOAT
                                reject very noisy windows above this zero-crossing ratio, default 0.35
+--speech-start-ms FLOAT        active speech needed to start an utterance, default 120
+--speech-end-silence-ms FLOAT  silence needed to commit an utterance, default 500
+--min-utterance-ms FLOAT       suppress shorter utterances, default 350
+--max-utterance-ms FLOAT       force-commit long utterances, default 8000
+--partial-interval-ms FLOAT    minimum time between partial transcript events, default 1000
+--no-partials                  disable unstable partial transcript events
+--tts-text TEXT                recent TTS text to suppress as echo in stream mode
+--tts-timestamp-ms FLOAT       timestamp for --tts-text, default 0
 --debug                        emit progress logs to stderr
 --request-timeout-seconds FLOAT
                                maximum seconds for one generation
@@ -188,6 +212,13 @@ locally built ROCm `libxla_extension`.
 Microphone input is intentionally not advertised yet. The CLI currently supports
 PCM WAV file input only.
 
+The `Gemma4MicTranscribe.StreamingSession` API is the reusable path for live
+audio integrations. It accepts timestamped sample chunks and explicit TTS text
+events, then emits `partial`, `final`, and `suppressed` events. Only `final`
+events have `send_to_llm: true`. `Gemma4MicTranscribe.WebRTC.TestHarness`
+contains the Elixir WebRTC-facing adapter used for browser/WebRTC testing; see
+https://elixir-webrtc.org/ for the WebRTC project.
+
 ## Implementation Status
 
 Implemented:
@@ -196,8 +227,11 @@ Implemented:
 - PCM16 and float32 WAV normalization to mono 16 kHz samples.
 - Windowing, timestamps, prompt construction, and Gemma 4 Unified raw-audio features.
 - Local Bumblebee/Axon Gemma4Unified audio model loader and KV-cached greedy generation.
+- Streaming WAV utterance segmentation with partial/final/suppressed event output.
+- Explicit TTS echo text suppression for streaming sessions.
+- Elixir WebRTC test-harness adapter for feeding decoded f32 audio into streaming sessions.
 
 Not implemented yet:
 
 - Vision/video inputs.
-- Live microphone/WebRTC CLI mode.
+- Production live microphone/WebRTC CLI mode.
