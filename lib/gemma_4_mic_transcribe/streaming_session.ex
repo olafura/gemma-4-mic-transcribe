@@ -116,7 +116,10 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         Keyword.get(opts, :tts_similarity_threshold, @default_tts_similarity_threshold),
       audio_token_buckets: Keyword.get(opts, :audio_token_buckets, @default_audio_token_buckets),
       warmup?: Keyword.get(opts, :warmup, true),
-      incremental?: Keyword.get(opts, :incremental_prefill, true),
+      # Off by default: measured slower than whole-utterance prefill (final lag
+      # 9.3s/18.2s vs 4.7s/11.9s) because each partial still costs more than the
+      # partial interval, so the backlog grows. See README.
+      incremental?: Keyword.get(opts, :incremental_prefill, false),
       utterance_cache: nil,
       utterance_cached_samples: 0,
       pending_samples: [],
