@@ -18,6 +18,20 @@ defmodule Gemma4MicTranscribe.TranscriberTest do
     def load(_opts), do: raise("runtime should not load")
   end
 
+  defmodule BucketRuntime do
+    def load(_opts), do: {:ok, :runtime}
+
+    def warmup(:runtime, opts) do
+      send(self(), {:warmup, Keyword.fetch!(opts, :audio_token_counts)})
+      :ok
+    end
+
+    def generate(:runtime, input, _opts) do
+      send(self(), {:generate_audio_tokens, input.audio.token_count})
+      {:ok, "hallo"}
+    end
+  end
+
   test "transcribes windows through an injected runtime" do
     windows = [
       %Window{
@@ -71,6 +85,35 @@ defmodule Gemma4MicTranscribe.TranscriberTest do
                prompt: "Transcribe.",
                runtime_module: FailingRuntime
              )
+  end
+
+  test "pads all windows to one shared audio-token bucket and warms the runtime" do
+    windows = [
+      %Window{
+        samples: List.duplicate(0.0, 640),
+        start_frame: 0,
+        end_frame: 640,
+        sample_rate: 16_000
+      },
+      %Window{
+        samples: List.duplicate(0.0, 1_000),
+        start_frame: 640,
+        end_frame: 1640,
+        sample_rate: 16_000
+      }
+    ]
+
+    assert {:ok, [{:ok, _, "hallo"}, {:ok, _, "hallo"}]} =
+             Transcriber.transcribe_windows(windows,
+               model_name: "google/gemma-4-12B-it",
+               prompt: "Transcribe.",
+               speech_gate: false,
+               runtime_module: BucketRuntime
+             )
+
+    assert_received {:warmup, [2]}
+    assert_received {:generate_audio_tokens, 2}
+    assert_received {:generate_audio_tokens, 2}
   end
 
   test "emits each window result as soon as it is generated" do

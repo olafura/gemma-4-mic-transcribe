@@ -3,6 +3,7 @@ defmodule Gemma4MicTranscribe.Transcriber do
 
   require Logger
 
+  alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
   alias Gemma4MicTranscribe.SpeechGate
@@ -24,12 +25,27 @@ defmodule Gemma4MicTranscribe.Transcriber do
         {:ok, []}
 
       selected_windows ->
+        audio_token_count = shared_audio_token_count(selected_windows)
+
+        debug(opts, fn ->
+          "transcriber: shared audio token bucket=#{audio_token_count} for #{length(selected_windows)} window(s)"
+        end)
+
         with {:ok, runtime} <-
-               timed_debug(opts, "transcriber: runtime load", fn -> runtime_module.load(opts) end) do
+               timed_debug(opts, "transcriber: runtime load", fn -> runtime_module.load(opts) end),
+             :ok <- maybe_warmup(runtime_module, runtime, audio_token_count, opts) do
           results =
             selected_windows
             |> Enum.reduce_while([], fn {window, index}, acc ->
-              case transcribe_window(runtime_module, runtime, window, index, total_windows, opts) do
+              case transcribe_window(
+                     runtime_module,
+                     runtime,
+                     window,
+                     index,
+                     total_windows,
+                     audio_token_count,
+                     opts
+                   ) do
                 {:ok, _window, _text} = result ->
                   emit_window_result(result, opts)
                   {:cont, [result | acc]}
@@ -77,7 +93,35 @@ defmodule Gemma4MicTranscribe.Transcriber do
     end
   end
 
-  defp transcribe_window(runtime_module, runtime, window, index, total_windows, opts) do
+  # All windows share one padded audio-token count so a JIT-compiling runtime
+  # backend compiles a single prefill shape for the whole run.
+  defp shared_audio_token_count(selected_windows) do
+    selected_windows
+    |> Enum.map(fn {window, _index} ->
+      ceil_div(length(window.samples), AudioFeatureExtractor.samples_per_token())
+    end)
+    |> Enum.max()
+  end
+
+  defp ceil_div(0, _denominator), do: 0
+  defp ceil_div(numerator, denominator), do: div(numerator + denominator - 1, denominator)
+
+  defp maybe_warmup(runtime_module, runtime, audio_token_count, opts) do
+    if Keyword.get(opts, :warmup, true) and Code.ensure_loaded?(runtime_module) and
+         function_exported?(runtime_module, :warmup, 2) do
+      timed_debug(opts, "transcriber: runtime warmup (compiling generation executables)", fn ->
+        runtime_module.warmup(runtime,
+          audio_token_counts: [audio_token_count],
+          prompt: Keyword.fetch!(opts, :prompt),
+          system_message: Keyword.get(opts, :system_message)
+        )
+      end)
+    else
+      :ok
+    end
+  end
+
+  defp transcribe_window(runtime_module, runtime, window, index, total_windows, token_count, opts) do
     debug(opts, fn ->
       "transcriber: window #{index}/#{total_windows} samples=#{length(window.samples)} " <>
         "frames=#{window.start_frame}..#{window.end_frame}"
@@ -87,7 +131,8 @@ defmodule Gemma4MicTranscribe.Transcriber do
       timed_debug(opts, "transcriber: window #{index}/#{total_windows} input build", fn ->
         Input.build(window.samples,
           prompt: Keyword.fetch!(opts, :prompt),
-          system_message: Keyword.get(opts, :system_message)
+          system_message: Keyword.get(opts, :system_message),
+          audio_token_count: token_count
         )
       end)
 
