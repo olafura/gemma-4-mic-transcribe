@@ -159,6 +159,19 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
     refute Enum.any?(events, &(&1.type == "final"))
   end
 
+  test "assistant refusals are suppressed instead of sent downstream" do
+    assert StreamingSession.refusal?(
+             "I'm sorry, but I cannot fulfill this request. I am unable to provide a transcript."
+           )
+
+    assert StreamingSession.refusal?(
+             "Please provide the text or audio you would like transcribed."
+           )
+
+    refute StreamingSession.refusal?("I cannot believe how good the coffee is.")
+    refute StreamingSession.refusal?("The morning light is beautiful.")
+  end
+
   defp start_test_session(opts) do
     defaults = [
       runtime_module: FakeRuntime,

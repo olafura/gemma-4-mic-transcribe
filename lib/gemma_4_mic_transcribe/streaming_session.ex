@@ -433,6 +433,9 @@ defmodule Gemma4MicTranscribe.StreamingSession do
           tts_echo?(state, text, end_ms) ->
             {suppressed_event(state, :tts_echo, start_ms, end_ms, text, metrics), state}
 
+          refusal?(text) ->
+            {suppressed_event(state, :refusal, start_ms, end_ms, text, metrics), state}
+
           true ->
             {%{
                type: "final",
@@ -704,6 +707,27 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         trailing_silence_ms: 0.0,
         last_partial_ms: nil
     }
+  end
+
+  # The model occasionally answers as an assistant instead of transcribing,
+  # usually on near-silent or unintelligible audio. Those replies are not
+  # speech and must not reach a downstream consumer as a transcript.
+  @refusal_markers [
+    "i cannot fulfill",
+    "i can't fulfill",
+    "i am unable to provide",
+    "i'm unable to provide",
+    "unable to provide a transcript",
+    "please provide the text",
+    "please provide the audio",
+    "no audio was provided",
+    "i cannot transcribe",
+    "i can't transcribe"
+  ]
+
+  def refusal?(text) do
+    normalized = normalize_text(text)
+    Enum.any?(@refusal_markers, &String.contains?(normalized, normalize_text(&1)))
   end
 
   defp tts_echo?(state, text, end_ms) do
