@@ -40,9 +40,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
     frames = frame_signal(samples, frame_length, frame_step)
 
     filterbank =
-      mel_filterbank(spec.audio_mel_bins, fft_length, sample_rate,
-        high_hz: spec.audio_max_frequency
-      )
+      cached_filterbank(spec.audio_mel_bins, fft_length, sample_rate, spec.audio_max_frequency)
 
     window = hann_window(frame_length)
 
@@ -135,6 +133,25 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
   defnp log_compress(mel, opts \\ []) do
     opts = keyword!(opts, [:floor, mode: :inference])
     Nx.log(mel + opts[:floor])
+  end
+
+  # The filterbank is a pure function of four scalars but costs a 257 x 128
+  # Elixir comprehension to build, so one copy is kept per configuration.
+  defp cached_filterbank(mel_bins, fft_length, sample_rate, high_hz) do
+    key = {__MODULE__, :filterbank, mel_bins, fft_length, sample_rate, high_hz}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        bank =
+          mel_filterbank(mel_bins, fft_length, sample_rate, high_hz: high_hz)
+          |> Nx.backend_copy(Nx.BinaryBackend)
+
+        :persistent_term.put(key, bank)
+        bank
+
+      bank ->
+        bank
+    end
   end
 
   @doc """

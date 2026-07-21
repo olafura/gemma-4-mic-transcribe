@@ -1174,20 +1174,20 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp maybe_rebuild_for_e4b(%__MODULE__{e4b?: true} = runtime, input) do
     alias Gemma4MicTranscribe.Gemma4E4B.MelFeatures
 
-    spec = runtime.model_info.spec
     samples = Map.get(input, :samples, [])
 
-    tokens =
-      MelFeatures.audio_token_count(
-        length(samples),
-        struct(Gemma4MicTranscribe.Gemma4E4B.Spec, Map.from_struct(spec))
-      )
+    # The 12B extractor already bucketed the audio into input.audio.token_count
+    # tokens. Padding the samples out to that bucket keeps the mel shape a
+    # function of the bucket alone - otherwise every utterance length is a new
+    # shape, and each one compiles a fresh executable mid-stream.
+    tokens = input.audio.token_count
+    samples_per_token = AudioFeatureExtractor.samples_per_token()
 
-    features =
-      MelFeatures.extract(
-        samples,
-        struct(Gemma4MicTranscribe.Gemma4E4B.Spec, Map.from_struct(spec))
-      )
+    padded =
+      (samples ++ List.duplicate(0.0, max(tokens * samples_per_token - length(samples), 0)))
+      |> Enum.take(tokens * samples_per_token)
+
+    features = MelFeatures.extract(padded, e4b_spec(runtime))
 
     prompt =
       Gemma4MicTranscribe.Gemma4Unified.Prompt.build(
