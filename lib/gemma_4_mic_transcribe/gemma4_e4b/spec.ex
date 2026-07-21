@@ -69,7 +69,9 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Spec do
             boa_token_id: 256_000,
             audio_token_id: 258_881,
             eoa_token_id: 258_883,
-            quantization_config: nil
+            quantization_config: nil,
+            # the runtime allocates the KV cache in this type
+            cache_type: {:f, 32}
 
   @impl true
   def config(spec, opts) do
