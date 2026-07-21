@@ -555,6 +555,9 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   defp ensure_utterance_cache(state), do: state
 
   defp full_transcribe(state, samples, generate_opts) do
+    require Logger
+    Logger.debug("session: full_transcribe start samples=#{length(samples)}")
+
     with {:ok, state} <- ensure_runtime(state) do
       {input, input_build_ms} =
         timed(fn ->
@@ -564,6 +567,8 @@ defmodule Gemma4MicTranscribe.StreamingSession do
             audio_token_count: audio_token_bucket(state, length(samples))
           )
         end)
+
+      Logger.debug("session: input built in #{input_build_ms}ms")
 
       {{status, text_or_reason}, generate_ms} =
         timed(fn ->

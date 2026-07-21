@@ -1174,6 +1174,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp maybe_rebuild_for_e4b(%__MODULE__{e4b?: true} = runtime, input) do
     alias Gemma4MicTranscribe.Gemma4E4B.MelFeatures
 
+    started_at = System.monotonic_time(:millisecond)
     samples = Map.get(input, :samples, [])
 
     # The 12B extractor already bucketed the audio into input.audio.token_count
@@ -1187,7 +1188,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       (samples ++ List.duplicate(0.0, max(tokens * samples_per_token - length(samples), 0)))
       |> Enum.take(tokens * samples_per_token)
 
+    padded_at = System.monotonic_time(:millisecond)
+
     features = MelFeatures.extract(padded, e4b_spec(runtime))
+
+    extract_at = System.monotonic_time(:millisecond)
+
+    log_debug(runtime, fn ->
+      "runtime: e4b mel phases pad_ms=#{padded_at - started_at} " <>
+        "extract_ms=#{extract_at - padded_at} samples_kind=#{inspect(hd(padded))}"
+    end)
 
     prompt =
       Gemma4MicTranscribe.Gemma4Unified.Prompt.build(
@@ -1197,12 +1207,33 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         thought_channel: false
       )
 
+    # Mark which placeholder tokens carry real audio: the bucket's silence
+    # padding must be masked out of attention like the 12B path does, or the
+    # model transcribes the padding as looping hallucinated speech.
+    actual_tokens =
+      min(
+        MelFeatures.audio_token_count(length(samples), e4b_spec(runtime)),
+        tokens
+      )
+
+    attention_mask =
+      Nx.tensor(
+        List.duplicate(1, max(actual_tokens, 1)) ++
+          List.duplicate(0, tokens - max(actual_tokens, 1)),
+        type: {:s, 64}
+      )
+
+    log_debug(runtime, fn ->
+      "runtime: e4b mel rebuild tokens=#{tokens} actual=#{actual_tokens} " <>
+        "elapsed_ms=#{System.monotonic_time(:millisecond) - started_at}"
+    end)
+
     %{
       input
       | prompt: prompt,
         audio: %{
           input_features: features,
-          attention_mask: Nx.broadcast(1, {max(tokens, 1)}),
+          attention_mask: attention_mask,
           token_count: tokens,
           samples_per_token: 640
         }

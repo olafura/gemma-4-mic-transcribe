@@ -19,6 +19,14 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
   Hann window, magnitude (not power) spectrum, and `log(mel + mel_floor)`.
   """
   def extract(samples, %Spec{} = spec, opts \\ []) do
+    # Pin the eager tensor work to libtorch. The launcher does not load Mix
+    # config, so on the EXLA path the ambient default backend is
+    # Nx.BinaryBackend, whose pure-Elixir fft and dot turn this call from
+    # milliseconds into seconds.
+    Nx.with_default_backend(Torchx.Backend, fn -> do_extract(samples, spec, opts) end)
+  end
+
+  defp do_extract(samples, %Spec{} = spec, opts) do
     sample_rate = Keyword.get(opts, :sample_rate, 16_000)
 
     frame_length = round(sample_rate * spec.audio_frame_length_ms / 1000)
@@ -35,19 +43,42 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
     samples =
       List.duplicate(0.0, pad_left) ++ samples ++ List.duplicate(0.0, right)
 
+    t0 = System.monotonic_time(:millisecond)
     samples = Nx.tensor(samples, type: :f32)
+    t1 = System.monotonic_time(:millisecond)
 
     frames = frame_signal(samples, frame_length, frame_step)
+    t2 = System.monotonic_time(:millisecond)
 
     filterbank =
       cached_filterbank(spec.audio_mel_bins, fft_length, sample_rate, spec.audio_max_frequency)
+      # cached storage is backend-neutral binary; the dot needs it local
+      |> Nx.backend_copy(Nx.default_backend())
 
     window = hann_window(frame_length)
+    t3 = System.monotonic_time(:millisecond)
 
-    frames
-    |> magnitude_spectrum(window, fft_length: fft_length)
-    |> Nx.dot(filterbank)
-    |> log_compress(floor: spec.audio_mel_floor)
+    spectrum = magnitude_spectrum(frames, window, fft_length: fft_length)
+    t4 = System.monotonic_time(:millisecond)
+
+    result =
+      spectrum
+      |> Nx.dot(filterbank)
+      |> log_compress(floor: spec.audio_mel_floor)
+
+    t5 = System.monotonic_time(:millisecond)
+
+    if t5 - t0 > 500 do
+      require Logger
+
+      Logger.debug(
+        "mel: slow extract tensor=#{t1 - t0}ms frame=#{t2 - t1}ms window=#{t3 - t2}ms " <>
+          "fft=#{t4 - t3}ms dot=#{t5 - t4}ms backend=#{inspect(Nx.default_backend())} " <>
+          "defn=#{inspect(Nx.Defn.default_options())}"
+      )
+    end
+
+    result
   end
 
   @doc """
