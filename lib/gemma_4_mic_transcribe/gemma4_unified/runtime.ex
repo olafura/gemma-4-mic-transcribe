@@ -343,14 +343,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       ready
       |> Enum.chunk_every(samples_per_chunk)
       |> Enum.reduce(utterance, fn chunk, acc ->
-        features =
-          AudioFeatureExtractor.extract(chunk,
-            audio_token_count: chunk_tokens,
-            max_tokens: chunk_tokens
-          )
-
-        {input_features, _mask} =
-          prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+        {input_features, _mask} = chunk_features(runtime, chunk, chunk_tokens)
 
         audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, chunk_tokens)
 
@@ -456,11 +449,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           size * samples_per_token
         )
 
-      features =
-        AudioFeatureExtractor.extract(chunk, audio_token_count: size, max_tokens: size)
-
-      {input_features, _mask} =
-        prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+      {input_features, _mask} = chunk_features(runtime, chunk, size)
 
       audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, size)
 
@@ -485,6 +474,42 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp max_utterance_cache_tokens(runtime) do
     @max_utterance_audio_tokens + runtime.max_response_tokens + @prompt_headroom_tokens
+  end
+
+  # Features for one appended chunk. Both front ends consume 640 samples per
+  # audio token, but E4B wants those as log-mel frames rather than raw PCM.
+  defp chunk_features(%__MODULE__{e4b?: true} = runtime, chunk, chunk_tokens) do
+    alias Gemma4MicTranscribe.Gemma4E4B.MelFeatures
+
+    features = MelFeatures.extract(chunk, e4b_spec(runtime))
+
+    prepare_audio_tensors(runtime, features, Nx.broadcast(1, {max(chunk_tokens, 1)}))
+  end
+
+  defp chunk_features(runtime, chunk, chunk_tokens) do
+    features =
+      AudioFeatureExtractor.extract(chunk,
+        audio_token_count: chunk_tokens,
+        max_tokens: chunk_tokens
+      )
+
+    prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+  end
+
+  defp e4b_spec(runtime) do
+    struct(
+      Gemma4MicTranscribe.Gemma4E4B.Spec,
+      Map.from_struct(runtime.model_info.spec)
+    )
+  end
+
+  # E4B takes mel frames and subsamples them by 4, so a placeholder needs four
+  # frames per audio token; the 12B model takes one raw PCM frame per token.
+  defp silent_audio(%__MODULE__{e4b?: true} = runtime, token_count) do
+    Nx.broadcast(
+      Nx.tensor(0.0, type: {:f, 32}, backend: runtime_backend(runtime)),
+      {4 * max(token_count, 1), runtime.model_info.spec.audio_mel_bins}
+    )
   end
 
   defp silent_audio(runtime, token_count) do
