@@ -37,11 +37,14 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
     {attention_mask, cache} = Layers.Decoder.cached_attention_mask(attention_mask, cache)
     offset = Layers.Decoder.get_cache_offset(cache)
 
+    # Sliding and full attention blocks use different head sizes, so a shared
+    # block has to reuse the last computing block of its own type; taking the
+    # last computing block regardless would hand a 512 wide key to a layer
+    # whose rotary is built for 256.
     state = %{
       hidden_state: hidden_state,
       cache: cache,
-      shared_key: nil,
-      shared_value: nil
+      shared: %{}
     }
 
     outputs =
@@ -90,8 +93,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
         offset,
         layer_type,
         shared?,
-        state.shared_key,
-        state.shared_value,
+        state.shared[layer_type],
         spec,
         name: join(name, "self_attention")
       )
@@ -119,8 +121,11 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
     %{
       hidden_state: hidden_state,
       cache: Layers.Decoder.put_block_cache(state.cache, index, block_cache),
-      shared_key: if(shared?, do: state.shared_key, else: key),
-      shared_value: if(shared?, do: state.shared_value, else: value)
+      shared:
+        if(shared?,
+          do: state.shared,
+          else: Map.put(state.shared, layer_type, {key, value})
+        )
     }
   end
 
@@ -132,8 +137,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
          offset,
          layer_type,
          shared?,
-         shared_key,
-         shared_value,
+         shared_kv,
          spec,
          opts
        ) do
@@ -156,11 +160,11 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
       |> rms_norm(spec.layer_norm_epsilon, name: join(name, "query_norm"))
 
     {key, value} =
-      if shared? do
+      if shared? and shared_kv != nil do
         # The checkpoint keeps k_proj and v_proj for these blocks, so sharing
         # is of the cached state rather than of the weights: the block reuses
-        # what the last computing block put in the cache.
-        {shared_key, shared_value}
+        # what the last computing block of the same type put in the cache.
+        shared_kv
       else
         key =
           hidden_state

@@ -74,6 +74,24 @@ defmodule Gemma4MicTranscribe.Gemma4E4BDecoderTest do
     end
   end
 
+  test "shared blocks reuse a computing block of their own attention type" do
+    # sliding and full alternate, last two shared: block 2 (sliding) must
+    # reuse block 0 (sliding), not block 1 (full), since head sizes differ
+    spec =
+      tiny_spec(
+        attention_head_size: 4,
+        global_attention_head_size: 8,
+        layer_types: [:sliding_attention, :full_attention, :sliding_attention, :full_attention],
+        num_kv_shared_layers: 2
+      )
+
+    {outputs, _params} = build(spec, 4)
+
+    # a mismatched share would fail to build at all, so reaching here with the
+    # right shape is the assertion
+    assert Nx.shape(outputs.hidden_state) == {1, 4, spec.hidden_size}
+  end
+
   test "per-layer inputs are gated against the block state" do
     spec = tiny_spec()
     {_outputs, params} = build(spec, 3)
