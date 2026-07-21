@@ -51,6 +51,9 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     name = opts[:name]
     [first_channels, second_channels] = spec.audio_subsampling_conv_channels
 
+    # The subsampling stack normalises with a mean-centred LayerNorm over the
+    # channel axis and activates with ReLU, unlike the conformer blocks above
+    # it, which use RMS norm and the configured activation.
     features
     |> Axon.nx(&Nx.new_axis(&1, -1))
     |> Axon.conv(first_channels,
@@ -60,8 +63,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       use_bias: false,
       name: join(name, "layer0.conv")
     )
-    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer0.norm"))
-    |> Axon.activation(spec.audio_activation)
+    |> layer_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer0.norm"))
+    |> Axon.activation(:relu)
     |> Axon.conv(second_channels,
       kernel_size: {3, 3},
       strides: [2, 2],
@@ -69,8 +72,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       use_bias: false,
       name: join(name, "layer1.conv")
     )
-    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer1.norm"))
-    |> Axon.activation(spec.audio_activation)
+    |> layer_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer1.norm"))
+    |> Axon.activation(:relu)
     |> Axon.nx(fn state ->
       {batch, frames, freq, channels} = Nx.shape(state)
       Nx.reshape(state, {batch, frames, freq * channels})
@@ -132,24 +135,18 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       |> dense_maybe_clipped(spec.audio_hidden_size, spec, name: join(name, "value"))
       |> Layers.split_heads(spec.audio_num_attention_heads)
 
-    # The checkpoint carries relative_k_proj and per_dim_scale beside the
-    # usual projections, so attention adds a relative position bias and scales
-    # each query dimension rather than the whole head uniformly.
-    # relative_k_proj is a plain weight in the checkpoint, with none of the
-    # clip bounds the other audio linears carry
-    relative_key =
-      normed
-      |> Axon.dense(spec.audio_hidden_size, use_bias: false, name: join(name, "relative_key"))
-      |> Layers.split_heads(spec.audio_num_attention_heads)
-
+    # relative_k_proj projects a fixed sinusoidal table of relative positions,
+    # not the hidden state, so it is a parameter of the attention layer rather
+    # than a projection of its input. It is a plain weight in the checkpoint,
+    # with none of the clip bounds the other audio linears carry.
     Axon.layer(
       &chunked_attention/6,
       [
         query,
         key,
         value,
-        relative_key,
-        Axon.param("per_dim_scale", {head_size})
+        Axon.param("per_dim_scale", {head_size}),
+        Axon.param("relative_key", {spec.audio_hidden_size, spec.audio_hidden_size})
       ],
       name: join(name, "chunked"),
       op_name: :gemma4_audio_attention,
@@ -158,9 +155,17 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       context_right: spec.audio_attention_context_right,
       logit_cap: spec.audio_attention_logit_cap,
       invalid_value: spec.audio_attention_invalid_logits_value,
-      head_size: head_size
+      head_size: head_size,
+      hidden_size: spec.audio_hidden_size,
+      num_heads: spec.audio_num_attention_heads,
+      # defn cannot call :math, so the scalar constants are folded here: the
+      # reference runs the softmax in base 2, folding 1/log(2) into the query
+      # scale and log(1 + e)/log(2) into the key scale
+      query_scale: :math.pow(head_size, -0.5) / :math.log(2),
+      key_scale: :math.log(1 + :math.exp(1)) / :math.log(2),
+      timescale_increment:
+        :math.log(10_000.0) / max(div(spec.audio_hidden_size, 2) - 1, 1)
     )
-    |> Layers.flatten_trailing()
     |> dense_maybe_clipped(spec.audio_hidden_size, spec, name: join(name, "output"))
     |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "post_norm"))
     |> then(&Axon.add(residual, &1))
@@ -249,6 +254,33 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     |> Nx.clip(output_min, output_max)
   end
 
+  # Mean-centred norm over the channel axis, scale only. The subsampling stack
+  # uses this where the conformer blocks use RMS norm.
+  defp layer_norm(input, epsilon, opts) do
+    Axon.layer(
+      &layer_norm_impl/3,
+      [
+        input,
+        Axon.param("weight", fn shape -> {elem(shape, tuple_size(shape) - 1)} end,
+          initializer: Axon.Initializers.ones()
+        )
+      ],
+      name: opts[:name],
+      epsilon: epsilon,
+      op_name: :gemma4_audio_layer_norm
+    )
+  end
+
+  defnp layer_norm_impl(input, weight, opts \\ []) do
+    opts = keyword!(opts, [:epsilon, mode: :inference])
+
+    input = Nx.as_type(input, :f32)
+    centered = input - Nx.mean(input, axes: [-1], keep_axes: true)
+    variance = Nx.mean(centered ** 2, axes: [-1], keep_axes: true)
+
+    centered * Nx.rsqrt(variance + opts[:epsilon]) * weight
+  end
+
   defp rms_norm(input, epsilon, opts) do
     Layers.rms_norm(input,
       name: opts[:name],
@@ -263,43 +295,52 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
   defp join(prefix, suffix), do: "#{prefix}.#{suffix}"
 
   @doc """
-  Shifts a relative score matrix so entry `{i, j}` scores the key `j - i`
-  frames from the query, which is what a relative position term means.
+  Shifts a blocked relative score matrix so that entry `{j, o}` scores the key
+  sitting at context offset `o` from query `j`.
+
+  Takes `{batch, heads, blocks, chunk_size, positions}` and returns
+  `{batch, heads, blocks, chunk_size, context_size}`.
   """
-  defn relative_shift(scores) do
-    {batch, heads, queries, keys} = Nx.shape(scores)
+  defn relative_shift(scores, opts \\ []) do
+    opts = keyword!(opts, [:context_size])
+    context = opts[:context_size]
+
+    {batch, heads, blocks, chunk, positions} = Nx.shape(scores)
 
     scores
-    |> Nx.pad(0.0, [{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {1, 0, 0}])
-    |> Nx.reshape({batch, heads, keys + 1, queries})
-    |> Nx.slice_along_axis(1, keys, axis: 2)
-    |> Nx.reshape({batch, heads, queries, keys})
+    |> Nx.pad(0.0, [{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, context + 1 - positions, 0}])
+    |> Nx.reshape({batch, heads, blocks, chunk * (context + 1)})
+    |> Nx.slice_along_axis(0, chunk * context, axis: 3)
+    |> Nx.reshape({batch, heads, blocks, chunk, context})
   end
 
   @doc """
-  Mask for chunked local attention.
+  Mask for chunked local attention in blocked form.
 
-  A query attends to its own chunk, `context_left` frames before the chunk
-  starts, and `context_right` frames after it ends. Everything else is
-  invalid. Returns a `{queries, keys}` boolean tensor.
+  Query `j` of block `b` sees context offsets `j..j + max_past + max_future`,
+  which is a per-query sliding window rather than whole-chunk visibility, and
+  only where the key falls inside the real sequence. Returns a
+  `{blocks, chunk_size, context_size}` boolean tensor.
   """
   defn chunk_mask(opts \\ []) do
     opts =
-      keyword!(opts, [:length, :chunk_size, :context_left, :context_right])
+      keyword!(opts, [:length, :blocks, :chunk_size, :max_past, :max_future])
 
-    length = opts[:length]
-    chunk_size = opts[:chunk_size]
+    context = opts[:chunk_size] + opts[:max_past] + opts[:max_future]
 
-    queries = Nx.iota({length, 1})
-    keys = Nx.iota({1, length})
+    block = Nx.iota({opts[:blocks], 1, 1})
+    query = Nx.iota({1, opts[:chunk_size], 1})
+    offset = Nx.iota({1, 1, context})
 
-    chunk_start = Nx.quotient(queries, chunk_size) * chunk_size
-    chunk_end = chunk_start + chunk_size - 1
+    # the key a context offset refers to, in sequence coordinates
+    key = block * opts[:chunk_size] + offset - opts[:max_past]
 
-    keys >= chunk_start - opts[:context_left] and keys <= chunk_end + opts[:context_right]
+    in_window = offset >= query and offset <= query + opts[:max_past] + opts[:max_future]
+
+    in_window and key >= 0 and key < opts[:length]
   end
 
-  defnp chunked_attention(query, key, value, relative_key, per_dim_scale, opts \\ []) do
+  defnp chunked_attention(query, key, value, per_dim_scale, relative_key, opts \\ []) do
     opts =
       keyword!(opts, [
         :chunk_size,
@@ -308,40 +349,89 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
         :logit_cap,
         :invalid_value,
         :head_size,
+        :hidden_size,
+        :num_heads,
+        :query_scale,
+        :key_scale,
+        :timescale_increment,
         mode: :inference
       ])
 
-    # Nx.dot requires batch axes to be successive from 0, so move heads next to
-    # batch: {batch, seq, heads, head_size} -> {batch, heads, seq, head_size}
-    # per_dim_scale weights each query dimension before the dot product, so
-    # softplus keeps the learned scale positive as the reference does.
-    scale = Nx.log(1.0 + Nx.exp(per_dim_scale)) / Nx.sqrt(opts[:head_size])
-    query = query * scale
+    chunk = opts[:chunk_size]
+    head_size = opts[:head_size]
+    heads = opts[:num_heads]
 
-    query = Nx.transpose(query, axes: [0, 2, 1, 3])
-    key = Nx.transpose(key, axes: [0, 2, 1, 3])
-    value = Nx.transpose(value, axes: [0, 2, 1, 3])
-    relative_key = Nx.transpose(relative_key, axes: [0, 2, 1, 3])
+    # context_left counts the query frame itself, so the past horizon is one
+    # frame shorter than the configured context
+    max_past = opts[:context_left] - 1
+    max_future = opts[:context_right]
+    context = chunk + max_past + max_future
 
-    length = Nx.axis_size(query, 2)
+    {batch, length, _, _} = Nx.shape(query)
+    blocks = div(length + chunk - 1, chunk)
+    padded = blocks * chunk
 
-    # content term plus a relative position term, the latter shifted so that
-    # position j scores against the key that sits j - i frames away
-    content = Nx.dot(query, [3], [0, 1], key, [3], [0, 1])
-    relative = relative_shift(Nx.dot(query, [3], [0, 1], relative_key, [3], [0, 1]))
+    # per_dim_scale weights each query dimension, through softplus to keep it
+    # positive
+    query = query * opts[:query_scale] * Nx.log1p(Nx.exp(per_dim_scale))
+    key = key * opts[:key_scale]
 
-    weights = content + relative
+    # queries split into non-overlapping blocks; keys and values gather an
+    # overlapping context window per block
+    query =
+      query
+      |> Nx.pad(0.0, [{0, 0, 0}, {0, padded - length, 0}, {0, 0, 0}, {0, 0, 0}])
+      |> Nx.reshape({batch, blocks, chunk, heads, head_size})
+      |> Nx.transpose(axes: [0, 3, 1, 2, 4])
+
+    key =
+      key
+      |> context_windows(blocks: blocks, chunk: chunk, past: max_past, future: max_future)
+      |> Nx.transpose(axes: [0, 3, 1, 4, 2])
+
+    value =
+      value
+      |> context_windows(blocks: blocks, chunk: chunk, past: max_past, future: max_future)
+      |> Nx.transpose(axes: [0, 3, 1, 2, 4])
+
+    content = Nx.dot(query, [4], [0, 1, 2], key, [3], [0, 1, 2])
+
+    # The relative term projects a sinusoidal position table, one row per
+    # distinct relative offset, then shifts it into per-query alignment.
+    positions = div(context, 2) + 1
+
+    relative =
+      position_table(
+        context: context,
+        hidden_size: opts[:hidden_size],
+        increment: opts[:timescale_increment]
+      )
+      |> Nx.dot(relative_key)
+      |> Nx.reshape({positions, heads, head_size})
+      |> Nx.transpose(axes: [1, 2, 0])
+
+    relative =
+      query
+      |> Nx.reshape({batch, heads, blocks * chunk, head_size})
+      # Nx.dot needs batch axes to start at 0, so heads leads going in and the
+      # result is transposed back afterwards
+      |> Nx.transpose(axes: [1, 0, 2, 3])
+      |> Nx.dot([3], [0], relative, [1], [0])
+      |> Nx.transpose(axes: [1, 0, 2, 3])
+      |> Nx.reshape({batch, heads, blocks, chunk, positions})
+      |> relative_shift(context_size: context)
 
     # tanh soft cap keeps logits inside the trained range
     cap = opts[:logit_cap]
-    weights = Nx.tanh(weights / cap) * cap
+    weights = Nx.tanh((content + relative) / cap) * cap
 
     mask =
       chunk_mask(
         length: length,
-        chunk_size: opts[:chunk_size],
-        context_left: opts[:context_left],
-        context_right: opts[:context_right]
+        blocks: blocks,
+        chunk_size: chunk,
+        max_past: max_past,
+        max_future: max_future
       )
       |> Nx.new_axis(0)
       |> Nx.new_axis(0)
@@ -355,8 +445,42 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       Nx.select(mask, weights, opts[:invalid_value])
       |> Axon.Activations.softmax(axis: -1)
 
-    # {batch, heads, queries, head_size} -> {batch, queries, heads, head_size}
-    Nx.dot(weights, [3], [0, 1], value, [2], [0, 1])
-    |> Nx.transpose(axes: [0, 2, 1, 3])
+    weights
+    |> Nx.dot([4], [0, 1, 2], value, [3], [0, 1, 2])
+    |> Nx.transpose(axes: [0, 2, 3, 1, 4])
+    |> Nx.reshape({batch, padded, heads * head_size})
+    |> Nx.slice_along_axis(0, length, axis: 1)
+  end
+
+  # Gathers, for each block, the window of frames its queries may attend to:
+  # max_past frames before the block starts through max_future frames after it
+  # ends.
+  defnp context_windows(state, opts \\ []) do
+    opts = keyword!(opts, [:blocks, :chunk, :past, :future])
+    chunk = opts[:chunk]
+    context = chunk + opts[:past] + opts[:future]
+
+    indices = Nx.iota({opts[:blocks], 1}) * chunk + Nx.iota({1, context})
+
+    state
+    |> Nx.pad(0.0, [{0, 0, 0}, {opts[:past], opts[:future] + chunk - 1, 0}, {0, 0, 0}, {0, 0, 0}])
+    |> Nx.take(indices, axis: 1)
+  end
+
+  # Sinusoidal table over the distinct relative offsets a context window spans,
+  # laid out as concatenated [sin, cos] halves.
+  defnp position_table(opts \\ []) do
+    opts = keyword!(opts, [:context, :hidden_size, :increment])
+
+    timescales = div(opts[:hidden_size], 2)
+
+    inverse = Nx.exp(Nx.iota({1, timescales}, type: :f32) * -opts[:increment])
+
+    # offsets run from the furthest past frame down to the current one
+    positions = div(opts[:context], 2) - Nx.iota({div(opts[:context], 2) + 1, 1}, type: :f32)
+
+    scaled = positions * inverse
+
+    Nx.concatenate([Nx.sin(scaled), Nx.cos(scaled)], axis: -1)
   end
 end

@@ -18,45 +18,48 @@ defmodule Gemma4MicTranscribe.Gemma4E4BAudioEncoderTest do
     }
   end
 
-  test "chunk mask keeps a query inside its chunk plus left context" do
+  test "chunk mask gives each query its own sliding window, not the whole chunk" do
+    # chunk 2, max_past 2, max_future 0 -> context 4, keys start 2 before block
     mask =
-      AudioEncoder.chunk_mask(length: 6, chunk_size: 2, context_left: 2, context_right: 0)
-      |> Nx.to_flat_list()
-      |> Enum.chunk_every(6)
+      AudioEncoder.chunk_mask(length: 6, blocks: 3, chunk_size: 2, max_past: 2, max_future: 0)
 
-    # query 0 is in chunk [0,1]; left context reaches back 2 before the chunk
-    # start (nothing there), so it sees its own chunk only
-    assert Enum.at(mask, 0) == [1, 1, 0, 0, 0, 0]
+    assert Nx.shape(mask) == {3, 2, 4}
 
-    # query 2 opens chunk [2,3] and reaches back to frame 0
-    assert Enum.at(mask, 2) == [1, 1, 1, 1, 0, 0]
+    rows = mask |> Nx.to_flat_list() |> Enum.chunk_every(4)
 
-    # query 5 is in chunk [4,5] and reaches back to frame 2
-    assert Enum.at(mask, 5) == [0, 0, 1, 1, 1, 1]
+    # block 0, query 0 is frame 0: offsets 0..2 map to frames -2..0, so only
+    # the offset landing on frame 0 is valid
+    assert Enum.at(rows, 0) == [0, 0, 1, 0]
+
+    # block 0, query 1 is frame 1: it sees frames 0 and 1
+    assert Enum.at(rows, 1) == [0, 0, 1, 1]
+
+    # block 1, query 0 is frame 2: it sees frames 0, 1, 2 - reaching back past
+    # its own chunk start, but never forward
+    assert Enum.at(rows, 2) == [1, 1, 1, 0]
   end
 
-  test "chunk mask can look right when context_right is set" do
+  test "chunk mask can look right when max_future is set" do
     mask =
-      AudioEncoder.chunk_mask(length: 4, chunk_size: 2, context_left: 0, context_right: 1)
-      |> Nx.to_flat_list()
-      |> Enum.chunk_every(4)
+      AudioEncoder.chunk_mask(length: 4, blocks: 2, chunk_size: 2, max_past: 0, max_future: 1)
 
-    # chunk [0,1] plus one frame after the chunk ends
-    assert Enum.at(mask, 0) == [1, 1, 1, 0]
-    assert Enum.at(mask, 1) == [1, 1, 1, 0]
+    assert Nx.shape(mask) == {2, 2, 3}
+
+    rows = mask |> Nx.to_flat_list() |> Enum.chunk_every(3)
+
+    # query 0 of block 0 is frame 0 and may look one frame ahead
+    assert Enum.at(rows, 0) == [1, 1, 0]
+    assert Enum.at(rows, 1) == [0, 1, 1]
   end
 
-  test "relative shift aligns each row to its own offset" do
-    # rows are distinct so the shift is visible: {1, 1, 3, 3}
-    scores =
-      Nx.tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]])
+  test "relative shift realigns blocked scores to the context width" do
+    # {batch, heads, blocks, chunk, positions} -> context 3
+    scores = Nx.iota({1, 1, 1, 2, 2}, type: :f32)
 
-    shifted = AudioEncoder.relative_shift(scores)
+    shifted = AudioEncoder.relative_shift(scores, context_size: 3)
 
-    assert Nx.shape(shifted) == {1, 1, 3, 3}
-    # every query keeps three scores, drawn from progressively earlier offsets
+    assert Nx.shape(shifted) == {1, 1, 1, 2, 3}
     assert shifted |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
-    refute Nx.all_close(scores, shifted) |> Nx.to_number() == 1
   end
 
   test "attention uses relative key and per dim scale parameters" do
@@ -69,12 +72,15 @@ defmodule Gemma4MicTranscribe.Gemma4E4BAudioEncoderTest do
     inputs = %{"input_features" => Nx.broadcast(0.1, {1, 8, 8})}
     params = init_fun.(inputs, Axon.ModelState.empty())
 
-    # the checkpoint carries relative_k_proj and per_dim_scale per audio block
-    assert Map.has_key?(params.data, "audio_encoder.blocks.0.attention.relative_key")
-
+    # the checkpoint carries relative_k_proj and per_dim_scale per audio block,
+    # both as parameters of the attention layer itself
     chunked = params.data["audio_encoder.blocks.0.attention.chunked"]
     head_size = div(spec.audio_hidden_size, spec.audio_num_attention_heads)
+
     assert Nx.shape(chunked["per_dim_scale"]) == {head_size}
+
+    assert Nx.shape(chunked["relative_key"]) ==
+             {spec.audio_hidden_size, spec.audio_hidden_size}
   end
 
   test "clipped linears carry learned bounds" do

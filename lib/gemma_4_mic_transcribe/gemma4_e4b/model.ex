@@ -269,12 +269,12 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
           clipped("#{audio}.layers.{n}.self_attn.k_proj"),
         "audio_encoder.blocks.{n}.attention.value" =>
           clipped("#{audio}.layers.{n}.self_attn.v_proj"),
-        "audio_encoder.blocks.{n}.attention.relative_key" => %{
-          "kernel" =>
-            {[{"#{audio}.layers.{n}.self_attn.relative_k_proj", "weight"}], &transpose/1}
-        },
         "audio_encoder.blocks.{n}.attention.chunked" => %{
-          "per_dim_scale" => {[{"#{audio}.layers.{n}.self_attn", "per_dim_scale"}], &identity/1}
+          "per_dim_scale" => {[{"#{audio}.layers.{n}.self_attn", "per_dim_scale"}], &identity/1},
+          # relative_k_proj projects the sinusoidal position table, so its
+          # weight lives on the attention layer rather than on a dense
+          "relative_key" =>
+            {[{"#{audio}.layers.{n}.self_attn.relative_k_proj", "weight"}], &transpose/1}
         },
         "audio_encoder.blocks.{n}.attention.output" =>
           clipped("#{audio}.layers.{n}.self_attn.post"),
