@@ -849,7 +849,6 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp predict_decode_next_logits(runtime, previous_token_id, position_id, cache) do
     backend = runtime_backend(runtime)
-    audio_embed_dim = runtime.model_info.spec.audio_embed_dim
 
     inputs =
       Nx.with_default_backend(backend, fn ->
@@ -857,7 +856,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           "input_ids" => Nx.tensor([[previous_token_id]], type: :s64),
           "attention_mask" => Nx.tensor([[1]], type: :s64),
           "position_ids" => Nx.tensor([[position_id]], type: :s64),
-          "input_features" => Nx.broadcast(0.0, {1, 1, audio_embed_dim}),
+          "input_features" => decode_placeholder_features(runtime),
           "input_features_mask" => Nx.tensor([[0]], type: :s64),
           "cache" => cache
         }
@@ -1131,6 +1130,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       packed_linear: Keyword.get(opts, :packed_weights, true),
       hybrid_linear: Keyword.get(opts, :hybrid_weights, false)
     )
+  end
+
+  # A decode step carries no audio, but the graph still expects the input, so
+  # it gets a placeholder shaped for whichever front end the model has.
+  defp decode_placeholder_features(%__MODULE__{e4b?: true} = runtime) do
+    # four mel frames is the smallest input the subsampling stack accepts
+    Nx.broadcast(0.0, {1, 4, runtime.model_info.spec.audio_mel_bins})
+  end
+
+  defp decode_placeholder_features(runtime) do
+    Nx.broadcast(0.0, {1, 1, runtime.model_info.spec.audio_embed_dim})
   end
 
   # E4B takes log-mel frames and one placeholder per encoder frame, where the
