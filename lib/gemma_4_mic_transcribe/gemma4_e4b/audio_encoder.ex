@@ -35,9 +35,12 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       end)
     end)
     |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "output_norm"))
+    # the tower ends at output_proj_dims with a bias, then embed_audio maps
+    # that into the decoder width
+    |> Axon.dense(spec.audio_output_proj_dims, use_bias: true, name: join(name, "output_proj"))
     |> Axon.dense(spec.hidden_size,
       use_bias: false,
-      name: join(name, "output_projection")
+      name: "embed_audio.embedding_projection"
     )
   end
 
@@ -55,16 +58,18 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       strides: [2, 2],
       padding: [{1, 1}, {1, 1}],
       use_bias: false,
-      name: join(name, "conv_0")
+      name: join(name, "layer0.conv")
     )
+    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer0.norm"))
     |> Axon.activation(spec.audio_activation)
     |> Axon.conv(second_channels,
       kernel_size: {3, 3},
       strides: [2, 2],
       padding: [{1, 1}, {1, 1}],
       use_bias: false,
-      name: join(name, "conv_1")
+      name: join(name, "layer1.conv")
     )
+    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer1.norm"))
     |> Axon.activation(spec.audio_activation)
     |> Axon.nx(fn state ->
       {batch, frames, freq, channels} = Nx.shape(state)
@@ -72,7 +77,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     end)
     |> Axon.dense(spec.audio_hidden_size,
       use_bias: false,
-      name: join(name, "input_projection")
+      name: join(name, "input_proj_linear")
     )
   end
 
@@ -165,28 +170,29 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     residual = hidden_state
     hidden_size = spec.audio_hidden_size
 
-    normed = rms_norm(hidden_state, spec.audio_rms_norm_epsilon, name: join(name, "pre_norm"))
+    normed =
+      rms_norm(hidden_state, spec.audio_rms_norm_epsilon, name: join(name, "pre_layer_norm"))
 
-    gate =
-      normed
-      |> dense_maybe_clipped(hidden_size, spec, name: join(name, "gate"))
-      |> Axon.activation(:sigmoid)
-
+    # linear_start is twice the width: half carries signal, half gates it
     normed
-    |> dense_maybe_clipped(hidden_size, spec, name: join(name, "input"))
-    |> then(&Axon.multiply(&1, gate))
+    |> dense_maybe_clipped(2 * hidden_size, spec, name: join(name, "linear_start"))
+    |> Axon.nx(fn state ->
+      half = div(Nx.axis_size(state, 2), 2)
+      signal = Nx.slice_along_axis(state, 0, half, axis: 2)
+      gate = Nx.slice_along_axis(state, half, half, axis: 2)
+      Nx.multiply(signal, Nx.sigmoid(gate))
+    end)
     # causal padding: the encoder never looks right of the current frame
     |> Axon.conv(hidden_size,
       kernel_size: spec.audio_conv_kernel_size,
       padding: [{spec.audio_conv_kernel_size - 1, 0}],
       feature_group_size: hidden_size,
       use_bias: false,
-      name: join(name, "depthwise")
+      name: join(name, "depthwise_conv1d")
     )
-    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "mid_norm"))
+    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "conv_norm"))
     |> Axon.activation(spec.audio_activation)
-    |> dense_maybe_clipped(hidden_size, spec, name: join(name, "output"))
-    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "post_norm"))
+    |> dense_maybe_clipped(hidden_size, spec, name: join(name, "linear_end"))
     |> then(&Axon.add(residual, &1))
   end
 
@@ -203,24 +209,24 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
         Axon.param("kernel", fn shape -> {elem(shape, tuple_size(shape) - 1), units} end),
         # Default to a wide range so an untrained layer passes signal through;
         # loaded checkpoints replace these with their learned bounds.
-        Axon.param("input_min", {1},
-          initializer: fn shape, type, _key ->
-            Nx.broadcast(Nx.tensor(-1.0e4, type: type), shape)
+        Axon.param("input_min", {},
+          initializer: fn _shape, type, _key ->
+            Nx.tensor(-1.0e4, type: type)
           end
         ),
-        Axon.param("input_max", {1},
-          initializer: fn shape, type, _key ->
-            Nx.broadcast(Nx.tensor(1.0e4, type: type), shape)
+        Axon.param("input_max", {},
+          initializer: fn _shape, type, _key ->
+            Nx.tensor(1.0e4, type: type)
           end
         ),
-        Axon.param("output_min", {1},
-          initializer: fn shape, type, _key ->
-            Nx.broadcast(Nx.tensor(-1.0e4, type: type), shape)
+        Axon.param("output_min", {},
+          initializer: fn _shape, type, _key ->
+            Nx.tensor(-1.0e4, type: type)
           end
         ),
-        Axon.param("output_max", {1},
-          initializer: fn shape, type, _key ->
-            Nx.broadcast(Nx.tensor(1.0e4, type: type), shape)
+        Axon.param("output_max", {},
+          initializer: fn _shape, type, _key ->
+            Nx.tensor(1.0e4, type: type)
           end
         )
       ],
@@ -236,9 +242,9 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
   defnp clipped_dense(input, kernel, input_min, input_max, output_min, output_max, _opts \\ []) do
     # bounds are stored as {1} tensors; clip wants scalars
     input
-    |> Nx.clip(Nx.reshape(input_min, {}), Nx.reshape(input_max, {}))
+    |> Nx.clip(input_min, input_max)
     |> Nx.dot([Nx.rank(input) - 1], [], kernel, [0], [])
-    |> Nx.clip(Nx.reshape(output_min, {}), Nx.reshape(output_max, {}))
+    |> Nx.clip(output_min, output_max)
   end
 
   defp rms_norm(input, epsilon, opts) do

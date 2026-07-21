@@ -89,8 +89,9 @@ defmodule Gemma4MicTranscribe.Gemma4E4BAudioEncoderTest do
 
     layer = params.data["audio_encoder.blocks.0.ffn_start.intermediate"]
 
+    # the checkpoint stores these as scalars
     for bound <- ["input_min", "input_max", "output_min", "output_max"] do
-      assert Nx.shape(layer[bound]) == {1}
+      assert Nx.shape(layer[bound]) == {}
     end
   end
 
