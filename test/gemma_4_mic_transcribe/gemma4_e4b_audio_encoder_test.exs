@@ -19,7 +19,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4BAudioEncoderTest do
   end
 
   test "chunk mask gives each query its own sliding window, not the whole chunk" do
-    # chunk 2, max_past 2, max_future 0 -> context 4, keys start 2 before block
+    # chunk 2, max_past 2, max_future 0 -> context 4, keys start 2 before block.
+    # max_past counts the query itself, so back reach is one frame.
     mask =
       AudioEncoder.chunk_mask(length: 6, blocks: 3, chunk_size: 2, max_past: 2, max_future: 0)
 
@@ -27,29 +28,30 @@ defmodule Gemma4MicTranscribe.Gemma4E4BAudioEncoderTest do
 
     rows = mask |> Nx.to_flat_list() |> Enum.chunk_every(4)
 
-    # block 0, query 0 is frame 0: offsets 0..2 map to frames -2..0, so only
+    # block 0, query 0 is frame 0: its window covers frames -1 and 0, so only
     # the offset landing on frame 0 is valid
     assert Enum.at(rows, 0) == [0, 0, 1, 0]
 
     # block 0, query 1 is frame 1: it sees frames 0 and 1
     assert Enum.at(rows, 1) == [0, 0, 1, 1]
 
-    # block 1, query 0 is frame 2: it sees frames 0, 1, 2 - reaching back past
-    # its own chunk start, but never forward
-    assert Enum.at(rows, 2) == [1, 1, 1, 0]
+    # block 1, query 0 is frame 2: it sees frames 1 and 2 - reaching back past
+    # its own chunk start, but never frame 0, which sits max_past away
+    assert Enum.at(rows, 2) == [0, 1, 1, 0]
   end
 
-  test "chunk mask can look right when max_future is set" do
+  test "chunk mask can look right, stopping short of max_future" do
+    # the forward bound is exclusive too: max_future 2 reaches one frame ahead
     mask =
-      AudioEncoder.chunk_mask(length: 4, blocks: 2, chunk_size: 2, max_past: 0, max_future: 1)
+      AudioEncoder.chunk_mask(length: 4, blocks: 2, chunk_size: 2, max_past: 1, max_future: 2)
 
-    assert Nx.shape(mask) == {2, 2, 3}
+    assert Nx.shape(mask) == {2, 2, 5}
 
-    rows = mask |> Nx.to_flat_list() |> Enum.chunk_every(3)
+    rows = mask |> Nx.to_flat_list() |> Enum.chunk_every(5)
 
-    # query 0 of block 0 is frame 0 and may look one frame ahead
-    assert Enum.at(rows, 0) == [1, 1, 0]
-    assert Enum.at(rows, 1) == [0, 1, 1]
+    # query 0 of block 0 is frame 0: itself plus one frame ahead
+    assert Enum.at(rows, 0) == [0, 1, 1, 0, 0]
+    assert Enum.at(rows, 1) == [0, 0, 1, 1, 0]
   end
 
   test "relative shift realigns blocked scores to the context width" do

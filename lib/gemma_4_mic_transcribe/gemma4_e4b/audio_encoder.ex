@@ -317,10 +317,12 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
   @doc """
   Mask for chunked local attention in blocked form.
 
-  Query `j` of block `b` sees context offsets `j..j + max_past + max_future`,
-  which is a per-query sliding window rather than whole-chunk visibility, and
-  only where the key falls inside the real sequence. Returns a
-  `{blocks, chunk_size, context_size}` boolean tensor.
+  Each query carries its own sliding window rather than whole-chunk
+  visibility. The reference mask allows `0 <= dist < max_past` looking back
+  and `0 < -dist < max_future` looking forward (`dist` is query minus key),
+  so `max_past` counts the query itself: a query sees `max_past - 1` earlier
+  frames, never `max_past`. Keys must also fall inside the real sequence.
+  Returns a `{blocks, chunk_size, context_size}` boolean tensor.
   """
   defn chunk_mask(opts \\ []) do
     opts =
@@ -335,7 +337,10 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     # the key a context offset refers to, in sequence coordinates
     key = block * opts[:chunk_size] + offset - opts[:max_past]
 
-    in_window = offset >= query and offset <= query + opts[:max_past] + opts[:max_future]
+    dist = query + opts[:max_past] - offset
+
+    in_window =
+      (dist >= 0 and dist < opts[:max_past]) or (dist < 0 and -dist < opts[:max_future])
 
     in_window and key >= 0 and key < opts[:length]
   end
