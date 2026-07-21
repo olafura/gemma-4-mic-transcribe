@@ -59,8 +59,13 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Spec do
             # E4B consumes mel spectrogram frames, not the raw 640 sample PCM
             # frames the 12B Unified model takes.
             audio_mel_bins: 128,
-            audio_frame_length_ms: 32.0,
+            # from processor_config.json: frame_length 320, hop_length 160,
+            # fft_length 512, mel_floor 0.001, max_frequency 8000
+            audio_frame_length_ms: 20.0,
             audio_frame_step_ms: 10.0,
+            audio_fft_length: 512,
+            audio_mel_floor: 0.001,
+            audio_max_frequency: 8000.0,
 
             # tokens
             pad_token_id: 0,

@@ -233,9 +233,11 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
           if(spec.tie_word_embeddings, do: "#{text}.embed_tokens", else: "lm_head"),
 
         # audio subsampling and output
-        "audio_encoder.subsample.layer0.conv" => "#{audio}.subsample_conv_projection.layer0.conv",
+        "audio_encoder.subsample.layer0.conv" =>
+          conv2d("#{audio}.subsample_conv_projection.layer0.conv"),
         "audio_encoder.subsample.layer0.norm" => "#{audio}.subsample_conv_projection.layer0.norm",
-        "audio_encoder.subsample.layer1.conv" => "#{audio}.subsample_conv_projection.layer1.conv",
+        "audio_encoder.subsample.layer1.conv" =>
+          conv2d("#{audio}.subsample_conv_projection.layer1.conv"),
         "audio_encoder.subsample.layer1.norm" => "#{audio}.subsample_conv_projection.layer1.norm",
         "audio_encoder.subsample.input_proj_linear" =>
           "#{audio}.subsample_conv_projection.input_proj_linear",

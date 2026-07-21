@@ -22,7 +22,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
 
     frame_length = round(sample_rate * spec.audio_frame_length_ms / 1000)
     frame_step = round(sample_rate * spec.audio_frame_step_ms / 1000)
-    fft_length = next_power_of_two(frame_length)
+    fft_length = spec.audio_fft_length
 
     # Nx has no zero-size dimensions, and a partial frame still carries audio,
     # so short input is padded up to one whole frame rather than dropped.
@@ -30,13 +30,18 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
     samples = Nx.tensor(samples, type: :f32)
 
     frames = frame_signal(samples, frame_length, frame_step)
-    filterbank = mel_filterbank(spec.audio_mel_bins, fft_length, sample_rate)
+
+    filterbank =
+      mel_filterbank(spec.audio_mel_bins, fft_length, sample_rate,
+        high_hz: spec.audio_max_frequency
+      )
+
     window = hann_window(frame_length)
 
     frames
     |> power_spectrum(window, fft_length: fft_length)
     |> Nx.dot(filterbank)
-    |> log_compress()
+    |> log_compress(floor: spec.audio_mel_floor)
   end
 
   defp pad_to_frame(samples, frame_length) do
@@ -111,8 +116,11 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
     )
   end
 
-  defnp log_compress(mel) do
-    Nx.log(mel + 1.0e-6)
+  # mel_floor clamps before the log, so quiet bins land on a fixed floor
+  # rather than running off toward negative infinity.
+  defnp log_compress(mel, opts \\ []) do
+    opts = keyword!(opts, [:floor, mode: :inference])
+    Nx.log(Nx.max(mel, opts[:floor]))
   end
 
   @doc """
@@ -157,8 +165,4 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
 
   defp hz_to_mel(hz), do: 2595.0 * :math.log10(1.0 + hz / 700.0)
   defp mel_to_hz(mel), do: 700.0 * (:math.pow(10.0, mel / 2595.0) - 1.0)
-
-  defp next_power_of_two(value) do
-    Stream.iterate(1, &(&1 * 2)) |> Enum.find(&(&1 >= value))
-  end
 end
