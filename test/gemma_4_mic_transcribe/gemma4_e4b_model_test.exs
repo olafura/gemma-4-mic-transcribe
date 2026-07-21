@@ -5,8 +5,9 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
   alias Gemma4MicTranscribe.Gemma4E4B.Spec
 
   defp tiny_model do
-    %Model{
-      spec: %Spec{
+    struct(
+      Model,
+      Map.from_struct(%Spec{
         vocab_size: 32,
         vocab_size_per_layer_input: 32,
         hidden_size: 8,
@@ -31,8 +32,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
         audio_mel_bins: 8,
         audio_token_id: 7,
         final_logit_softcapping: nil
-      }
-    }
+      })
+    )
   end
 
   test "model runs end to end over text and audio tokens" do
@@ -51,7 +52,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
     params = init_fun.(inputs, Axon.ModelState.empty())
     outputs = predict_fun.(params, inputs)
 
-    assert Nx.shape(outputs.logits) == {1, 4, model_spec.spec.vocab_size}
+    assert Nx.shape(outputs.logits) == {1, 4, model_spec.vocab_size}
     assert outputs.logits |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
   end
 

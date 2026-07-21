@@ -135,9 +135,11 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     # The checkpoint carries relative_k_proj and per_dim_scale beside the
     # usual projections, so attention adds a relative position bias and scales
     # each query dimension rather than the whole head uniformly.
+    # relative_k_proj is a plain weight in the checkpoint, with none of the
+    # clip bounds the other audio linears carry
     relative_key =
       normed
-      |> dense_maybe_clipped(spec.audio_hidden_size, spec, name: join(name, "relative_key"))
+      |> Axon.dense(spec.audio_hidden_size, use_bias: false, name: join(name, "relative_key"))
       |> Layers.split_heads(spec.audio_num_attention_heads)
 
     Axon.layer(

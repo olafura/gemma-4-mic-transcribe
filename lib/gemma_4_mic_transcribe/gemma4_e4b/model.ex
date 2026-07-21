@@ -20,18 +20,25 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
   alias Gemma4MicTranscribe.Gemma4E4B.Decoder
   alias Gemma4MicTranscribe.Gemma4E4B.Spec
 
-  defstruct spec: %Spec{}
+  # The runtime reads fields like pad_token_id straight off the loaded spec,
+  # so the model struct carries the configuration flat rather than nested.
+  defstruct Map.to_list(Map.from_struct(%Spec{}))
+
+  defp to_spec(%__MODULE__{} = model), do: struct(Spec, Map.from_struct(model))
 
   @impl true
   def architectures, do: [:for_conditional_generation]
 
   @impl true
-  def config(%__MODULE__{spec: spec} = model, opts) do
-    %{model | spec: Spec.config(spec, opts)}
+  def config(%__MODULE__{} = model, opts) do
+    spec = model |> to_spec() |> Spec.config(opts)
+    struct(__MODULE__, Map.from_struct(spec))
   end
 
   @impl true
-  def input_template(%__MODULE__{spec: spec}) do
+  def input_template(%__MODULE__{} = model) do
+    spec = to_spec(model)
+
     %{
       "input_ids" => Nx.template({1, 1}, :s64),
       "attention_mask" => Nx.template({1, 1}, :s64),
@@ -41,7 +48,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
   end
 
   @impl true
-  def init_cache(%__MODULE__{spec: spec}, batch_size, max_length, _inputs) do
+  def init_cache(%__MODULE__{} = model, batch_size, max_length, _inputs) do
+    spec = to_spec(model)
     # Shared blocks read another block's cache, so only computing blocks get
     # an entry; the rest carry a placeholder to keep indices aligned.
     blocks =
@@ -77,7 +85,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
   end
 
   @impl true
-  def model(%__MODULE__{spec: spec}) do
+  def model(%__MODULE__{} = model_spec) do
+    spec = to_spec(model_spec)
     inputs = inputs(spec)
 
     input_ids = inputs["input_ids"]
@@ -201,13 +210,15 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
   end
 
   defimpl Bumblebee.HuggingFace.Transformers.Config do
-    def load(%{spec: spec} = model, data) do
-      %{model | spec: Bumblebee.HuggingFace.Transformers.Config.load(spec, data)}
+    def load(model, data) do
+      spec = struct(Gemma4MicTranscribe.Gemma4E4B.Spec, Map.from_struct(model))
+      loaded = Bumblebee.HuggingFace.Transformers.Config.load(spec, data)
+      struct(Gemma4MicTranscribe.Gemma4E4B.Model, Map.from_struct(loaded))
     end
   end
 
   defimpl Bumblebee.HuggingFace.Transformers.Model do
-    def params_mapping(%{spec: spec}) do
+    def params_mapping(spec) do
       audio = "model.audio_tower"
       text = "model.language_model"
 
