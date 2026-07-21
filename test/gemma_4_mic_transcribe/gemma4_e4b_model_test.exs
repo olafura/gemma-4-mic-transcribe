@@ -71,8 +71,12 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
     params = init_fun.(base, Axon.ModelState.empty())
     quiet = predict_fun.(params, base).logits
 
-    loud =
-      predict_fun.(params, %{base | "input_features" => Nx.broadcast(0.9, {1, 8, 8})}).logits
+    # a structurally different signal, not merely a louder one: the subsample
+    # LayerNorm cancels any uniform rescaling of the same pattern
+    other_features =
+      Nx.iota({1, 8, 8}, type: :f32) |> Nx.remainder(3) |> Nx.multiply(0.3)
+
+    loud = predict_fun.(params, %{base | "input_features" => other_features}).logits
 
     # position 0 precedes the audio, so causal attention keeps it unchanged
     assert Nx.all_close(quiet[[0, 0]], loud[[0, 0]]) |> Nx.to_number() == 1

@@ -174,10 +174,26 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
           |> Layers.split_heads(num_kv_heads)
           |> rms_norm(spec.layer_norm_epsilon, name: join(name, "key_norm"))
 
+        # Values carry an unscaled RMS norm (with_scale: false in the
+        # reference), so there is no checkpoint weight to map for it.
         value =
           hidden_state
           |> Axon.dense(num_kv_heads * head_size, use_bias: false, name: join(name, "value"))
           |> Layers.split_heads(num_kv_heads)
+          |> Axon.nx(fn value ->
+            upcast = Nx.as_type(value, :f32)
+
+            upcast
+            |> Nx.multiply(
+              Nx.rsqrt(
+                Nx.add(
+                  Nx.mean(Nx.pow(upcast, 2), axes: [-1], keep_axes: true),
+                  spec.layer_norm_epsilon
+                )
+              )
+            )
+            |> Nx.as_type(Nx.type(value))
+          end)
 
         {key, value}
       end

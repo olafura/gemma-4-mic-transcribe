@@ -109,9 +109,10 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
         Nx.multiply(state, Nx.sqrt(Nx.tensor(spec.hidden_size, type: Nx.type(state))))
       end)
 
-    # One embedding per block per token, looked up from a single wide table
-    # and reshaped into {batch, sequence, blocks, per_layer_size}.
-    per_layer_inputs =
+    # Token-identity half of the per-layer inputs: one embedding per block per
+    # token, looked up from a single wide table, scaled like the main
+    # embedding but by its own width.
+    per_layer_embeddings =
       text_ids
       |> Axon.embedding(
         spec.vocab_size_per_layer_input,
@@ -120,12 +121,41 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
       )
       |> Axon.nx(fn state ->
         {batch, sequence, _} = Nx.shape(state)
-        Nx.reshape(state, {batch, sequence, spec.num_blocks, spec.hidden_size_per_layer_input})
+
+        state
+        |> Nx.reshape({batch, sequence, spec.num_blocks, spec.hidden_size_per_layer_input})
+        |> Nx.multiply(
+          Nx.sqrt(Nx.tensor(spec.hidden_size_per_layer_input, type: Nx.type(state)))
+        )
       end)
 
     audio_embeddings = AudioEncoder.encode(inputs["input_features"], spec)
 
     hidden_state = replace_audio_embeddings(embeddings, audio_embeddings, audio_mask)
+
+    # Context half: the merged embeddings, audio included, projected into the
+    # per-layer width. This is the only path besides attention through which
+    # audio reaches each block's per-layer gate.
+    per_layer_projection =
+      hidden_state
+      |> Axon.dense(spec.num_blocks * spec.hidden_size_per_layer_input,
+        use_bias: false,
+        name: join("embedder", "per_layer_projection")
+      )
+      |> Axon.nx(fn state ->
+        {batch, sequence, _} = Nx.shape(state)
+
+        state
+        |> Nx.multiply(Nx.rsqrt(Nx.tensor(spec.hidden_size, type: Nx.type(state))))
+        |> Nx.reshape({batch, sequence, spec.num_blocks, spec.hidden_size_per_layer_input})
+      end)
+      |> rms_norm(spec.layer_norm_epsilon, name: join("embedder", "per_layer_projection_norm"))
+
+    per_layer_inputs =
+      Axon.add(per_layer_projection, per_layer_embeddings)
+      |> Axon.nx(fn state ->
+        Nx.multiply(state, Nx.rsqrt(Nx.tensor(2, type: Nx.type(state))))
+      end)
 
     outputs =
       Decoder.decode(
@@ -226,8 +256,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
         # embeddings
         "embedder.token_embedding" => "#{text}.embed_tokens",
         "embedder.per_layer_embedding" => "#{text}.embed_tokens_per_layer",
-        "per_layer_model_projection" => "#{text}.per_layer_model_projection",
-        "per_layer_projection_norm" => "#{text}.per_layer_projection_norm",
+        "embedder.per_layer_projection" => "#{text}.per_layer_model_projection",
+        "embedder.per_layer_projection_norm" => "#{text}.per_layer_projection_norm",
         "output_norm" => "#{text}.norm",
         "language_modeling_head.output" =>
           if(spec.tie_word_embeddings, do: "#{text}.embed_tokens", else: "lm_head"),
