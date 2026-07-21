@@ -57,12 +57,12 @@ defmodule Gemma4MicTranscribe.Gemma4E4BDecoderTest do
     assert outputs.hidden_state |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
   end
 
-  test "shared blocks project no key or value of their own" do
+  test "shared blocks reuse cached key values instead of projecting their own" do
     spec = tiny_spec()
     {_outputs, params} = build(spec, 4)
     data = params.data
 
-    # 4 blocks with the last 2 shared: blocks 0 and 1 own key/value, 2 and 3 do not
+    # 4 blocks with the last 2 shared: only 0 and 1 compute key/value
     assert Map.has_key?(data, "decoder.blocks.0.self_attention.key")
     assert Map.has_key?(data, "decoder.blocks.1.self_attention.key")
     refute Map.has_key?(data, "decoder.blocks.2.self_attention.key")
@@ -74,12 +74,17 @@ defmodule Gemma4MicTranscribe.Gemma4E4BDecoderTest do
     end
   end
 
-  test "every block consumes its own per-layer embedding slice" do
+  test "per-layer inputs are gated against the block state" do
     spec = tiny_spec()
     {_outputs, params} = build(spec, 3)
 
     for index <- 0..(spec.num_blocks - 1) do
-      assert Map.has_key?(params.data, "decoder.blocks.#{index}.per_layer.projection")
+      # gate maps hidden -> per_layer_size, projection maps back
+      gate = params.data["decoder.blocks.#{index}.per_layer.input_gate"]["kernel"]
+      projection = params.data["decoder.blocks.#{index}.per_layer.projection"]["kernel"]
+
+      assert Nx.shape(gate) == {spec.hidden_size, spec.hidden_size_per_layer_input}
+      assert Nx.shape(projection) == {spec.hidden_size_per_layer_input, spec.hidden_size}
     end
   end
 

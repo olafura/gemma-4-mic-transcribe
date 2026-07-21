@@ -157,7 +157,9 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
 
     {key, value} =
       if shared? do
-        # A shared block projects no key or value of its own.
+        # The checkpoint keeps k_proj and v_proj for these blocks, so sharing
+        # is of the cached state rather than of the weights: the block reuses
+        # what the last computing block put in the cache.
         {shared_key, shared_value}
       else
         key =
@@ -226,16 +228,30 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
     {attention_output, block_cache, key, value}
   end
 
+  # The checkpoint carries per_layer_input_gate (hidden -> per_layer_size),
+  # per_layer_projection (per_layer_size -> hidden) and
+  # post_per_layer_input_norm, so the block gates its own state against the
+  # per-layer embedding rather than simply adding a projection of it.
   defp merge_per_layer_input(hidden_state, per_layer_inputs, index, spec, opts) do
     name = opts[:name]
 
-    projected =
-      per_layer_inputs
-      |> Axon.nx(fn inputs -> inputs[[.., .., index, ..]] end)
-      |> Axon.dense(spec.hidden_size, use_bias: false, name: join(name, "projection"))
-      |> rms_norm(spec.layer_norm_epsilon, name: join(name, "norm"))
+    slice = Axon.nx(per_layer_inputs, fn inputs -> inputs[[.., .., index, ..]] end)
 
-    Axon.add(hidden_state, projected)
+    gate =
+      hidden_state
+      |> Axon.dense(spec.hidden_size_per_layer_input,
+        use_bias: false,
+        name: join(name, "input_gate")
+      )
+      |> Layers.activation(spec.activation)
+
+    gated =
+      gate
+      |> Axon.multiply(slice)
+      |> Axon.dense(spec.hidden_size, use_bias: false, name: join(name, "projection"))
+      |> rms_norm(spec.layer_norm_epsilon, name: join(name, "post_norm"))
+
+    Axon.add(hidden_state, gated)
   end
 
   defp gated_ffn(hidden_state, spec, opts) do
