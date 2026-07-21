@@ -375,6 +375,28 @@ came from `Axon.dense`, which XLA fuses; the plain `Nx.dot` in the hybrid layer
 does not reach the same path. Recovering it would mean matching that lowering,
 not just holding a dequantized copy.
 
+### Gemma 4 E4B (`--model-name gemma4-e4b`)
+
+E4B halves the latency of the 12B on the same hardware. Measured on
+`journal1.wav` with `--backend exla:rocm --stream-wav --realtime
+--no-partials` (bf16 weights, ~16 GB resident, load + transfer ~18 s):
+
+```text
+final lag           1.2-1.7 s   (12B packed: 2.0-3.5 s)
+transcript latency  0.7-1.2 s   (12B: 1.5-3.0 s)
+prefill             110-133 ms  (12B bf16: ~240 ms, packed: ~1100 ms)
+decode              72-80 ms    per token (12B packed: 90 ms, bf16: 140 ms)
+```
+
+Transcript quality on this clip matches the HF reference implementation
+run on the same audio (one mishear each). Caveats found on the way, all
+fixed in the runtime: the conformer encoder and mel front end are verified
+against `transformers` layer-by-layer to float rounding; convolutions are
+computed as dots because MIOpen segfaults building conv kernels on gfx1151;
+mel extraction is pinned to libtorch because the launcher does not load Mix
+config and would otherwise run FFTs on `Nx.BinaryBackend`; and mel shapes
+follow the audio token buckets so streaming never compiles mid-utterance.
+
 ## Incremental prefill
 
 Without it, streaming re-transcribes the whole utterance for every partial, so
