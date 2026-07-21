@@ -424,7 +424,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   defp tokenize_suffix(runtime) do
-    tokenize(runtime.tokenizer, Prompt.suffix())
+    tokenize(runtime.tokenizer, Prompt.suffix(thought_channel: not runtime.e4b?))
   end
 
   # Prefills leftover audio as a full-size chunk padded with masked positions,
@@ -1193,7 +1193,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       Gemma4MicTranscribe.Gemma4Unified.Prompt.build(
         input[:system_message],
         input[:user_prompt] || Config.default_prompt(),
-        tokens
+        tokens,
+        thought_channel: false
       )
 
     %{

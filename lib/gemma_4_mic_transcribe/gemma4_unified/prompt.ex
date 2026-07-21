@@ -11,10 +11,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   def audio_end, do: @audio_end
   def audio_placeholder, do: @audio_token
 
-  def build(system_message, prompt, audio_token_count)
+  def build(system_message, prompt, audio_token_count, opts \\ [])
       when is_integer(audio_token_count) and audio_token_count >= 0 do
     prefix(system_message, prompt) <>
-      String.duplicate(@audio_token, audio_token_count) <> suffix()
+      String.duplicate(@audio_token, audio_token_count) <> suffix(opts)
   end
 
   @doc """
@@ -46,12 +46,21 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   @doc """
   Everything after the audio soft tokens, which closes the user turn and opens
   the model turn. Prefilled fresh on top of the cached audio prefix.
+
+  The 12B Unified model speaks the channel protocol, so its generation starts
+  after an empty thought channel. E4B was not trained on channels - handed
+  one, it writes deliberation into it instead of transcribing - so
+  `thought_channel: false` ends the prompt at the model turn, matching the
+  reference.
   """
-  def suffix do
+  def suffix(opts \\ []) do
+    channel =
+      if Keyword.get(opts, :thought_channel, true), do: @empty_thought_channel, else: ""
+
     @audio_end <>
       "<turn|>\n" <>
       "<|turn>model\n" <>
-      @empty_thought_channel
+      channel
   end
 
   defp normalize_text(nil), do: ""
