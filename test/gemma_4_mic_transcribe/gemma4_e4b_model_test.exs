@@ -91,8 +91,13 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
     assert mapping["decoder.blocks.{n}.per_layer.input_gate"] ==
              "model.language_model.layers.{n}.per_layer_input_gate"
 
-    assert mapping["audio_encoder.blocks.{n}.conv.depthwise_conv1d"] ==
-             "model.audio_tower.layers.{n}.lconv1d.depthwise_conv1d"
+    # conv kernels are transposed from PyTorch layout, so they map through a
+    # builder rather than a bare name
+    assert %{
+             "kernel" =>
+               {[{"model.audio_tower.layers.{n}.lconv1d.depthwise_conv1d", "weight"}], _}
+           } =
+             mapping["audio_encoder.blocks.{n}.conv.depthwise_conv1d"]
 
     assert mapping["embed_audio.embedding_projection"] ==
              "model.embed_audio.embedding_projection"

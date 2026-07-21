@@ -283,7 +283,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
         "audio_encoder.blocks.{n}.conv.linear_start" =>
           clipped("#{audio}.layers.{n}.lconv1d.linear_start"),
         "audio_encoder.blocks.{n}.conv.depthwise_conv1d" =>
-          "#{audio}.layers.{n}.lconv1d.depthwise_conv1d",
+          conv1d("#{audio}.layers.{n}.lconv1d.depthwise_conv1d"),
         "audio_encoder.blocks.{n}.conv.conv_norm" => "#{audio}.layers.{n}.lconv1d.conv_norm",
         "audio_encoder.blocks.{n}.conv.linear_end" =>
           clipped("#{audio}.layers.{n}.lconv1d.linear_end"),
@@ -320,6 +320,19 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
         "output_max" => {[{source, "output_max"}], &identity/1}
       }
     end
+
+    # PyTorch stores conv kernels as {out, in, spatial...}; Axon wants
+    # {spatial..., in, out}.
+    defp conv2d(source) do
+      %{"kernel" => {[{source, "weight"}], &transpose_conv2d/1}}
+    end
+
+    defp conv1d(source) do
+      %{"kernel" => {[{source, "weight"}], &transpose_conv1d/1}}
+    end
+
+    defp transpose_conv2d([tensor]), do: Nx.transpose(tensor, axes: [2, 3, 1, 0])
+    defp transpose_conv1d([tensor]), do: Nx.transpose(tensor, axes: [2, 1, 0])
 
     defp transpose([tensor]), do: Nx.transpose(tensor)
     defp identity([tensor]), do: tensor
