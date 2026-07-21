@@ -79,6 +79,37 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
     refute Nx.all_close(quiet[[0, 3]], loud[[0, 3]]) |> Nx.to_number() == 1
   end
 
+  test "params mapping targets the published checkpoint names" do
+    mapping = Bumblebee.HuggingFace.Transformers.Model.params_mapping(tiny_model())
+
+    assert mapping["embedder.token_embedding"] == "model.language_model.embed_tokens"
+
+    assert mapping["embedder.per_layer_embedding"] ==
+             "model.language_model.embed_tokens_per_layer"
+
+    assert mapping["decoder.blocks.{n}.per_layer.input_gate"] ==
+             "model.language_model.layers.{n}.per_layer_input_gate"
+
+    assert mapping["audio_encoder.blocks.{n}.conv.depthwise_conv1d"] ==
+             "model.audio_tower.layers.{n}.lconv1d.depthwise_conv1d"
+
+    assert mapping["embed_audio.embedding_projection"] ==
+             "model.embed_audio.embedding_projection"
+  end
+
+  test "clipped linears map their nested weight and their bounds" do
+    mapping = Bumblebee.HuggingFace.Transformers.Model.params_mapping(tiny_model())
+    entry = mapping["audio_encoder.blocks.{n}.attention.query"]
+
+    # the weight lives under a nested "linear", the bounds sit beside it
+    assert %{"kernel" => {[{source, "weight"}], _}} = entry
+    assert source == "model.audio_tower.layers.{n}.self_attn.q_proj.linear"
+
+    for bound <- ["input_min", "input_max", "output_min", "output_max"] do
+      assert %{^bound => {[{"model.audio_tower.layers.{n}.self_attn.q_proj", ^bound}], _}} = entry
+    end
+  end
+
   test "cache allocates entries only for blocks that compute key values" do
     model_spec = tiny_model()
     cache = Model.init_cache(model_spec, 1, 16, %{})

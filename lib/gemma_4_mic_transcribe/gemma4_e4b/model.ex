@@ -205,4 +205,112 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
       %{model | spec: Bumblebee.HuggingFace.Transformers.Config.load(spec, data)}
     end
   end
+
+  defimpl Bumblebee.HuggingFace.Transformers.Model do
+    def params_mapping(%{spec: spec}) do
+      audio = "model.audio_tower"
+      text = "model.language_model"
+
+      %{
+        # embeddings
+        "embedder.token_embedding" => "#{text}.embed_tokens",
+        "embedder.per_layer_embedding" => "#{text}.embed_tokens_per_layer",
+        "per_layer_model_projection" => "#{text}.per_layer_model_projection",
+        "per_layer_projection_norm" => "#{text}.per_layer_projection_norm",
+        "output_norm" => "#{text}.norm",
+        "language_modeling_head.output" =>
+          if(spec.tie_word_embeddings, do: "#{text}.embed_tokens", else: "lm_head"),
+
+        # audio subsampling and output
+        "audio_encoder.subsample.layer0.conv" => "#{audio}.subsample_conv_projection.layer0.conv",
+        "audio_encoder.subsample.layer0.norm" => "#{audio}.subsample_conv_projection.layer0.norm",
+        "audio_encoder.subsample.layer1.conv" => "#{audio}.subsample_conv_projection.layer1.conv",
+        "audio_encoder.subsample.layer1.norm" => "#{audio}.subsample_conv_projection.layer1.norm",
+        "audio_encoder.subsample.input_proj_linear" =>
+          "#{audio}.subsample_conv_projection.input_proj_linear",
+        "audio_encoder.output_norm" => "#{audio}.norm",
+        "audio_encoder.output_proj" => "#{audio}.output_proj",
+        "embed_audio.embedding_projection" => "model.embed_audio.embedding_projection",
+
+        # audio blocks
+        "audio_encoder.blocks.{n}.ffn_start.pre_norm" =>
+          "#{audio}.layers.{n}.feed_forward1.pre_layer_norm",
+        "audio_encoder.blocks.{n}.ffn_start.post_norm" =>
+          "#{audio}.layers.{n}.feed_forward1.post_layer_norm",
+        "audio_encoder.blocks.{n}.ffn_start.intermediate" =>
+          clipped("#{audio}.layers.{n}.feed_forward1.ffw_layer_1"),
+        "audio_encoder.blocks.{n}.ffn_start.output" =>
+          clipped("#{audio}.layers.{n}.feed_forward1.ffw_layer_2"),
+        "audio_encoder.blocks.{n}.ffn_end.pre_norm" =>
+          "#{audio}.layers.{n}.feed_forward2.pre_layer_norm",
+        "audio_encoder.blocks.{n}.ffn_end.post_norm" =>
+          "#{audio}.layers.{n}.feed_forward2.post_layer_norm",
+        "audio_encoder.blocks.{n}.ffn_end.intermediate" =>
+          clipped("#{audio}.layers.{n}.feed_forward2.ffw_layer_1"),
+        "audio_encoder.blocks.{n}.ffn_end.output" =>
+          clipped("#{audio}.layers.{n}.feed_forward2.ffw_layer_2"),
+        "audio_encoder.blocks.{n}.attention.pre_norm" => "#{audio}.layers.{n}.norm_pre_attn",
+        "audio_encoder.blocks.{n}.attention.post_norm" => "#{audio}.layers.{n}.norm_post_attn",
+        "audio_encoder.blocks.{n}.attention.query" =>
+          clipped("#{audio}.layers.{n}.self_attn.q_proj"),
+        "audio_encoder.blocks.{n}.attention.key" =>
+          clipped("#{audio}.layers.{n}.self_attn.k_proj"),
+        "audio_encoder.blocks.{n}.attention.value" =>
+          clipped("#{audio}.layers.{n}.self_attn.v_proj"),
+        "audio_encoder.blocks.{n}.attention.relative_key" => %{
+          "kernel" =>
+            {[{"#{audio}.layers.{n}.self_attn.relative_k_proj", "weight"}], &transpose/1}
+        },
+        "audio_encoder.blocks.{n}.attention.chunked" => %{
+          "per_dim_scale" =>
+            {[{"#{audio}.layers.{n}.self_attn.per_dim_scale", "per_dim_scale"}], &identity/1}
+        },
+        "audio_encoder.blocks.{n}.attention.output" =>
+          clipped("#{audio}.layers.{n}.self_attn.post"),
+        "audio_encoder.blocks.{n}.conv.pre_layer_norm" =>
+          "#{audio}.layers.{n}.lconv1d.pre_layer_norm",
+        "audio_encoder.blocks.{n}.conv.linear_start" =>
+          clipped("#{audio}.layers.{n}.lconv1d.linear_start"),
+        "audio_encoder.blocks.{n}.conv.depthwise_conv1d" =>
+          "#{audio}.layers.{n}.lconv1d.depthwise_conv1d",
+        "audio_encoder.blocks.{n}.conv.conv_norm" => "#{audio}.layers.{n}.lconv1d.conv_norm",
+        "audio_encoder.blocks.{n}.conv.linear_end" =>
+          clipped("#{audio}.layers.{n}.lconv1d.linear_end"),
+        "audio_encoder.blocks.{n}.output_norm" => "#{audio}.layers.{n}.norm_out",
+
+        # decoder blocks
+        "decoder.blocks.{n}.self_attention_norm" => "#{text}.layers.{n}.input_layernorm",
+        "decoder.blocks.{n}.post_attention_norm" => "#{text}.layers.{n}.post_attention_layernorm",
+        "decoder.blocks.{n}.pre_ffn_norm" => "#{text}.layers.{n}.pre_feedforward_layernorm",
+        "decoder.blocks.{n}.post_ffn_norm" => "#{text}.layers.{n}.post_feedforward_layernorm",
+        "decoder.blocks.{n}.self_attention.query" => "#{text}.layers.{n}.self_attn.q_proj",
+        "decoder.blocks.{n}.self_attention.key" => "#{text}.layers.{n}.self_attn.k_proj",
+        "decoder.blocks.{n}.self_attention.value" => "#{text}.layers.{n}.self_attn.v_proj",
+        "decoder.blocks.{n}.self_attention.output" => "#{text}.layers.{n}.self_attn.o_proj",
+        "decoder.blocks.{n}.self_attention.query_norm" => "#{text}.layers.{n}.self_attn.q_norm",
+        "decoder.blocks.{n}.self_attention.key_norm" => "#{text}.layers.{n}.self_attn.k_norm",
+        "decoder.blocks.{n}.ffn.gate" => "#{text}.layers.{n}.mlp.gate_proj",
+        "decoder.blocks.{n}.ffn.intermediate" => "#{text}.layers.{n}.mlp.up_proj",
+        "decoder.blocks.{n}.ffn.output" => "#{text}.layers.{n}.mlp.down_proj",
+        "decoder.blocks.{n}.per_layer.input_gate" => "#{text}.layers.{n}.per_layer_input_gate",
+        "decoder.blocks.{n}.per_layer.projection" => "#{text}.layers.{n}.per_layer_projection",
+        "decoder.blocks.{n}.per_layer.post_norm" => "#{text}.layers.{n}.post_per_layer_input_norm"
+      }
+    end
+
+    # Clipped linears keep their weight under a nested "linear" and their
+    # bounds beside it.
+    defp clipped(source) do
+      %{
+        "kernel" => {[{"#{source}.linear", "weight"}], &transpose/1},
+        "input_min" => {[{source, "input_min"}], &identity/1},
+        "input_max" => {[{source, "input_max"}], &identity/1},
+        "output_min" => {[{source, "output_min"}], &identity/1},
+        "output_max" => {[{source, "output_max"}], &identity/1}
+      }
+    end
+
+    defp transpose([tensor]), do: Nx.transpose(tensor)
+    defp identity([tensor]), do: tensor
+  end
 end
