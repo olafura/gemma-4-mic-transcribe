@@ -239,7 +239,6 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
         "audio_encoder.subsample.layer1.norm" => "#{audio}.subsample_conv_projection.layer1.norm",
         "audio_encoder.subsample.input_proj_linear" =>
           "#{audio}.subsample_conv_projection.input_proj_linear",
-        "audio_encoder.output_norm" => "#{audio}.norm",
         "audio_encoder.output_proj" => "#{audio}.output_proj",
         "embed_audio.embedding_projection" => "model.embed_audio.embedding_projection",
 
@@ -273,8 +272,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
             {[{"#{audio}.layers.{n}.self_attn.relative_k_proj", "weight"}], &transpose/1}
         },
         "audio_encoder.blocks.{n}.attention.chunked" => %{
-          "per_dim_scale" =>
-            {[{"#{audio}.layers.{n}.self_attn.per_dim_scale", "per_dim_scale"}], &identity/1}
+          "per_dim_scale" => {[{"#{audio}.layers.{n}.self_attn", "per_dim_scale"}], &identity/1}
         },
         "audio_encoder.blocks.{n}.attention.output" =>
           clipped("#{audio}.layers.{n}.self_attn.post"),
@@ -303,6 +301,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
         "decoder.blocks.{n}.ffn.gate" => "#{text}.layers.{n}.mlp.gate_proj",
         "decoder.blocks.{n}.ffn.intermediate" => "#{text}.layers.{n}.mlp.up_proj",
         "decoder.blocks.{n}.ffn.output" => "#{text}.layers.{n}.mlp.down_proj",
+        "decoder.blocks.{n}.layer_scalar" => "#{text}.layers.{n}",
         "decoder.blocks.{n}.per_layer.input_gate" => "#{text}.layers.{n}.per_layer_input_gate",
         "decoder.blocks.{n}.per_layer.projection" => "#{text}.layers.{n}.per_layer_projection",
         "decoder.blocks.{n}.per_layer.post_norm" => "#{text}.layers.{n}.post_per_layer_input_norm"

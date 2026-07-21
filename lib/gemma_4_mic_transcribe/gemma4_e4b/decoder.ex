@@ -117,6 +117,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
       merge_per_layer_input(hidden_state, per_layer_inputs, index, spec,
         name: join(name, "per_layer")
       )
+      # every block carries a learned scalar on its output
+      |> layer_scalar(name: join(name, "layer_scalar"))
 
     %{
       hidden_state: hidden_state,
@@ -256,6 +258,15 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
       |> rms_norm(spec.layer_norm_epsilon, name: join(name, "post_norm"))
 
     Axon.add(hidden_state, gated)
+  end
+
+  defp layer_scalar(input, opts) do
+    Axon.layer(
+      fn input, scalar, _opts -> Nx.multiply(input, scalar) end,
+      [input, Axon.param("layer_scalar", {1}, initializer: Axon.Initializers.ones())],
+      name: opts[:name],
+      op_name: :gemma4_layer_scalar
+    )
   end
 
   defp gated_ffn(hidden_state, spec, opts) do

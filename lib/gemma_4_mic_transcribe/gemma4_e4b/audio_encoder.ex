@@ -34,7 +34,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
         conformer_block(acc, spec, name: join(name, "blocks.#{index}"))
       end)
     end)
-    |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "output_norm"))
+    # the checkpoint has no norm between the last block and output_proj
     # the tower ends at output_proj_dims with a bias, then embed_audio maps
     # that into the decoder width
     |> Axon.dense(spec.audio_output_proj_dims, use_bias: true, name: join(name, "output_proj"))

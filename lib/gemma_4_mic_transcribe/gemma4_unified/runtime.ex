@@ -90,6 +90,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
                "runtime: Bumblebee.load_model #{repo_id} (checkpoint download/load)",
                fn ->
                  model_opts
+                 |> Keyword.put(:log_params_diff, debug?)
                  |> Keyword.put(:spec, spec)
                  |> maybe_put_param_type(spec, param_type)
                  |> Keyword.replace_lazy(:backend, &param_load_backend/1)
