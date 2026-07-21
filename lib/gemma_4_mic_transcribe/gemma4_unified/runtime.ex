@@ -60,8 +60,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       repo_id = ModelCatalog.resolve(model_name)
       repo = {:hf, repo_id}
 
+      # E4B is a different architecture: conformer audio encoder, per-layer
+      # input embeddings, KV sharing. It gets its own spec module.
+      spec_module = spec_module_for(repo_id)
+
       spec_opts = [
-        module: Model,
+        module: spec_module,
         architecture: :for_conditional_generation
       ]
 
@@ -78,13 +82,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
              timed_debug(debug?, "runtime: Bumblebee.load_spec #{repo_id}", fn ->
                Bumblebee.load_spec(repo, spec_opts)
              end),
-           spec <-
-             Bumblebee.configure(spec,
-               logits_last_only: true,
-               cache_type: param_type,
-               packed_linear: Keyword.get(opts, :packed_weights, true),
-               hybrid_linear: Keyword.get(opts, :hybrid_weights, false)
-             ),
+           spec <- configure_spec(spec, param_type, opts),
            {:ok, model_info} <-
              timed_debug(
                debug?,
@@ -103,7 +101,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
              end),
            {:ok, generation_config} <-
              timed_debug(debug?, "runtime: Bumblebee.load_generation_config #{repo_id}", fn ->
-               Bumblebee.load_generation_config(repo, spec_module: Model)
+               Bumblebee.load_generation_config(repo, spec_module: spec_module)
              end) do
         {_init_fun, predict_fun} =
           timed_debug(debug?, "runtime: Axon.build predict function", fn ->
@@ -1118,6 +1116,26 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
        do: opts
 
   defp maybe_put_param_type(opts, _spec, type), do: Keyword.put(opts, :type, type)
+
+  # The E4B spec has none of the 12B's quantisation or logit options.
+  defp configure_spec(%Gemma4MicTranscribe.Gemma4E4B.Model{} = spec, _param_type, _opts), do: spec
+
+  defp configure_spec(spec, param_type, opts) do
+    Bumblebee.configure(spec,
+      logits_last_only: true,
+      cache_type: param_type,
+      packed_linear: Keyword.get(opts, :packed_weights, true),
+      hybrid_linear: Keyword.get(opts, :hybrid_weights, false)
+    )
+  end
+
+  defp spec_module_for(repo_id) do
+    if String.contains?(repo_id, "E4B") or String.contains?(repo_id, "e4b") do
+      Gemma4MicTranscribe.Gemma4E4B.Model
+    else
+      Model
+    end
+  end
 
   defp param_type(nil), do: {:ok, {:bf, 16}}
   defp param_type("bf16"), do: {:ok, {:bf, 16}}
