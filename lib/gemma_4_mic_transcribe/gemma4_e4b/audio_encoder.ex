@@ -54,24 +54,17 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     # The subsampling stack normalises with a mean-centred LayerNorm over the
     # channel axis and activates with ReLU, unlike the conformer blocks above
     # it, which use RMS norm and the configured activation.
+    #
+    # The convolutions are computed as im2col gathers plus a dot rather than
+    # conv ops: XLA lowers convolutions to MIOpen on ROCm, and MIOpen
+    # segfaults building conv kernels for gfx1151. Dots take the rocBLAS
+    # path, which works. The parameters keep the conv kernel layout.
     features
     |> Axon.nx(&Nx.new_axis(&1, -1))
-    |> Axon.conv(first_channels,
-      kernel_size: {3, 3},
-      strides: [2, 2],
-      padding: [{1, 1}, {1, 1}],
-      use_bias: false,
-      name: join(name, "layer0.conv")
-    )
+    |> conv2d_as_dot(first_channels, name: join(name, "layer0.conv"))
     |> layer_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer0.norm"))
     |> Axon.activation(:relu)
-    |> Axon.conv(second_channels,
-      kernel_size: {3, 3},
-      strides: [2, 2],
-      padding: [{1, 1}, {1, 1}],
-      use_bias: false,
-      name: join(name, "layer1.conv")
-    )
+    |> conv2d_as_dot(second_channels, name: join(name, "layer1.conv"))
     |> layer_norm(spec.audio_rms_norm_epsilon, name: join(name, "layer1.norm"))
     |> Axon.activation(:relu)
     |> Axon.nx(fn state ->
@@ -189,12 +182,10 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       gate = Nx.slice_along_axis(state, half, half, axis: 2)
       Nx.multiply(signal, Nx.sigmoid(gate))
     end)
-    # causal padding: the encoder never looks right of the current frame
-    |> Axon.conv(hidden_size,
-      kernel_size: spec.audio_conv_kernel_size,
-      padding: [{spec.audio_conv_kernel_size - 1, 0}],
-      feature_group_size: hidden_size,
-      use_bias: false,
+    # causal padding: the encoder never looks right of the current frame.
+    # Computed as shifted adds rather than a conv op, keeping the graph off
+    # MIOpen's broken gfx1151 conv path.
+    |> causal_depthwise_conv(spec.audio_conv_kernel_size,
       name: join(name, "depthwise_conv1d")
     )
     |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "conv_norm"))
@@ -252,6 +243,81 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     |> Nx.clip(input_min, input_max)
     |> Nx.dot([Nx.rank(input) - 1], [], kernel, [0], [])
     |> Nx.clip(output_min, output_max)
+  end
+
+  # 3x3 stride-2 same-padded convolution as an im2col gather plus one dot.
+  # The kernel keeps Axon's conv layout {3, 3, in, out}, so the checkpoint
+  # mapping is unchanged.
+  defp conv2d_as_dot(input, out_channels, opts) do
+    Axon.layer(
+      &conv2d_as_dot_impl/3,
+      [
+        input,
+        Axon.param("kernel", fn shape ->
+          {3, 3, elem(shape, tuple_size(shape) - 1), out_channels}
+        end)
+      ],
+      name: opts[:name],
+      op_name: :gemma4_audio_conv2d
+    )
+  end
+
+  defnp conv2d_as_dot_impl(input, kernel, _opts \\ []) do
+    {batch, height, width, channels} = Nx.shape(input)
+    {3, 3, _in_channels, out_channels} = Nx.shape(kernel)
+
+    out_height = div(height - 1, 2) + 1
+    out_width = div(width - 1, 2) + 1
+
+    padded = Nx.pad(input, 0.0, [{0, 0, 0}, {1, 1, 0}, {1, 1, 0}, {0, 0, 0}])
+
+    # window row r covers padded rows 2r..2r+2; likewise for columns
+    row_indices = Nx.iota({out_height, 1}) * 2 + Nx.iota({1, 3})
+    col_indices = Nx.iota({out_width, 1}) * 2 + Nx.iota({1, 3})
+
+    padded
+    |> Nx.take(row_indices, axis: 1)
+    |> Nx.take(col_indices, axis: 3)
+    # {b, oh, 3, ow, 3, c} -> {b, oh, ow, 3, 3, c}
+    |> Nx.transpose(axes: [0, 1, 3, 2, 4, 5])
+    |> Nx.reshape({batch, out_height, out_width, 3 * 3 * channels})
+    |> Nx.dot([3], [], Nx.reshape(kernel, {3 * 3 * channels, out_channels}), [0], [])
+  end
+
+  # Depthwise causal 1D convolution as shifted adds: for a kernel of width K,
+  # output t is the K-tap weighted sum of frames t-K+1..t. The kernel keeps
+  # Axon's conv layout {K, 1, channels}.
+  defp causal_depthwise_conv(input, kernel_size, opts) do
+    Axon.layer(
+      &causal_depthwise_conv_impl/3,
+      [
+        input,
+        Axon.param("kernel", fn shape ->
+          {kernel_size, 1, elem(shape, tuple_size(shape) - 1)}
+        end)
+      ],
+      name: opts[:name],
+      op_name: :gemma4_audio_depthwise_conv,
+      kernel_size: kernel_size
+    )
+  end
+
+  defnp causal_depthwise_conv_impl(input, kernel, opts \\ []) do
+    opts = keyword!(opts, [:kernel_size, mode: :inference])
+    kernel_size = opts[:kernel_size]
+
+    {_batch, length, channels} = Nx.shape(input)
+
+    padded = Nx.pad(input, 0.0, [{0, 0, 0}, {kernel_size - 1, 0, 0}, {0, 0, 0}])
+
+    # window t covers padded frames t..t+K-1, whose last frame is input t
+    indices = Nx.iota({length, 1}) + Nx.iota({1, kernel_size})
+
+    padded
+    # {b, length, K, c}
+    |> Nx.take(indices, axis: 1)
+    |> Nx.multiply(Nx.reshape(kernel, {1, 1, kernel_size, channels}))
+    |> Nx.sum(axes: [2])
   end
 
   # Mean-centred norm over the channel axis, scale only. The subsampling stack
