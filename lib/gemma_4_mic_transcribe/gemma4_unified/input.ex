@@ -8,6 +8,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Input do
     features = AudioFeatureExtractor.extract(samples, opts)
 
     %{
+      # kept so a runtime with a different audio front end (E4B mel features)
+      # can rebuild the features it needs
+      samples: Enum.to_list(samples),
       prompt:
         Prompt.build(
           Keyword.get(opts, :system_message),

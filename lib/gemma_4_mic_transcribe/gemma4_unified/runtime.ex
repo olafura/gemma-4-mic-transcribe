@@ -44,6 +44,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :inside_channel_suppression_mask,
     :content_suppression_mask,
     :no_repeat_ngram_size,
+    :e4b?,
     :predict_fun,
     :debug,
     :debug_top_k
@@ -180,6 +181,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            inside_channel_suppression_mask: inside_channel_suppression_mask,
            content_suppression_mask: content_suppression_mask,
            no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 0),
+           e4b?: spec_module == Gemma4MicTranscribe.Gemma4E4B.Model,
            predict_fun: predict_fun,
            debug: debug?,
            debug_top_k: Keyword.get(opts, :debug_top_k, 0)
@@ -520,6 +522,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   def generate(%__MODULE__{} = runtime, input, opts \\ []) do
+    input = maybe_rebuild_for_e4b(runtime, input)
+
     log_debug(runtime, fn ->
       "runtime: generate start prompt_bytes=#{byte_size(input.prompt)} audio_tokens=#{input.audio.token_count}"
     end)
@@ -1128,6 +1132,47 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       hybrid_linear: Keyword.get(opts, :hybrid_weights, false)
     )
   end
+
+  # E4B takes log-mel frames and one placeholder per encoder frame, where the
+  # 12B takes raw 640 sample PCM frames and one placeholder per frame.
+  defp maybe_rebuild_for_e4b(%__MODULE__{e4b?: true} = runtime, input) do
+    alias Gemma4MicTranscribe.Gemma4E4B.MelFeatures
+
+    spec = runtime.model_info.spec
+    samples = Map.get(input, :samples, [])
+
+    tokens =
+      MelFeatures.audio_token_count(
+        length(samples),
+        struct(Gemma4MicTranscribe.Gemma4E4B.Spec, Map.from_struct(spec))
+      )
+
+    features =
+      MelFeatures.extract(
+        samples,
+        struct(Gemma4MicTranscribe.Gemma4E4B.Spec, Map.from_struct(spec))
+      )
+
+    prompt =
+      Gemma4MicTranscribe.Gemma4Unified.Prompt.build(
+        input[:system_message],
+        input[:user_prompt] || Config.default_prompt(),
+        tokens
+      )
+
+    %{
+      input
+      | prompt: prompt,
+        audio: %{
+          input_features: features,
+          attention_mask: Nx.broadcast(1, {max(tokens, 1)}),
+          token_count: tokens,
+          samples_per_token: 640
+        }
+    }
+  end
+
+  defp maybe_rebuild_for_e4b(_runtime, input), do: input
 
   defp spec_module_for(repo_id) do
     if String.contains?(repo_id, "E4B") or String.contains?(repo_id, "e4b") do
