@@ -56,6 +56,11 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Spec do
             audio_activation: :silu,
             audio_use_clipped_linears: true,
             audio_rms_norm_epsilon: 1.0e-6,
+            # E4B consumes mel spectrogram frames, not the raw 640 sample PCM
+            # frames the 12B Unified model takes.
+            audio_mel_bins: 128,
+            audio_frame_length_ms: 32.0,
+            audio_frame_step_ms: 10.0,
 
             # tokens
             pad_token_id: 0,
@@ -200,6 +205,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Spec do
         audio_use_clipped_linears:
           Map.get(audio, "use_clipped_linears", spec.audio_use_clipped_linears),
         audio_rms_norm_epsilon: Map.get(audio, "rms_norm_eps", spec.audio_rms_norm_epsilon),
+        audio_mel_bins: Map.get(audio, "num_mel_bins", spec.audio_mel_bins),
         quantization_config: Map.get(data, "quantization_config", spec.quantization_config)
       )
     end
