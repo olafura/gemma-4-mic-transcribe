@@ -19,18 +19,19 @@ defmodule Gemma4MicTranscribe.Gemma4E4BMelFeaturesTest do
   test "frame count follows length and hop" do
     s = spec()
 
-    # 32ms frames hopping 10ms: 512 samples long, 160 apart
-    assert MelFeatures.frame_count(512, s, sample_rate: @sample_rate) == 1
-    # shorter than one frame is padded up to one frame, not dropped
-    assert MelFeatures.frame_count(511, s, sample_rate: @sample_rate) == 1
-    assert MelFeatures.frame_count(512 + 160, s, sample_rate: @sample_rate) == 2
-    assert MelFeatures.frame_count(16_000, s, sample_rate: @sample_rate) == 97
+    # 32ms frames hopping 10ms: 512 samples long, 160 apart. Semicausal
+    # padding prepends 256 zeros, and frames unfold 513 samples wide.
+    assert MelFeatures.frame_count(512, s, sample_rate: @sample_rate) == 2
+    assert MelFeatures.frame_count(511, s, sample_rate: @sample_rate) == 2
+    # too short for even one padded window is topped up, not dropped
+    assert MelFeatures.frame_count(100, s, sample_rate: @sample_rate) == 1
+    assert MelFeatures.frame_count(16_000, s, sample_rate: @sample_rate) == 99
   end
 
   test "audio token count is the frame count after subsampling" do
     s = spec()
 
-    # one second gives 97 mel frames, subsampled twice by two -> 25 tokens,
+    # one second gives 99 mel frames, subsampled twice by two -> 25 tokens,
     # which matches Gemma 4's documented 25 audio tokens per second
     assert MelFeatures.audio_token_count(16_000, s, sample_rate: @sample_rate) == 25
   end
