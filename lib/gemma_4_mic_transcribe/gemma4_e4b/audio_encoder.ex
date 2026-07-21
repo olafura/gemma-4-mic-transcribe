@@ -176,18 +176,55 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     |> then(&Axon.add(residual, &1))
   end
 
-  # Clipped linears bound activations before the matmul, which keeps the
-  # encoder numerically stable in bf16.
-  defp dense_maybe_clipped(input, units, %Spec{audio_use_clipped_linears: true} = spec, opts) do
-    cap = spec.audio_attention_logit_cap
+  # The checkpoint stores input_min/input_max and output_min/output_max beside
+  # each clipped linear, so the bounds are learned per layer rather than the
+  # fixed logit cap.
+  defp dense_maybe_clipped(input, units, %Spec{audio_use_clipped_linears: true}, opts) do
+    name = opts[:name]
 
-    input
-    |> Axon.nx(&Nx.clip(&1, -cap, cap))
-    |> Axon.dense(units, use_bias: false, name: opts[:name])
+    Axon.layer(
+      &clipped_dense/7,
+      [
+        input,
+        Axon.param("kernel", fn shape -> {elem(shape, tuple_size(shape) - 1), units} end),
+        # Default to a wide range so an untrained layer passes signal through;
+        # loaded checkpoints replace these with their learned bounds.
+        Axon.param("input_min", {1},
+          initializer: fn shape, type, _key ->
+            Nx.broadcast(Nx.tensor(-1.0e4, type: type), shape)
+          end
+        ),
+        Axon.param("input_max", {1},
+          initializer: fn shape, type, _key ->
+            Nx.broadcast(Nx.tensor(1.0e4, type: type), shape)
+          end
+        ),
+        Axon.param("output_min", {1},
+          initializer: fn shape, type, _key ->
+            Nx.broadcast(Nx.tensor(-1.0e4, type: type), shape)
+          end
+        ),
+        Axon.param("output_max", {1},
+          initializer: fn shape, type, _key ->
+            Nx.broadcast(Nx.tensor(1.0e4, type: type), shape)
+          end
+        )
+      ],
+      name: name,
+      op_name: :gemma4_audio_clipped_dense
+    )
   end
 
   defp dense_maybe_clipped(input, units, _spec, opts) do
     Axon.dense(input, units, use_bias: false, name: opts[:name])
+  end
+
+  defnp clipped_dense(input, kernel, input_min, input_max, output_min, output_max, _opts \\ []) do
+    # bounds are stored as {1} tensors; clip wants scalars
+    input
+    |> Nx.clip(Nx.reshape(input_min, {}), Nx.reshape(input_max, {}))
+    |> Nx.dot([Nx.rank(input) - 1], [], kernel, [0], [])
+    |> Nx.clip(Nx.reshape(output_min, {}), Nx.reshape(output_max, {}))
   end
 
   defp rms_norm(input, epsilon, opts) do
