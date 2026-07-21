@@ -46,6 +46,54 @@ defmodule Gemma4MicTranscribe.Gemma4E4BAudioEncoderTest do
     assert Enum.at(mask, 1) == [1, 1, 1, 0]
   end
 
+  test "relative shift aligns each row to its own offset" do
+    # rows are distinct so the shift is visible: {1, 1, 3, 3}
+    scores =
+      Nx.tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]])
+
+    shifted = AudioEncoder.relative_shift(scores)
+
+    assert Nx.shape(shifted) == {1, 1, 3, 3}
+    # every query keeps three scores, drawn from progressively earlier offsets
+    assert shifted |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
+    refute Nx.all_close(scores, shifted) |> Nx.to_number() == 1
+  end
+
+  test "attention uses relative key and per dim scale parameters" do
+    spec = tiny_spec()
+
+    features = Axon.input("input_features", shape: {nil, nil, 8})
+    model = AudioEncoder.encode(features, spec)
+    {init_fun, _predict} = Axon.build(model)
+
+    inputs = %{"input_features" => Nx.broadcast(0.1, {1, 8, 8})}
+    params = init_fun.(inputs, Axon.ModelState.empty())
+
+    # the checkpoint carries relative_k_proj and per_dim_scale per audio block
+    assert Map.has_key?(params.data, "audio_encoder.blocks.0.attention.relative_key")
+
+    chunked = params.data["audio_encoder.blocks.0.attention.chunked"]
+    head_size = div(spec.audio_hidden_size, spec.audio_num_attention_heads)
+    assert Nx.shape(chunked["per_dim_scale"]) == {head_size}
+  end
+
+  test "clipped linears carry learned bounds" do
+    spec = tiny_spec()
+
+    features = Axon.input("input_features", shape: {nil, nil, 8})
+    model = AudioEncoder.encode(features, spec)
+    {init_fun, _predict} = Axon.build(model)
+
+    inputs = %{"input_features" => Nx.broadcast(0.1, {1, 8, 8})}
+    params = init_fun.(inputs, Axon.ModelState.empty())
+
+    layer = params.data["audio_encoder.blocks.0.ffn_start.intermediate"]
+
+    for bound <- ["input_min", "input_max", "output_min", "output_max"] do
+      assert Nx.shape(layer[bound]) == {1}
+    end
+  end
+
   test "encoder subsamples the time axis and projects into decoder width" do
     spec = tiny_spec()
 

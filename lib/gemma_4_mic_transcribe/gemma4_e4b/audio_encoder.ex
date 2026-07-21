@@ -127,9 +127,23 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       |> dense_maybe_clipped(spec.audio_hidden_size, spec, name: join(name, "value"))
       |> Layers.split_heads(spec.audio_num_attention_heads)
 
+    # The checkpoint carries relative_k_proj and per_dim_scale beside the
+    # usual projections, so attention adds a relative position bias and scales
+    # each query dimension rather than the whole head uniformly.
+    relative_key =
+      normed
+      |> dense_maybe_clipped(spec.audio_hidden_size, spec, name: join(name, "relative_key"))
+      |> Layers.split_heads(spec.audio_num_attention_heads)
+
     Axon.layer(
-      &chunked_attention/4,
-      [query, key, value],
+      &chunked_attention/6,
+      [
+        query,
+        key,
+        value,
+        relative_key,
+        Axon.param("per_dim_scale", {head_size})
+      ],
       name: join(name, "chunked"),
       op_name: :gemma4_audio_attention,
       chunk_size: spec.audio_attention_chunk_size,
@@ -241,6 +255,20 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
   defp join(prefix, suffix), do: "#{prefix}.#{suffix}"
 
   @doc """
+  Shifts a relative score matrix so entry `{i, j}` scores the key `j - i`
+  frames from the query, which is what a relative position term means.
+  """
+  defn relative_shift(scores) do
+    {batch, heads, queries, keys} = Nx.shape(scores)
+
+    scores
+    |> Nx.pad(0.0, [{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {1, 0, 0}])
+    |> Nx.reshape({batch, heads, keys + 1, queries})
+    |> Nx.slice_along_axis(1, keys, axis: 2)
+    |> Nx.reshape({batch, heads, queries, keys})
+  end
+
+  @doc """
   Mask for chunked local attention.
 
   A query attends to its own chunk, `context_left` frames before the chunk
@@ -263,7 +291,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     keys >= chunk_start - opts[:context_left] and keys <= chunk_end + opts[:context_right]
   end
 
-  defnp chunked_attention(query, key, value, opts \\ []) do
+  defnp chunked_attention(query, key, value, relative_key, per_dim_scale, opts \\ []) do
     opts =
       keyword!(opts, [
         :chunk_size,
@@ -277,14 +305,24 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
 
     # Nx.dot requires batch axes to be successive from 0, so move heads next to
     # batch: {batch, seq, heads, head_size} -> {batch, heads, seq, head_size}
+    # per_dim_scale weights each query dimension before the dot product, so
+    # softplus keeps the learned scale positive as the reference does.
+    scale = Nx.log(1.0 + Nx.exp(per_dim_scale)) / Nx.sqrt(opts[:head_size])
+    query = query * scale
+
     query = Nx.transpose(query, axes: [0, 2, 1, 3])
     key = Nx.transpose(key, axes: [0, 2, 1, 3])
     value = Nx.transpose(value, axes: [0, 2, 1, 3])
+    relative_key = Nx.transpose(relative_key, axes: [0, 2, 1, 3])
 
     length = Nx.axis_size(query, 2)
 
-    # {batch, heads, queries, keys}
-    weights = Nx.dot(query, [3], [0, 1], key, [3], [0, 1]) / Nx.sqrt(opts[:head_size])
+    # content term plus a relative position term, the latter shifted so that
+    # position j scores against the key that sits j - i frames away
+    content = Nx.dot(query, [3], [0, 1], key, [3], [0, 1])
+    relative = relative_shift(Nx.dot(query, [3], [0, 1], relative_key, [3], [0, 1]))
+
+    weights = content + relative
 
     # tanh soft cap keeps logits inside the trained range
     cap = opts[:logit_cap]
