@@ -84,6 +84,40 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
     refute Nx.all_close(quiet[[0, 3]], loud[[0, 3]]) |> Nx.to_number() == 1
   end
 
+  test "extra encoder frames are lookback: placeholders splice the last tokens" do
+    model_spec = tiny_model()
+    graph = Model.model(model_spec)
+    {init_fun, predict_fun} = Axon.build(graph)
+
+    # 8 mel frames subsample to 2 encoder tokens = 2 placeholders
+    base = %{
+      "input_ids" => Nx.tensor([[2, 7, 7, 3]], type: :s64),
+      "attention_mask" => Nx.tensor([[1, 1, 1, 1]], type: :s64),
+      "position_ids" => Nx.tensor([[0, 1, 2, 3]], type: :s64),
+      "input_features" => Nx.iota({1, 8, 8}, type: :f32) |> Nx.remainder(5) |> Nx.multiply(0.2)
+    }
+
+    params = init_fun.(base, Axon.ModelState.empty())
+    plain = predict_fun.(params, base).logits
+
+    # the same audio preceded by 8 lookback frames: 4 encoder tokens for the
+    # same 2 placeholders, so the model must keep the last 2
+    lookback = Nx.broadcast(0.35, {1, 8, 8})
+    features = Nx.concatenate([lookback, base["input_features"]], axis: 1)
+
+    with_lookback = predict_fun.(params, %{base | "input_features" => features}).logits
+
+    assert Nx.shape(with_lookback) == Nx.shape(plain)
+    assert with_lookback |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
+
+    # position 0 precedes the audio entirely: identical either way
+    assert Nx.all_close(plain[[0, 0]], with_lookback[[0, 0]]) |> Nx.to_number() == 1
+
+    # the audio positions moved: they now carry context-bearing encodings of
+    # the SAME final tokens, not the first two tokens of the longer input
+    refute Nx.all_close(plain[[0, 1]], with_lookback[[0, 1]]) |> Nx.to_number() == 1
+  end
+
   test "params mapping targets the published checkpoint names" do
     mapping = Bumblebee.HuggingFace.Transformers.Model.params_mapping(tiny_model())
 

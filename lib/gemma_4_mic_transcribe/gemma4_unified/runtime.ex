@@ -295,8 +295,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     # `offset` counts cache slots consumed; `content_length` counts real
     # positions. A padded flush consumes slots without advancing position, so
     # the two diverge and position ids must follow content_length.
-    # `mel_carry` (E4B only) is the unconsumed tail of the padded sample
-    # stream, so chunked mel extraction matches whole-utterance extraction.
+    # `mel_state` (E4B only) holds the unconsumed tail of the padded sample
+    # stream (`carry`), so chunked mel extraction matches whole-utterance
+    # extraction, and the last 200 extracted mel frames (`tail`), re-encoded
+    # as lookback so each chunk's encoder outputs match whole-utterance
+    # encoding exactly.
     defstruct [
       :runtime,
       :cache,
@@ -304,7 +307,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       :content_length,
       :audio_tokens,
       :pending_samples,
-      :mel_carry
+      :mel_state
     ]
   end
 
@@ -337,16 +340,19 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          content_length: length,
          audio_tokens: 0,
          pending_samples: [],
-         mel_carry: initial_mel_carry(runtime)
+         mel_state: initial_mel_state(runtime)
        }}
     end
   end
 
-  defp initial_mel_carry(%__MODULE__{e4b?: true} = runtime) do
-    Gemma4MicTranscribe.Gemma4E4B.MelFeatures.stream_carry(e4b_spec(runtime))
+  defp initial_mel_state(%__MODULE__{e4b?: true} = runtime) do
+    %{
+      carry: Gemma4MicTranscribe.Gemma4E4B.MelFeatures.stream_carry(e4b_spec(runtime)),
+      tail: nil
+    }
   end
 
-  defp initial_mel_carry(_runtime), do: nil
+  defp initial_mel_state(_runtime), do: nil
 
   @doc """
   Appends audio samples, prefilling whole chunks into the cache.
@@ -367,8 +373,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       ready
       |> Enum.chunk_every(samples_per_chunk)
       |> Enum.reduce(utterance, fn chunk, acc ->
-        {input_features, _mask, mel_carry} =
-          chunk_features(runtime, acc.mel_carry, chunk, chunk_tokens)
+        {input_features, _mask, mel_state} =
+          chunk_features(runtime, acc.mel_state, chunk, chunk_tokens)
 
         audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, chunk_tokens)
 
@@ -381,7 +387,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             offset: acc.offset + chunk_tokens,
             content_length: acc.content_length + chunk_tokens,
             audio_tokens: acc.audio_tokens + chunk_tokens,
-            mel_carry: mel_carry
+            mel_state: mel_state
         }
       end)
 
@@ -467,12 +473,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     # The flush is throwaway, so the mel carry threads through this reduce
     # locally and is never written back: pending stays pending, and the next
     # append re-consumes it from the utterance's own carry.
-    {offset, cache, _flushed, _mel_carry} =
-      total_tokens
-      |> decompose_tokens()
+    {offset, cache, _flushed, _mel_state} =
+      runtime
+      |> flush_sizes(total_tokens)
       |> Enum.reduce(
-        {utterance.content_length, utterance.cache, 0, utterance.mel_carry},
-        fn size, {offset, cache, flushed, mel_carry} ->
+        {utterance.content_length, utterance.cache, 0, utterance.mel_state},
+        fn size, {offset, cache, flushed, mel_state} ->
           chunk =
             Enum.slice(
               utterance.pending_samples,
@@ -480,18 +486,30 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
               size * samples_per_token
             )
 
-          {input_features, _mask, mel_carry} = chunk_features(runtime, mel_carry, chunk, size)
+          {input_features, _mask, mel_state} = chunk_features(runtime, mel_state, chunk, size)
 
           audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, size)
 
           {_logits, cache} = predict_chunk(runtime, audio_ids, input_features, offset, cache)
 
-          {offset + size, cache, flushed + size, mel_carry}
+          {offset + size, cache, flushed + size, mel_state}
         end
       )
 
     {offset, cache, total_tokens}
   end
+
+  # E4B flushes as a single chunk, padded up to the nearest warmed size with
+  # silence. Decomposing into several chunks would hand chunks after the
+  # first a lookback tail shorter than the encoder's receptive field, whose
+  # zero-padding lands inside the kept tokens' reach; a single chunk is
+  # either utterance-initial (no lookback needed) or carries a full genuine
+  # tail, so its encoding stays exact. The 12B decomposes as before.
+  defp flush_sizes(%__MODULE__{e4b?: true}, total_tokens) do
+    [@audio_chunk_sizes |> Enum.sort() |> Enum.find(total_tokens, &(&1 >= total_tokens))]
+  end
+
+  defp flush_sizes(_runtime, total_tokens), do: decompose_tokens(total_tokens)
 
   # Largest size first, so a 37 token remainder becomes 25 + 10 + 2 rather than
   # 37 single token prefills.
@@ -510,13 +528,25 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     @max_utterance_audio_tokens + runtime.max_response_tokens + @prompt_headroom_tokens
   end
 
+  # The encoder's total left receptive field: 11 frames of attention reach
+  # plus 4 of causal convolution per conformer block, times 12 blocks, plus
+  # the subsampling overhang - about 183 mel frames. Re-encoding this many
+  # frames of lookback before a chunk makes the chunk's encoder outputs
+  # exactly what whole-utterance encoding would produce; 200 frames (one
+  # whole chunk) covers it with margin and keeps shapes on chunk boundaries.
+  @mel_lookback_frames 200
+
   # Features for one appended chunk. Both front ends consume 640 samples per
   # audio token, but E4B wants those as log-mel frames rather than raw PCM,
-  # extracted continuously across chunks via the utterance's mel carry.
-  # Returns {input_features, mask, mel_carry}.
-  defp chunk_features(%__MODULE__{e4b?: true} = runtime, mel_carry, chunk, chunk_tokens) do
+  # extracted continuously across chunks via the mel state's sample carry and
+  # re-encoded with the previous chunk's frames as lookback. The model splices
+  # only the last placeholder-count encoder tokens, so the lookback frames'
+  # boundary-contaminated outputs are dropped.
+  # Returns {input_features, mask, mel_state}.
+  defp chunk_features(%__MODULE__{e4b?: true} = runtime, mel_state, chunk, chunk_tokens) do
     alias Gemma4MicTranscribe.Gemma4E4B.MelFeatures
 
+    %{carry: carry, tail: tail} = mel_state
     samples_per_token = AudioFeatureExtractor.samples_per_token()
 
     # a short final chunk pads out to whole tokens with silence, at most one
@@ -524,15 +554,29 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     chunk =
       chunk ++ List.duplicate(0.0, max(chunk_tokens * samples_per_token - length(chunk), 0))
 
-    {features, mel_carry} = MelFeatures.extract_stream(mel_carry, chunk, e4b_spec(runtime))
+    {features, carry} = MelFeatures.extract_stream(carry, chunk, e4b_spec(runtime))
+
+    # An utterance's first chunk has no left context by definition, so its
+    # encoding is already exact without lookback.
+    model_features =
+      case tail do
+        nil -> features
+        tail -> Nx.concatenate([front_pad_lookback(tail), features], axis: 0)
+      end
+
+    # the stream's most recent frames, for the next chunk's lookback
+    stream_frames = if tail, do: Nx.concatenate([tail, features], axis: 0), else: features
+    rows = Nx.axis_size(stream_frames, 0)
+    kept = min(rows, @mel_lookback_frames)
+    new_tail = Nx.slice_along_axis(stream_frames, rows - kept, kept, axis: 0)
 
     {input_features, mask} =
-      prepare_audio_tensors(runtime, features, Nx.broadcast(1, {max(chunk_tokens, 1)}))
+      prepare_audio_tensors(runtime, model_features, Nx.broadcast(1, {max(chunk_tokens, 1)}))
 
-    {input_features, mask, mel_carry}
+    {input_features, mask, %{carry: carry, tail: new_tail}}
   end
 
-  defp chunk_features(runtime, mel_carry, chunk, chunk_tokens) do
+  defp chunk_features(runtime, mel_state, chunk, chunk_tokens) do
     features =
       AudioFeatureExtractor.extract(chunk,
         audio_token_count: chunk_tokens,
@@ -542,7 +586,21 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {input_features, mask} =
       prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
 
-    {input_features, mask, mel_carry}
+    {input_features, mask, mel_state}
+  end
+
+  # The lookback must be a whole number of encoder tokens so the kept outputs
+  # stay token-aligned. A first-chunk tail is one frame short (199); the pad
+  # frame sits a full lookback left of every kept token, outside its
+  # receptive field.
+  defp front_pad_lookback(tail) do
+    missing = @mel_lookback_frames - Nx.axis_size(tail, 0)
+
+    if missing == 0 do
+      tail
+    else
+      Nx.pad(tail, 0.0, [{missing, 0, 0}, {0, 0, 0}])
+    end
   end
 
   defp e4b_spec(runtime) do

@@ -193,18 +193,26 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
     ])
   end
 
-  # Audio placeholder positions take encoder frames in order.
+  # Audio placeholder positions take the LAST n encoder frames, where n is
+  # the number of placeholders. When the encoder input carries mel lookback
+  # (incremental prefill re-encodes the previous chunk for exact context),
+  # the lookback frames' outputs are boundary-contaminated and must be
+  # dropped; when frames equal placeholders this reduces to taking them in
+  # order.
   defp replace_audio_embeddings(embeddings, audio_embeddings, audio_mask) do
     Axon.layer(
       fn embeddings, audio_embeddings, audio_mask, _opts ->
         hidden_size = Nx.axis_size(embeddings, 2)
         frames = Nx.axis_size(audio_embeddings, 1)
 
+        placeholders = audio_mask |> Nx.as_type({:s, 64}) |> Nx.sum()
+
         indices =
           audio_mask
           |> Nx.as_type({:s, 64})
           |> Nx.cumulative_sum(axis: 1)
           |> Nx.subtract(1)
+          |> Nx.add(Nx.subtract(frames, placeholders))
           |> Nx.max(0)
           |> Nx.min(frames - 1)
           |> Nx.new_axis(-1)
