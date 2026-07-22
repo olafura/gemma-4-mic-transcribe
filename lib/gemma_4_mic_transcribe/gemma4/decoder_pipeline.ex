@@ -10,9 +10,12 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
 
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks
+  alias Gemma4MicTranscribe.Gemma4Unified.ChannelState
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
+  alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
+  alias Gemma4MicTranscribe.Gemma4Unified.Transcript
 
   defmodule Prefix do
     @moduledoc "The embeddings, audio projection, and leading decoder blocks."
@@ -28,7 +31,17 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     defstruct @enforce_keys
   end
 
-  @enforce_keys [:prefix, :tail, :input_context, :parameter_count]
+  @enforce_keys [
+    :prefix,
+    :tail,
+    :input_context,
+    :generation,
+    :cached_prefix_model,
+    :cached_prefix_predict_fun,
+    :cached_tail_model,
+    :cached_tail_predict_fun,
+    :parameter_count
+  ]
   defstruct @enforce_keys
 
   @doc "Extracts a raw-input prefix and final decoder tail from a loaded runtime."
@@ -46,6 +59,13 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       backend = Map.get(runtime, :backend)
       prefix_model = Model.decoder_prefix_model(spec, prefix_end)
       {_init_fun, prefix_predict_fun} = Axon.build(prefix_model, build_opts(backend))
+      cached_prefix_model = Model.cached_decoder_prefix_model(spec, prefix_end)
+
+      {_init_fun, cached_prefix_predict_fun} =
+        Axon.build(cached_prefix_model, build_opts(backend))
+
+      cached_tail_model = Model.cached_decoder_tail_model(spec, tail_layers)
+      {_init_fun, cached_tail_predict_fun} = Axon.build(cached_tail_model, build_opts(backend))
 
       prefix = %Prefix{
         last_layer: prefix_end,
@@ -63,11 +83,26 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         model_info: %{spec: spec}
       }
 
+      generation = %{
+        spec: spec,
+        suppression_mask: Map.get(runtime, :suppression_mask),
+        inside_channel_suppression_mask: Map.get(runtime, :inside_channel_suppression_mask),
+        content_suppression_mask: Map.get(runtime, :content_suppression_mask),
+        channel_token_ids: Map.get(runtime, :channel_token_ids),
+        eos_token_ids: generation_eos_token_ids(runtime, spec),
+        no_repeat_ngram_size: Map.get(runtime, :no_repeat_ngram_size, 0)
+      }
+
       {:ok,
        %__MODULE__{
          prefix: prefix,
          tail: tail,
          input_context: input_context,
+         generation: generation,
+         cached_prefix_model: cached_prefix_model,
+         cached_prefix_predict_fun: cached_prefix_predict_fun,
+         cached_tail_model: cached_tail_model,
+         cached_tail_predict_fun: cached_tail_predict_fun,
          parameter_count: prefix.parameter_count + tail.parameter_count
        }}
     end
@@ -102,6 +137,52 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     |> then(&top_k(pipeline, &1, k))
   end
 
+  @doc "Greedily generates a transcript and token ids from a unified input."
+  def generate(%__MODULE__{} = pipeline, input, opts \\ []) do
+    with {:ok, prepared} <- Runtime.prepare_input(pipeline.input_context, input),
+         {:ok, token_ids} <- generate_prepared(pipeline, prepared, opts) do
+      {:ok,
+       %{
+         token_ids: token_ids,
+         text: Transcript.decode(pipeline.tail.tokenizer, token_ids)
+       }}
+    end
+  end
+
+  @doc "Builds a unified input from 16 kHz samples and greedily generates a transcript."
+  def generate_samples(%__MODULE__{} = pipeline, samples, opts \\ []) do
+    input_opts =
+      opts
+      |> Keyword.put_new(:prompt, Config.default_prompt())
+      |> Keyword.take([:prompt, :system_message, :audio_token_count, :max_tokens])
+
+    samples
+    |> Input.build(input_opts)
+    |> then(&generate(pipeline, &1, opts))
+  end
+
+  @doc "Runs cache-aware split generation from model-ready tensors."
+  def generate_prepared(%__MODULE__{} = pipeline, prepared, opts \\ []) do
+    max_new_tokens = Keyword.get(opts, :max_new_tokens, 32)
+    min_new_tokens = Keyword.get(opts, :min_new_tokens, 0)
+
+    cond do
+      not (is_integer(max_new_tokens) and max_new_tokens >= 0) ->
+        {:error, ":max_new_tokens must be a non-negative integer"}
+
+      not (is_integer(min_new_tokens) and min_new_tokens >= 0) ->
+        {:error, ":min_new_tokens must be a non-negative integer"}
+
+      max_new_tokens == 0 ->
+        {:ok, []}
+
+      true ->
+        generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens)
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
   @doc "Runs the split pipeline from already-prepared model tensors."
   def top_k_prepared(%__MODULE__{} = pipeline, prepared, k) when is_map(prepared) do
     with {:ok, hidden_state} <- run_prefix(pipeline.prefix, prepared) do
@@ -117,6 +198,152 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     {:ok, prefix.predict_fun.(prefix.params, prepared)}
   rescue
     exception -> {:error, Exception.message(exception)}
+  end
+
+  defp generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens) do
+    sequence_length = Nx.axis_size(prepared["input_ids"], 1)
+    max_cache_length = sequence_length + max_new_tokens
+    backend = pipeline.prefix.backend || Nx.BinaryBackend
+
+    cache =
+      Nx.with_default_backend(backend, fn ->
+        Model.init_cache(pipeline.generation.spec, 1, max_cache_length, %{})
+      end)
+
+    prefix_inputs = Map.put(prepared, "cache", cache)
+    prefix_outputs = pipeline.cached_prefix_predict_fun.(pipeline.prefix.params, prefix_inputs)
+
+    tail_outputs =
+      pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{
+        "hidden_state" => prefix_outputs.hidden_state,
+        "position_ids" => prepared["position_ids"],
+        "attention_mask" => prefix_outputs.attention_mask,
+        "cache" => prefix_outputs.cache
+      })
+
+    channel_state = ChannelState.content()
+    suppression_mask = suppression_mask(pipeline, channel_state)
+    token_id = TokenSelection.next_token_id_from_sequence(tail_outputs.logits, suppression_mask)
+
+    if stop_token?(pipeline, token_id) and min_new_tokens <= 1 do
+      {:ok, []}
+    else
+      content_length = prepared["attention_mask"] |> Nx.sum() |> Nx.to_number()
+
+      decode_cached(
+        pipeline,
+        tail_outputs.cache,
+        token_id,
+        content_length,
+        [token_id],
+        1,
+        max_new_tokens,
+        min_new_tokens,
+        channel_state
+      )
+    end
+  end
+
+  defp decode_cached(
+         _pipeline,
+         _cache,
+         _previous_token_id,
+         _prompt_length,
+         generated,
+         generated_count,
+         max_new_tokens,
+         _min_new_tokens,
+         _channel_state
+       )
+       when generated_count >= max_new_tokens,
+       do: {:ok, Enum.reverse(generated)}
+
+  defp decode_cached(
+         pipeline,
+         cache,
+         previous_token_id,
+         prompt_length,
+         generated,
+         generated_count,
+         max_new_tokens,
+         min_new_tokens,
+         channel_state
+       ) do
+    backend = pipeline.prefix.backend || Nx.BinaryBackend
+    position_id = prompt_length + generated_count - 1
+
+    prefix_inputs =
+      Nx.with_default_backend(backend, fn ->
+        %{
+          "input_ids" => Nx.tensor([[previous_token_id]], type: :s64),
+          "attention_mask" => Nx.tensor([[1]], type: :s64),
+          "position_ids" => Nx.tensor([[position_id]], type: :s64),
+          "input_features" => Nx.broadcast(0.0, {1, 1, pipeline.generation.spec.audio_embed_dim}),
+          "input_features_mask" => Nx.tensor([[0]], type: :s64),
+          "cache" => cache
+        }
+      end)
+
+    prefix_outputs = pipeline.cached_prefix_predict_fun.(pipeline.prefix.params, prefix_inputs)
+
+    tail_outputs =
+      pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{
+        "hidden_state" => prefix_outputs.hidden_state,
+        "position_ids" => prefix_inputs["position_ids"],
+        "attention_mask" => prefix_outputs.attention_mask,
+        "cache" => prefix_outputs.cache
+      })
+
+    suppression_mask = suppression_mask(pipeline, channel_state)
+
+    banned_ids =
+      Runtime.banned_ngram_token_ids(generated, pipeline.generation.no_repeat_ngram_size)
+
+    token_id =
+      TokenSelection.next_allowed_token_id_from_sequence(
+        tail_outputs.logits,
+        suppression_mask,
+        banned_ids
+      )
+
+    step = generated_count + 1
+
+    if stop_token?(pipeline, token_id) and step >= min_new_tokens do
+      {:ok, Enum.reverse(generated)}
+    else
+      decode_cached(
+        pipeline,
+        tail_outputs.cache,
+        token_id,
+        prompt_length,
+        [token_id | generated],
+        generated_count + 1,
+        max_new_tokens,
+        min_new_tokens,
+        ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids)
+      )
+    end
+  end
+
+  defp suppression_mask(pipeline, :before_content),
+    do: pipeline.generation.suppression_mask
+
+  defp suppression_mask(pipeline, :inside_channel),
+    do: pipeline.generation.inside_channel_suppression_mask
+
+  defp suppression_mask(pipeline, :content),
+    do: pipeline.generation.content_suppression_mask
+
+  defp stop_token?(pipeline, token_id) do
+    token_id == pipeline.generation.spec.pad_token_id or
+      token_id in pipeline.generation.eos_token_ids
+  end
+
+  defp generation_eos_token_ids(runtime, spec) do
+    case get_in(runtime, [Access.key(:generation_config), Access.key(:eos_token_id)]) do
+      nil -> List.wrap(spec.eos_token_id)
+      ids -> List.wrap(ids)
+    end
   end
 
   defp extract_prefix_params(%Axon.ModelState{data: data}, last_layer) do

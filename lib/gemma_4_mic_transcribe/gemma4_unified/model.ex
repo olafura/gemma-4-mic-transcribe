@@ -216,6 +216,59 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
           "expected a Gemma 4 prefix endpoint in 0..#{spec.num_blocks - 1}, got: #{inspect(last_layer)}"
   end
 
+  @doc false
+  def cached_decoder_prefix_model(%__MODULE__{} = spec, last_layer)
+      when is_integer(last_layer) and last_layer >= 0 and last_layer < spec.num_blocks do
+    inputs = inputs(spec)
+    hidden_state = input_hidden_state(inputs, spec)
+
+    {attention_mask, cache} =
+      Layers.Decoder.cached_attention_mask(inputs["attention_mask"], inputs["cache"])
+
+    offset = Layers.Decoder.get_cache_offset(cache)
+
+    outputs =
+      apply_cached_decoder_blocks(
+        hidden_state,
+        inputs["position_ids"],
+        attention_mask,
+        cache,
+        offset,
+        spec,
+        Enum.to_list(0..last_layer)
+      )
+
+    Axon.container(%{
+      hidden_state: outputs.hidden_state,
+      attention_mask: attention_mask,
+      cache: outputs.cache
+    })
+  end
+
+  @doc false
+  def cached_decoder_tail_model(%__MODULE__{} = spec, layer_indices) do
+    hidden_state = Axon.input("hidden_state", shape: {nil, nil, spec.hidden_size})
+    position_ids = Axon.input("position_ids", shape: {nil, nil})
+    attention_mask = Axon.input("attention_mask", shape: {nil, nil})
+    cache = Axon.input("cache", optional: true)
+    offset = Layers.Decoder.get_cache_offset(cache)
+
+    outputs =
+      apply_cached_decoder_blocks(
+        hidden_state,
+        position_ids,
+        attention_mask,
+        cache,
+        offset,
+        spec,
+        layer_indices
+      )
+
+    cache = Layers.Decoder.update_cache_offset(outputs.cache, outputs.hidden_state)
+    logits = output_logits(outputs.hidden_state, spec)
+    Axon.container(%{logits: logits, cache: cache})
+  end
+
   defp apply_decoder_blocks(hidden_state, position_ids, attention_mask, spec, layer_indices) do
     Enum.reduce(layer_indices, hidden_state, fn layer_index, hidden_state ->
       block_cache =
@@ -240,11 +293,58 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     end)
   end
 
-  @doc false
-  def decoder_tail_model(%__MODULE__{} = spec, layer_indices) do
+  defp apply_cached_decoder_blocks(
+         hidden_state,
+         position_ids,
+         attention_mask,
+         cache,
+         offset,
+         spec,
+         layer_indices
+       ) do
+    Enum.reduce(layer_indices, %{hidden_state: hidden_state, cache: cache}, fn layer_index,
+                                                                               state ->
+      block_cache = Layers.Decoder.get_block_cache(state.cache, layer_index)
+
+      {hidden_state, block_cache} =
+        decoder_block(
+          state.hidden_state,
+          position_ids,
+          attention_mask,
+          block_cache,
+          offset,
+          Enum.fetch!(layer_types(spec), layer_index),
+          spec,
+          name: "decoder.blocks.#{layer_index}"
+        )
+
+      %{
+        hidden_state: hidden_state,
+        cache: Layers.Decoder.put_block_cache(state.cache, layer_index, block_cache)
+      }
+    end)
+  end
+
+  defp input_hidden_state(inputs, spec) do
+    input_ids = inputs["input_ids"]
+    audio_mask = Axon.nx(input_ids, &Nx.equal(&1, spec.audio_token_id))
+
+    llm_input_ids =
+      Axon.nx(input_ids, fn input_ids ->
+        Nx.select(Nx.equal(input_ids, spec.audio_token_id), spec.pad_token_id, input_ids)
+      end)
+
+    llm_input_ids
+    |> embedder(spec, name: "embedder")
+    |> replace_audio_embeddings(
+      audio_embedder(inputs["input_features"], spec, name: "audio_embedder"),
+      audio_mask
+    )
+  end
+
+  defp output_logits(hidden_state, spec) do
     logits =
-      spec
-      |> decoder_block_chain_model(layer_indices)
+      hidden_state
       |> Axon.nx(
         fn hidden_state ->
           hidden_state
@@ -269,6 +369,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     else
       logits
     end
+  end
+
+  @doc false
+  def decoder_tail_model(%__MODULE__{} = spec, layer_indices) do
+    spec
+    |> decoder_block_chain_model(layer_indices)
+    |> output_logits(spec)
   end
 
   defp inputs(spec) do

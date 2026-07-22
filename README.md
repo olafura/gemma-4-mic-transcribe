@@ -245,13 +245,28 @@ and the vocabulary head:
     samples_16khz,
     5
   )
+
+{:ok, %{text: text, token_ids: token_ids}} =
+  Gemma4MicTranscribe.Gemma4.DecoderPipeline.generate_samples(
+    pipeline,
+    samples_16khz,
+    max_new_tokens: 32
+  )
 ```
 
-This currently performs one raw-audio prefill and returns next-token candidates;
-it does not implement an autoregressive KV-cache loop. On the real 12B bf16
-checkpoint the prefix retains 11.220 billion parameter references (22.44 GB)
-and the tail 1.697 billion (3.39 GB). The split is therefore a swappable model
-boundary, not compression: every intervening decoder layer remains necessary.
+`generate_samples/3` uses one global KV cache: the prefix updates layers 0–44,
+the tail updates layers 45–47, and the tail advances the shared cache offset once
+per token. It applies the same channel-aware token suppression, EOS handling, and
+no-repeat n-gram rule as the full runtime.
+
+On the real 12B bf16 checkpoint the prefix retains 11.220 billion parameter
+references (22.44 GB) and the tail 1.697 billion (3.39 GB). The split is therefore
+a swappable model boundary, not compression: every intervening decoder layer
+remains necessary. A forced two-token test on Torch CPU produced the same `"."`
+transcript as the full runtime, but took 259.7 seconds versus 3.8 seconds. The
+standalone split currently favors inspectability and replacement experiments;
+its separate compiled graphs repeatedly stream roughly 26 GB of weights and are
+not yet suitable as a low-latency inference path.
 
 ## Usage
 

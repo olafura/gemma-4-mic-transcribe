@@ -37,6 +37,33 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
     assert message =~ "start after layer 0"
   end
 
+  test "passes one global KV cache through split prefill and decode" do
+    {runtime, inputs} = runtime()
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+    cache = Model.init_cache(runtime.model_info.spec, 1, 6, %{})
+
+    prefill = runtime.predict_fun.(runtime.model_info.params, Map.put(inputs, "cache", cache))
+    first_id = prefill.logits[0][-1] |> Nx.argmax() |> Nx.to_number()
+
+    decode_inputs = %{
+      "input_ids" => Nx.tensor([[first_id]], type: :s64),
+      "attention_mask" => Nx.tensor([[1]], type: :s64),
+      "position_ids" => Nx.tensor([[4]], type: :s64),
+      "input_features" => Nx.broadcast(0.0, {1, 1, 4}),
+      "input_features_mask" => Nx.tensor([[0]], type: :s64),
+      "cache" => prefill.cache
+    }
+
+    second = runtime.predict_fun.(runtime.model_info.params, decode_inputs)
+    second_id = second.logits[0][-1] |> Nx.argmax() |> Nx.to_number()
+
+    assert {:ok, [^first_id, ^second_id]} =
+             DecoderPipeline.generate_prepared(pipeline, inputs,
+               max_new_tokens: 2,
+               min_new_tokens: 3
+             )
+  end
+
   defp runtime do
     spec =
       Bumblebee.configure(Model,
@@ -75,6 +102,12 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
        model_name: "tiny-gemma4",
        backend: nil,
        tokenizer: nil,
+       suppression_mask: Nx.broadcast(0, {32}) |> Nx.as_type(:u8),
+       inside_channel_suppression_mask: Nx.broadcast(0, {32}) |> Nx.as_type(:u8),
+       content_suppression_mask: Nx.broadcast(0, {32}) |> Nx.as_type(:u8),
+       channel_token_ids: %{start: 30, end: 31},
+       generation_config: %{eos_token_id: [1]},
+       no_repeat_ngram_size: 0,
        predict_fun: predict_fun,
        model_info: %{model: model, params: params, spec: spec}
      }, inputs}
