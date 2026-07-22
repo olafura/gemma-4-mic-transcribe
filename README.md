@@ -335,6 +335,43 @@ exactly through the split cache path:
 `"all cavalry today feelingly fresh the morning light"`. Cold split compilation
 plus generation took 17.23 seconds and the warm run took 7.27 seconds.
 
+For a long-running 12B service, extract the trained W4A16 checkpoint instead.
+The artifacts retain the checkpoint's `packed` int4 matrices and group scales,
+so XLA can use its q4 GEMM/GEMV kernels without loading or reconstructing the
+bf16 model:
+
+```bash
+./decoder_block extract-prefix \
+  --artifact artifacts/gemma4-12b-packed-prefix-0-44 \
+  --tail-start 45 \
+  --backend torchx:cpu \
+  --model-name gemma4-12b-qat-w4a16-ct
+
+./decoder_block extract-tail \
+  --artifact artifacts/gemma4-12b-packed-tail-45-47 \
+  --tail-start 45 \
+  --backend torchx:cpu \
+  --model-name gemma4-12b-qat-w4a16-ct
+
+./decoder_block run-split \
+  --prefix-artifact artifacts/gemma4-12b-packed-prefix-0-44 \
+  --artifact artifacts/gemma4-12b-packed-tail-45-47 \
+  --wav journal1.wav \
+  --seconds 5 \
+  --backend exla:rocm \
+  --max-new-tokens 32 \
+  --runs 3
+```
+
+On the reference AMD Radeon 8060S, the packed artifacts occupy 14.20 GB total
+instead of 25.83 GB for bf16. Warm split generation took 2.12–2.16 seconds and
+produced `"I woke up today feeling refreshed. The morning light"`, exactly
+matching the resident packed runtime. The resident baseline took 2.02–2.05
+seconds, leaving only about a 4.8% median separation overhead. A one-token run
+measured 1.18 seconds of prefill; the remaining nine tokens averaged roughly
+106 ms/token. Artifact and checkpoint load times are intentionally excluded
+because they occur before the long-running service accepts work.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text

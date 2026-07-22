@@ -232,6 +232,54 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
              )
   end
 
+  test "preserves packed weights and scales in separate prefix and tail artifacts" do
+    {runtime, _inputs} = runtime()
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+    packed = Nx.tensor([[0x01234567, 0x89ABCDEF]], type: :u32)
+    scales = Nx.tensor([[0.25, 0.5]], type: :bf16)
+
+    pipeline =
+      put_artifact_parameters(
+        pipeline,
+        :prefix,
+        "decoder.blocks.0.ffn.gate",
+        packed,
+        scales
+      )
+
+    pipeline =
+      put_artifact_parameters(
+        pipeline,
+        :tail,
+        "decoder.blocks.1.ffn.gate",
+        packed,
+        scales
+      )
+
+    root =
+      Path.join(System.tmp_dir!(), "gemma-packed-split-#{System.unique_integer([:positive])}")
+
+    prefix_path = Path.join(root, "prefix")
+    tail_path = Path.join(root, "tail")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    DecoderBlockArtifact.save_prefix!(pipeline, prefix_path)
+    DecoderBlockArtifact.save_tail!(pipeline.tail, tail_path, verification_sequence_length: 3)
+
+    prefix = DecoderBlockArtifact.load_prefix!(prefix_path, Nx.BinaryBackend)
+    tail = DecoderBlockArtifact.load_tail!(tail_path, Nx.BinaryBackend)
+
+    for {params, node} <- [
+          {prefix.prefix.params, "decoder.blocks.0.ffn.gate"},
+          {tail.params, "decoder.blocks.1.ffn.gate"}
+        ] do
+      assert Nx.type(params.data[node]["packed"]) == {:u, 32}
+      assert Nx.type(params.data[node]["scales"]) == {:bf, 16}
+      assert Nx.to_binary(params.data[node]["packed"]) == Nx.to_binary(packed)
+      assert Nx.to_binary(params.data[node]["scales"]) == Nx.to_binary(scales)
+    end
+  end
+
   test "compiles the composed generation graph with XLA" do
     assert {:ok, _started} = Application.ensure_all_started(:exla)
     {runtime, inputs} = runtime({EXLA.Backend, client: :host})
@@ -244,6 +292,19 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
              )
 
     assert length(token_ids) == 2
+  end
+
+  defp put_artifact_parameters(pipeline, component, node, packed, scales) do
+    part = Map.fetch!(pipeline, component)
+
+    params =
+      Map.update!(part.params.data, node, fn parameters ->
+        parameters
+        |> Map.put("packed", packed)
+        |> Map.put("scales", scales)
+      end)
+
+    Map.put(pipeline, component, %{part | params: %{part.params | data: params}})
   end
 
   defp runtime(backend \\ nil, opts \\ [])
