@@ -77,6 +77,51 @@ safetensors by unpacking packed int4 Linear weights during Bumblebee parameter
 conversion. GGUF repos still require a GGUF runtime such as llama.cpp/Ollama/LM
 Studio and fail before backend allocation in this CLI.
 
+## Inspecting Gemma 4 experts
+
+`Gemma4MicTranscribe.Gemma4.Experts.list/2` lists the shared and routed FFN
+experts described by a Gemma 4 MoE config without loading its weights. Each
+descriptor contains its checkpoint tensor names and the expert-axis slice that
+can later be used for extraction or replacement. Dense Gemma variants return an
+empty list.
+
+```elixir
+{:ok, config} = File.read!("config.json") |> Jason.decode()
+experts = Gemma4MicTranscribe.Gemma4.Experts.list(config)
+
+# Gemma 4 26B-A4B: one shared + 128 routed experts in each of 30 layers
+length(experts) #=> 3_870
+
+first_routed = Enum.find(experts, &(&1.kind == :routed))
+first_routed.id
+#=> "language_model.layer.0.expert.0"
+```
+
+This change only catalogs the experts. The current Axon runtime still rejects
+MoE inference until routing and the expert forward pass are implemented.
+
+Dense models expose their always-active feed-forward networks separately:
+
+```elixir
+ffns = Gemma4MicTranscribe.Gemma4.list_ffns(config)
+first_ffn = hd(ffns)
+
+first_ffn.operation
+#=> "down(activation(gate(x)) * up(x))"
+
+first_ffn.weights.gate
+#=> %{
+#=>   checkpoint_tensor: "model.language_model.layers.0.mlp.gate_proj.weight",
+#=>   checkpoint_shape: {15360, 3840},
+#=>   axon_parameter: "decoder.blocks.0.ffn.gate.kernel",
+#=>   axon_shape: {3840, 15360}
+#=> }
+```
+
+The descriptor treats the pre/post RMS norms and residual connection as the
+FFN's surrounding context. They are intentionally not included in the three
+weights needed to run the extracted FFN itself.
+
 ## Usage
 
 List known model variants and their required runtimes:
