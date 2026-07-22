@@ -87,6 +87,7 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
          {:ok, model} <- fetch_map(model_info, :model),
          {:ok, params} <- fetch_map(model_info, :params),
          {:ok, spec} <- fetch_map(model_info, :spec),
+         :ok <- validate_backend(Map.get(runtime, :backend)),
          :ok <- validate_model(model),
          :ok <- validate_inputs(inputs),
          {:ok, layers} <- validate_layers(Keyword.get(opts, :layers), spec),
@@ -115,6 +116,18 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
       :error -> {:error, "layer probe runtime is missing #{key}"}
     end
   end
+
+  defp validate_backend({EXLA.Backend, opts}) when is_list(opts) do
+    if Keyword.get(opts, :client) == :rocm do
+      {:error,
+       "layer probing is disabled on EXLA/ROCm because instrumented intermediate outputs " <>
+         "currently crash the XLA autotuner; reload the runtime with backend: \"torchx:cpu\""}
+    else
+      :ok
+    end
+  end
+
+  defp validate_backend(_backend), do: :ok
 
   defp validate_model(%Axon{}), do: :ok
   defp validate_model(other), do: {:error, "expected an Axon model, got: #{inspect(other)}"}
@@ -361,12 +374,21 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
 
   defp report(context, positions, captured, available, unavailable, opts) do
     host_captures = Map.new(captured, fn {key, tensor} -> {key, to_host(tensor)} end)
-    metrics = capture_metrics(context.layers, context.captures, positions, host_captures)
+    layer_scalars = layer_scalars(context.params, context.layers)
+
+    metrics =
+      capture_metrics(
+        context.layers,
+        context.captures,
+        positions,
+        host_captures,
+        layer_scalars
+      )
 
     report = %{
       model: context.model_name,
       positions: positions,
-      layers: layer_reports(context.spec, context.layers, metrics),
+      layers: layer_reports(context.spec, context.layers, metrics, layer_scalars),
       captures: context.captures,
       available: available,
       unavailable: unavailable,
@@ -381,9 +403,10 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
     end
   end
 
-  defp capture_metrics(layers, captures, positions, captured) do
+  defp capture_metrics(layers, captures, positions, captured, layer_scalars) do
     Map.new(layers, fn layer ->
       hidden_norms = component_norms(captured[capture_key(layer, :hidden_state)])
+      layer_scalar = layer_scalars[layer]
 
       components =
         Map.new(captures, fn component ->
@@ -396,6 +419,14 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
             |> Enum.map(fn {position, position_offset} ->
               norm = at(norms, position_offset)
               hidden_norm = at(hidden_norms, position_offset)
+              raw_ratio = safe_ratio(norm, hidden_norm)
+
+              effective_ratio =
+                if component == :hidden_state do
+                  raw_ratio
+                else
+                  safe_ratio(scale_norm(norm, layer_scalar), hidden_norm)
+                end
 
               %{
                 position: position.label,
@@ -403,7 +434,8 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
                 norm: norm,
                 rms: component_rms(tensor, position_offset),
                 max_abs: component_max_abs(tensor, position_offset),
-                hidden_norm_ratio: safe_ratio(norm, hidden_norm)
+                hidden_norm_ratio: effective_ratio,
+                pre_scalar_hidden_norm_ratio: raw_ratio
               }
             end)
 
@@ -414,13 +446,29 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
     end)
   end
 
-  defp layer_reports(spec, layers, metrics) do
+  defp layer_reports(spec, layers, metrics, layer_scalars) do
     Enum.map(layers, fn layer ->
       %{
         index: layer,
         attention: layer_type(spec, layer),
+        layer_scalar: layer_scalars[layer],
         metrics: metrics[layer]
       }
+    end)
+  end
+
+  defp layer_scalars(params, layers) do
+    Map.new(layers, fn layer ->
+      scalar =
+        get_in(params.data, ["decoder.blocks.#{layer}.layer_scalar", "layer_scalar"])
+
+      value =
+        case scalar do
+          %Nx.Tensor{} -> scalar |> Nx.squeeze() |> Nx.as_type(:f32) |> Nx.to_number()
+          nil -> 1.0
+        end
+
+      {layer, value}
     end)
   end
 
@@ -563,6 +611,7 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
 
   defp component_norms(tensor) do
     tensor
+    |> Nx.as_type(:f32)
     |> Nx.pow(2)
     |> Nx.sum(axes: [-1])
     |> Nx.sqrt()
@@ -574,6 +623,7 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
   defp component_rms(tensor, offset) do
     tensor
     |> vector_at(offset)
+    |> Nx.as_type(:f32)
     |> Nx.pow(2)
     |> Nx.mean()
     |> Nx.sqrt()
@@ -583,15 +633,20 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
   defp component_max_abs(nil, _offset), do: nil
 
   defp component_max_abs(tensor, offset) do
-    tensor |> vector_at(offset) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+    tensor
+    |> vector_at(offset)
+    |> Nx.as_type(:f32)
+    |> Nx.abs()
+    |> Nx.reduce_max()
+    |> Nx.to_number()
   end
 
   defp cosine_at(nil, _right, _offset), do: nil
   defp cosine_at(_left, nil, _offset), do: nil
 
   defp cosine_at(left, right, offset) do
-    left = vector_at(left, offset)
-    right = vector_at(right, offset)
+    left = left |> vector_at(offset) |> Nx.as_type(:f32)
+    right = right |> vector_at(offset) |> Nx.as_type(:f32)
     denominator = Nx.to_number(Nx.multiply(Nx.LinAlg.norm(left), Nx.LinAlg.norm(right)))
 
     if denominator == 0 do
@@ -607,6 +662,9 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
   defp safe_ratio(_numerator, nil), do: nil
   defp safe_ratio(_numerator, 0), do: nil
   defp safe_ratio(numerator, denominator), do: numerator / denominator
+
+  defp scale_norm(nil, _scalar), do: nil
+  defp scale_norm(norm, scalar), do: norm * abs(scalar)
 
   defp at(nil, _offset), do: nil
   defp at(values, offset), do: Enum.at(values, offset)

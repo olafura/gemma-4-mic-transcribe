@@ -142,13 +142,19 @@ of the compiled graph:
 stream, not raw attention probabilities. `:per_layer_input` captures E4B's
 actual gated and projected per-layer embedding contribution; it is reported as
 unavailable on 12B. For each position the report includes norm, RMS, maximum
-absolute value, contribution-to-hidden-state norm ratio, adjacent captured-layer
-cosine similarity, and optional logit-lens candidates.
+absolute value, post-`layer_scalar` contribution-to-hidden-state norm ratio,
+adjacent captured-layer cosine similarity, and optional logit-lens candidates.
+The raw pre-scalar ratio is retained as `pre_scalar_hidden_norm_ratio`.
 
 Use `include_activations: true` to retain the selected hidden vectors. The first
 call for a new combination of input shape and probe outputs compiles an
 instrumented graph, and `top_k_logits` adds a vocabulary projection for every
 captured layer, so start with a small layer set.
+
+On the current gfx1151 ROCm stack, exposing intermediate graph outputs crashes
+the XLA autotuner. Layer probing therefore fails fast on `exla:rocm`; load a
+separate runtime with `backend: "torchx:cpu"` for probes. Ordinary EXLA/ROCm
+generation is unaffected.
 
 ## Usage
 

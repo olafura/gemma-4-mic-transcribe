@@ -27,9 +27,14 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbeTest do
     assert report.layers |> Enum.map(& &1.attention) == [:sliding_attention, :full_attention]
 
     first_layer = hd(report.layers)
+    assert first_layer.layer_scalar == 1.0
     assert length(first_layer.metrics.attention) == 4
     assert Enum.all?(first_layer.metrics.ffn, &is_float(&1.norm))
     assert Enum.all?(first_layer.metrics.ffn, &is_float(&1.hidden_norm_ratio))
+
+    assert Enum.all?(first_layer.metrics.ffn, fn metric ->
+             metric.hidden_norm_ratio == metric.pre_scalar_hidden_norm_ratio
+           end)
 
     assert Nx.shape(report.activations["0:hidden_state"]) == {1, 4, 8}
     assert length(report.hidden_state_similarity) == 1
@@ -108,6 +113,15 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbeTest do
 
     assert {:error, message} = LayerProbe.run(runtime, inputs, positions: ["missing"])
     assert message =~ "without a tokenizer"
+  end
+
+  test "rejects EXLA/ROCm before compiling an instrumented graph" do
+    {runtime, inputs} = unified_runtime()
+    runtime = %{runtime | backend: {EXLA.Backend, client: :rocm}}
+
+    assert {:error, message} = LayerProbe.run(runtime, inputs)
+    assert message =~ "XLA autotuner"
+    assert message =~ ~s(backend: "torchx:cpu")
   end
 
   defp unified_runtime do
