@@ -14,6 +14,10 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmarkTest do
                "45",
                "--transplant",
                "44:45,41:47",
+               "--blend",
+               "44:45:0.05",
+               "--blend",
+               "44:45:0.1",
                "--runs",
                "3"
              ])
@@ -21,6 +25,12 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmarkTest do
     assert opts.backend == "exla:rocm"
     assert opts.tail_start == 45
     assert opts.transplants == [%{source: 44, target: 45}, %{source: 41, target: 47}]
+
+    assert opts.blends == [
+             %{source: 44, target: 45, weight: 0.05},
+             %{source: 44, target: 45, weight: 0.1}
+           ]
+
     assert opts.runs == 3
     assert opts.max_new_tokens == 32
     assert opts.min_new_tokens == 0
@@ -62,12 +72,15 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmarkTest do
                "--wav",
                "journal1.wav",
                "--transplant",
-               "44:45"
+               "44:45",
+               "--blend",
+               "43:44:0.1"
              ])
 
     assert opts.artifact == path
     assert opts.backend == "torchx:cpu"
     assert opts.transplants == [%{source: 44, target: 45}]
+    assert opts.blends == [%{source: 43, target: 44, weight: 0.1}]
   end
 
   test "requires an existing artifact for separate execution" do

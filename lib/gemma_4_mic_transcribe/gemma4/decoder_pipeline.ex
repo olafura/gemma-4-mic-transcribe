@@ -180,6 +180,67 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     end
   end
 
+  @doc """
+  Blends a compatible source layer into a target layer without changing the graph.
+
+  `source_weight` is the fraction contributed by the source tensors. A weight of
+  `0.0` preserves the target and `1.0` is equivalent to a full transplant.
+  """
+  def blend_layer(%__MODULE__{} = pipeline, source_layer, target_layer, source_weight)
+      when is_number(source_weight) and source_weight >= 0.0 and source_weight <= 1.0 do
+    spec = pipeline.generation.spec
+
+    with :ok <- validate_layer_index(source_layer, spec.num_blocks, "source"),
+         :ok <- validate_layer_index(target_layer, spec.num_blocks, "target"),
+         :ok <- validate_layer_types(spec, source_layer, target_layer),
+         {:ok, source_params} <-
+           layer_replacements(pipeline.generation_params.data, source_layer, target_layer) do
+      replacements =
+        blend_replacements(
+          source_params,
+          pipeline.generation_params.data,
+          source_weight
+        )
+
+      generation_params = replace_params(pipeline.generation_params, replacements)
+
+      prefix =
+        if target_layer <= pipeline.prefix.last_layer do
+          %{pipeline.prefix | params: replace_params(pipeline.prefix.params, replacements)}
+        else
+          pipeline.prefix
+        end
+
+      tail =
+        if target_layer in pipeline.tail.layer_indices do
+          %{pipeline.tail | params: replace_params(pipeline.tail.params, replacements)}
+        else
+          pipeline.tail
+        end
+
+      {:ok,
+       %{
+         pipeline
+         | prefix: prefix,
+           tail: tail,
+           generation_params: generation_params
+       }}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  def blend_layer(%__MODULE__{}, _source_layer, _target_layer, source_weight),
+    do: {:error, "source weight must be between 0.0 and 1.0, got: #{inspect(source_weight)}"}
+
+  @doc "Like `blend_layer/4`, but raises when the layers or weight are invalid."
+  def blend_layer!(%__MODULE__{} = pipeline, source_layer, target_layer, source_weight) do
+    case blend_layer(pipeline, source_layer, target_layer, source_weight) do
+      {:ok, pipeline} -> pipeline
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
   @doc "Prepares a unified input, runs the split pipeline, and returns next-token candidates."
   def top_k(%__MODULE__{} = pipeline, input, k) do
     with {:ok, prepared} <- Runtime.prepare_input(pipeline.input_context, input) do
@@ -489,6 +550,47 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       {name, _params} ->
         {:error,
          "layers #{source_layer} and #{target_layer} have incompatible parameters at #{name}"}
+    end
+  end
+
+  defp blend_replacements(source, target_data, source_weight) do
+    target_weight = 1.0 - source_weight
+
+    Map.new(source, fn {node_name, source_params} ->
+      target_params = Map.fetch!(target_data, node_name)
+
+      blended =
+        Map.new(source_params, fn {param_name, source_tensor} ->
+          target_tensor = Map.fetch!(target_params, param_name)
+          source_tensor = transfer_to_tensor_backend(source_tensor, target_tensor)
+          target_weight_tensor = scalar_like(target_weight, target_tensor)
+          source_weight_tensor = scalar_like(source_weight, target_tensor)
+
+          {param_name,
+           Nx.add(
+             Nx.multiply(target_tensor, target_weight_tensor),
+             Nx.multiply(source_tensor, source_weight_tensor)
+           )}
+        end)
+
+      {node_name, blended}
+    end)
+  end
+
+  defp scalar_like(value, tensor) do
+    value
+    |> Nx.tensor(type: Nx.type(tensor))
+    |> transfer_to_tensor_backend(tensor)
+  end
+
+  defp transfer_to_tensor_backend(source, target) do
+    source_backend = source.data.__struct__
+    target_backend = target.data.__struct__
+
+    if source_backend == target_backend do
+      source
+    else
+      Nx.backend_copy(source, target_backend)
     end
   end
 

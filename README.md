@@ -307,6 +307,20 @@ changes the fluent baseline into a repeating `"e/e/e/..."` sequence. This does
 not by itself identify an audio-specific layer, but it shows that adjacent
 shape-compatible late layers are not functionally interchangeable.
 
+Fractional blends provide a less destructive insertion point and can be swept
+in one loaded process:
+
+```bash
+./decoder_pipeline_bench --backend exla:rocm --wav journal1.wav --runs 1 \
+  --blend 44:45:0.05 --blend 44:45:0.1 --blend 44:45:0.25
+```
+
+On the same reference, 1%, 2.5%, 5%, and 10% donor weight retained the exact
+baseline text and token ids. At 25%, only the second word degraded, producing
+`"all'arbori today feelingly fresh the morning light"`. Blending copies donor
+tensors across backends without consuming them, so every candidate starts from
+the same unmodified pipeline.
+
 Extraction and execution can also happen in separate processes. The extractor
 loads the source checkpoint once and writes a self-contained directory with the
 recomposed safetensors, model/generation manifest, and tokenizer files:
@@ -318,6 +332,9 @@ recomposed safetensors, model/generation manifest, and tokenizer files:
   --tail-start 45 \
   --transplant 44:45
 ```
+
+Use `--blend 44:45:0.1` instead of `--transplant 44:45` to persist the exact-
+output 10% blend.
 
 The runner loads only that directory and compiles it for GPU XLA; it does not
 load the Hugging Face model checkpoint or donor runtime:

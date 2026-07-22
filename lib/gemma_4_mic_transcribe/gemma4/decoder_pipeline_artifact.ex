@@ -56,7 +56,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineArtifact do
           inside_channel_suppression_mask: "g1",
           content_suppression_mask: "g2"
         },
-        transplants: Keyword.get(opts, :transplants, [])
+        transplants: Keyword.get(opts, :transplants, []),
+        blends: Keyword.get(opts, :blends, [])
       }
 
       File.write!(Path.join(temporary, @manifest), :erlang.term_to_binary(manifest))

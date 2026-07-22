@@ -17,6 +17,7 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
     max_new_tokens: :integer,
     min_new_tokens: :integer,
     transplant: :string,
+    blend: :keep,
     runs: :integer,
     sample_rate: :integer,
     seconds: :float,
@@ -98,6 +99,7 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
       {:help, usage()}
     else
       with {:ok, transplants} <- parse_transplants(Keyword.get(opts, :transplant)),
+           {:ok, blends} <- parse_blends(Keyword.get_values(opts, :blend)),
            values = %{
              wav: Keyword.get(opts, :wav, "journal1.wav"),
              backend: Keyword.get(opts, :backend, defaults[:backend] || "exla:rocm"),
@@ -107,6 +109,7 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
              max_new_tokens: Keyword.get(opts, :max_new_tokens, 32),
              min_new_tokens: Keyword.get(opts, :min_new_tokens, 0),
              transplants: transplants,
+             blends: blends,
              runs: Keyword.get(opts, :runs, 2),
              sample_rate: Keyword.get(opts, :sample_rate, 16_000),
              seconds: Keyword.get(opts, :seconds, 5.0),
@@ -151,20 +154,6 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
 
     pipeline = DecoderPipeline.extract!(runtime, opts.tail_start..last_layer)
 
-    variants =
-      case opts.transplants do
-        [] ->
-          [{"baseline", pipeline}]
-
-        transplants ->
-          frankenstein =
-            Enum.reduce(transplants, pipeline, fn %{source: source, target: target}, pipeline ->
-              DecoderPipeline.transplant_layer!(pipeline, source, target)
-            end)
-
-          [{"baseline", pipeline}, {"frankenstein", frankenstein}]
-      end
-
     IO.puts(
       Jason.encode!(%{
         event: "ready",
@@ -172,13 +161,26 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
         model: opts.model_name,
         tail_layers: [opts.tail_start, last_layer],
         transplants: opts.transplants,
+        blends: opts.blends,
         samples: length(samples),
         runs: opts.runs
       })
     )
 
-    Enum.each(variants, fn {variant, variant_pipeline} ->
-      run_variant(variant_pipeline, variant, input, opts)
+    run_variant(pipeline, "baseline", input, opts)
+
+    if opts.transplants != [] do
+      frankenstein =
+        Enum.reduce(opts.transplants, pipeline, fn %{source: source, target: target}, pipeline ->
+          DecoderPipeline.transplant_layer!(pipeline, source, target)
+        end)
+
+      run_variant(frankenstein, "frankenstein", input, opts)
+    end
+
+    Enum.each(opts.blends, fn %{source: source, target: target, weight: weight} ->
+      blended = DecoderPipeline.blend_layer!(pipeline, source, target, weight)
+      run_variant(blended, "blend:#{source}:#{target}:#{weight}", input, opts)
     end)
   end
 
@@ -202,13 +204,20 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
         DecoderPipeline.transplant_layer!(pipeline, source, target)
       end)
 
+    pipeline =
+      Enum.reduce(opts.blends, pipeline, fn
+        %{source: source, target: target, weight: weight}, pipeline ->
+          DecoderPipeline.blend_layer!(pipeline, source, target, weight)
+      end)
+
     artifact =
       timed!("artifact_save", fn ->
         {:ok,
          DecoderPipelineArtifact.save!(pipeline, opts.artifact,
            model_name: runtime.repo_id,
            tokenizer_repository: runtime.repo_id,
-           transplants: opts.transplants
+           transplants: opts.transplants,
+           blends: opts.blends
          )}
       end)
 
@@ -218,7 +227,8 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
         path: artifact,
         model: runtime.repo_id,
         tail_layers: [opts.tail_start, last_layer],
-        transplants: opts.transplants
+        transplants: opts.transplants,
+        blends: opts.blends
       })
     )
   end
@@ -247,7 +257,8 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
         backend: opts.backend,
         samples: length(samples),
         runs: opts.runs,
-        transplants: artifact.manifest.transplants
+        transplants: artifact.manifest.transplants,
+        blends: Map.get(artifact.manifest, :blends, [])
       })
     )
 
@@ -312,6 +323,35 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
     end
   end
 
+  defp parse_blends(values) do
+    Enum.reduce_while(values, {:ok, []}, fn blend, {:ok, acc} ->
+      case String.split(blend, ":", parts: 3) do
+        [source, target, weight] ->
+          with {source, ""} <- Integer.parse(source),
+               {target, ""} <- Integer.parse(target),
+               {weight, ""} <- Float.parse(weight),
+               true <- source >= 0 and target >= 0 and source != target,
+               true <- weight >= 0.0 and weight <= 1.0 do
+            {:cont, {:ok, [%{source: source, target: target, weight: weight} | acc]}}
+          else
+            _ ->
+              {:halt,
+               {:error,
+                "invalid --blend #{inspect(blend)}; expected SOURCE:TARGET:WEIGHT with WEIGHT in 0.0..1.0"}}
+          end
+
+        _other ->
+          {:halt,
+           {:error,
+            "invalid --blend #{inspect(blend)}; expected SOURCE:TARGET:WEIGHT with WEIGHT in 0.0..1.0"}}
+      end
+    end)
+    |> case do
+      {:ok, blends} -> {:ok, Enum.reverse(blends)}
+      error -> error
+    end
+  end
+
   defp timed!(event, fun) do
     {elapsed_us, result} = :timer.tc(fun)
     IO.puts(Jason.encode!(%{event: event, elapsed_ms: div(elapsed_us, 1_000)}))
@@ -350,6 +390,8 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
       --min-new-tokens COUNT     force generation through this step, default 0
       --transplant SOURCE:TARGET copy a compatible source layer into a target slot;
                                  comma-separate multiple transplants
+      --blend SOURCE:TARGET:WEIGHT
+                                 blend one candidate layer; may be repeated
       --runs COUNT               first run is cold, later runs are warm; default 2
       --sample-rate HZ           default 16000
       --seconds SECONDS          leading audio duration, default 5.0
@@ -368,6 +410,8 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
       --model-name MODEL         source model, default google/gemma-4-12B-it
       --tail-start LAYER         first independently extracted tail layer
       --transplant SOURCE:TARGET optional compatible layer transplant
+      --blend SOURCE:TARGET:WEIGHT
+                                 optional compatible fractional layer blend
       --backend BACKEND          extraction backend, default torchx:cpu
     """
   end

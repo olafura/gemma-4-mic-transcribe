@@ -122,6 +122,46 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
     assert message =~ "cannot transplant sliding_attention layer 0"
   end
 
+  test "blends compatible layer weights into a compiled pipeline" do
+    {runtime, _inputs} = runtime(nil, num_blocks: 3)
+    pipeline = DecoderPipeline.extract!(runtime, [1, 2])
+    source_name = "decoder.blocks.0.ffn.gate"
+    target_name = "decoder.blocks.1.ffn.gate"
+    source = pipeline.generation_params.data[source_name]["kernel"]
+    target = pipeline.generation_params.data[target_name]["kernel"]
+
+    binary_source_params =
+      Map.new(pipeline.generation_params.data[source_name], fn {name, tensor} ->
+        {name, Nx.backend_copy(tensor, Nx.BinaryBackend)}
+      end)
+
+    generation_params = %{
+      pipeline.generation_params
+      | data: Map.put(pipeline.generation_params.data, source_name, binary_source_params)
+    }
+
+    pipeline = %{pipeline | generation_params: generation_params}
+
+    blended = DecoderPipeline.blend_layer!(pipeline, 0, 1, 0.25)
+    actual = blended.generation_params.data[target_name]["kernel"]
+    expected = Nx.add(Nx.multiply(target, 0.75), Nx.multiply(source, 0.25))
+
+    assert Nx.all_close(actual, expected)
+
+    assert Nx.to_binary(pipeline.generation_params.data[target_name]["kernel"]) ==
+             Nx.to_binary(target)
+
+    assert blended.generation_predict_fun == pipeline.generation_predict_fun
+  end
+
+  test "rejects an invalid layer blend weight" do
+    {runtime, _inputs} = runtime(nil, num_blocks: 3)
+    pipeline = DecoderPipeline.extract!(runtime, [1, 2])
+
+    assert {:error, message} = DecoderPipeline.blend_layer(pipeline, 0, 1, 1.1)
+    assert message =~ "source weight must be between"
+  end
+
   test "saves and reloads a transplanted pipeline independently" do
     {runtime, inputs} = runtime(nil, num_blocks: 3)
 
@@ -137,7 +177,11 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
       )
 
     on_exit(fn -> File.rm_rf(path) end)
-    DecoderPipelineArtifact.save!(pipeline, path, transplants: [%{source: 0, target: 1}])
+
+    DecoderPipelineArtifact.save!(pipeline, path,
+      transplants: [%{source: 0, target: 1}],
+      blends: [%{source: 0, target: 1, weight: 0.1}]
+    )
 
     backend = {Torchx.Backend, device: :cpu}
     artifact = DecoderPipelineArtifact.load!(path, backend, load_tokenizer: false)
@@ -150,6 +194,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
              Nx.to_binary(reloaded.generation_params.data[source_name]["kernel"])
 
     assert artifact.manifest.transplants == [%{source: 0, target: 1}]
+    assert artifact.manifest.blends == [%{source: 0, target: 1, weight: 0.1}]
 
     assert {:ok, token_ids} =
              DecoderPipeline.generate_prepared(reloaded, inputs,
