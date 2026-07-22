@@ -87,6 +87,49 @@ defmodule Gemma4MicTranscribe.Gemma4E4BMelFeaturesTest do
     assert MelFeatures.audio_token_count(100, s, sample_rate: @sample_rate) == 1
   end
 
+  test "streamed extraction matches whole-utterance extraction exactly" do
+    s = %Spec{audio_mel_bins: 32}
+    samples = tone(440, 3.0) |> Enum.zip_with(tone(1330, 3.0), &(&1 + 0.3 * &2))
+
+    whole = MelFeatures.extract(samples, s, sample_rate: @sample_rate)
+
+    chunk_samples = 16_000
+
+    {chunks, carry} =
+      samples
+      |> Enum.chunk_every(chunk_samples)
+      |> Enum.map_reduce(MelFeatures.stream_carry(s, sample_rate: @sample_rate), fn chunk,
+                                                                                    carry ->
+        MelFeatures.extract_stream(carry, chunk, s, sample_rate: @sample_rate)
+      end)
+
+    streamed = Nx.concatenate(chunks, axis: 0)
+
+    assert Nx.shape(streamed) == Nx.shape(whole)
+    # identical windows over identical samples: bitwise equality, not closeness
+    assert Nx.equal(streamed, whole) |> Nx.all() |> Nx.to_number() == 1
+
+    # the carry stabilises at one frame less a hop of look-back
+    assert length(carry) == 320
+  end
+
+  test "first stream chunk frames like an utterance start, later ones continuously" do
+    s = %Spec{audio_mel_bins: 32}
+    carry = MelFeatures.stream_carry(s, sample_rate: @sample_rate)
+
+    # 50 tokens of samples: 199 frames first (semicausal pad consumes one),
+    # then a steady 200 per chunk
+    chunk = List.duplicate(0.1, 32_000)
+
+    {first, carry} = MelFeatures.extract_stream(carry, chunk, s, sample_rate: @sample_rate)
+    {second, carry} = MelFeatures.extract_stream(carry, chunk, s, sample_rate: @sample_rate)
+    {third, _carry} = MelFeatures.extract_stream(carry, chunk, s, sample_rate: @sample_rate)
+
+    assert Nx.axis_size(first, 0) == 199
+    assert Nx.axis_size(second, 0) == 200
+    assert Nx.axis_size(third, 0) == 200
+  end
+
   test "filterbank rows are non-negative and cover the spectrum" do
     bank = MelFeatures.mel_filterbank(16, 512, @sample_rate)
 

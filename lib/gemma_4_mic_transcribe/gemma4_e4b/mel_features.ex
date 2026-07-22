@@ -19,66 +19,81 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.MelFeatures do
   Hann window, magnitude (not power) spectrum, and `log(mel + mel_floor)`.
   """
   def extract(samples, %Spec{} = spec, opts \\ []) do
-    # Pin the eager tensor work to libtorch. The launcher does not load Mix
-    # config, so on the EXLA path the ambient default backend is
-    # Nx.BinaryBackend, whose pure-Elixir fft and dot turn this call from
-    # milliseconds into seconds.
-    Nx.with_default_backend(Torchx.Backend, fn -> do_extract(samples, spec, opts) end)
+    do_extract(samples, spec, opts)
   end
 
   defp do_extract(samples, %Spec{} = spec, opts) do
     sample_rate = Keyword.get(opts, :sample_rate, 16_000)
-
     frame_length = round(sample_rate * spec.audio_frame_length_ms / 1000)
-    frame_step = round(sample_rate * spec.audio_frame_step_ms / 1000)
-    fft_length = spec.audio_fft_length
-    pad_left = div(frame_length, 2)
 
     # Semicausal padding centres frame 0 at t=0. The right pad only tops up
     # degenerate short input; the unfold below never reads past a whole frame.
     samples = Enum.to_list(samples)
-    total = pad_left + length(samples)
+    total = div(frame_length, 2) + length(samples)
     right = max(frame_length + 1 - total, 0)
 
-    samples =
-      List.duplicate(0.0, pad_left) ++ samples ++ List.duplicate(0.0, right)
+    stream = stream_carry(spec, opts) ++ samples ++ List.duplicate(0.0, right)
 
-    t0 = System.monotonic_time(:millisecond)
-    samples = Nx.tensor(samples, type: :f32)
-    t1 = System.monotonic_time(:millisecond)
+    features_from_stream(stream, spec, opts)
+  end
 
-    frames = frame_signal(samples, frame_length, frame_step)
-    t2 = System.monotonic_time(:millisecond)
+  @doc """
+  The initial carry for streamed extraction: the semicausal padding that
+  precedes an utterance's first sample.
+  """
+  def stream_carry(%Spec{} = spec, opts \\ []) do
+    sample_rate = Keyword.get(opts, :sample_rate, 16_000)
+    frame_length = round(sample_rate * spec.audio_frame_length_ms / 1000)
+    List.duplicate(0.0, div(frame_length, 2))
+  end
 
-    filterbank =
-      cached_filterbank(spec.audio_mel_bins, fft_length, sample_rate, spec.audio_max_frequency)
-      # cached storage is backend-neutral binary; the dot needs it local
-      |> Nx.backend_copy(Nx.default_backend())
+  @doc """
+  Extracts mel frames from a chunk of an ongoing stream.
 
-    window = hann_window(frame_length)
-    t3 = System.monotonic_time(:millisecond)
+  `carry` is the unconsumed suffix of the padded stream - initially
+  `stream_carry/2`, thereafter whatever the previous call returned - so
+  chunked extraction produces exactly the frames whole-utterance extraction
+  would, rather than re-padding every chunk as if the utterance restarted.
 
-    spectrum = magnitude_spectrum(frames, window, fft_length: fft_length)
-    t4 = System.monotonic_time(:millisecond)
+  Returns `{features, carry}`. The combined carry and chunk must cover at
+  least one analysis window.
+  """
+  def extract_stream(carry, samples, %Spec{} = spec, opts \\ []) do
+    sample_rate = Keyword.get(opts, :sample_rate, 16_000)
+    frame_length = round(sample_rate * spec.audio_frame_length_ms / 1000)
+    frame_step = round(sample_rate * spec.audio_frame_step_ms / 1000)
 
-    result =
-      spectrum
+    tail = carry ++ Enum.to_list(samples)
+
+    count = div(length(tail) - (frame_length + 1), frame_step) + 1
+
+    {features_from_stream(tail, spec, opts), Enum.drop(tail, count * frame_step)}
+  end
+
+  # Mel frames over an already-padded sample stream. Pinned to libtorch: the
+  # launcher does not load Mix config, so on the EXLA path the ambient
+  # default backend is Nx.BinaryBackend, whose pure-Elixir fft and dot turn
+  # this call from milliseconds into seconds.
+  defp features_from_stream(stream, %Spec{} = spec, opts) do
+    Nx.with_default_backend(Torchx.Backend, fn ->
+      sample_rate = Keyword.get(opts, :sample_rate, 16_000)
+
+      frame_length = round(sample_rate * spec.audio_frame_length_ms / 1000)
+      frame_step = round(sample_rate * spec.audio_frame_step_ms / 1000)
+      fft_length = spec.audio_fft_length
+
+      filterbank =
+        cached_filterbank(spec.audio_mel_bins, fft_length, sample_rate, spec.audio_max_frequency)
+        # cached storage is backend-neutral binary; the dot needs it local
+        |> Nx.backend_copy(Nx.default_backend())
+
+      stream
+      |> Nx.tensor(type: :f32)
+      |> frame_signal(frame_length, frame_step)
+      |> magnitude_spectrum(hann_window(frame_length), fft_length: fft_length)
       |> Nx.dot(filterbank)
       |> log_compress(floor: spec.audio_mel_floor)
-
-    t5 = System.monotonic_time(:millisecond)
-
-    if t5 - t0 > 500 do
-      require Logger
-
-      Logger.debug(
-        "mel: slow extract tensor=#{t1 - t0}ms frame=#{t2 - t1}ms window=#{t3 - t2}ms " <>
-          "fft=#{t4 - t3}ms dot=#{t5 - t4}ms backend=#{inspect(Nx.default_backend())} " <>
-          "defn=#{inspect(Nx.Defn.default_options())}"
-      )
-    end
-
-    result
+    end)
   end
 
   @doc """

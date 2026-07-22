@@ -229,22 +229,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     timed_debug(runtime, "runtime: warmup incremental prefill (prefix/append/suffix)", fn ->
       with {:ok, utterance} <-
              start_utterance(runtime, prompt: prompt, system_message: system_message) do
-        utterance = append_audio(utterance, List.duplicate(0.0, samples_per_chunk))
+        # E4B mel shapes depend on the stream carry: an utterance's first
+        # chunk frames differently from every later one. Exercise the flush
+        # sizes before any append (fresh carry) and again after two appends,
+        # which also compiles both append variants.
+        warmup_flush_sizes(utterance)
 
-        # Every flush size is a separate executable, so exercise them all here
-        # rather than compiling one mid-utterance.
+        utterance = append_audio(utterance, List.duplicate(0.0, 2 * samples_per_chunk))
+
+        warmup_flush_sizes(utterance)
+
         samples_per_token = AudioFeatureExtractor.samples_per_token()
-
-        utterance =
-          Enum.reduce(@audio_chunk_sizes, utterance, fn size, acc ->
-            %{acc | pending_samples: List.duplicate(0.0, size * samples_per_token)}
-            |> transcribe_utterance(max_new_tokens: 1, min_new_tokens: 1)
-            |> case do
-              {:ok, _} -> acc
-              _ -> acc
-            end
-          end)
-
         utterance = %{utterance | pending_samples: List.duplicate(0.0, samples_per_token)}
 
         case transcribe_utterance(utterance, max_new_tokens: 2, min_new_tokens: 2) do
@@ -252,6 +247,18 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           {:error, reason} -> {:error, reason}
         end
       end
+    end)
+  end
+
+  # Every flush size is a separate executable, so exercise them all up front
+  # rather than compiling one mid-utterance. Flushes are throwaway, so the
+  # utterance is not changed.
+  defp warmup_flush_sizes(utterance) do
+    samples_per_token = AudioFeatureExtractor.samples_per_token()
+
+    Enum.each(@audio_chunk_sizes, fn size ->
+      %{utterance | pending_samples: List.duplicate(0.0, size * samples_per_token)}
+      |> transcribe_utterance(max_new_tokens: 1, min_new_tokens: 1)
     end)
   end
 
@@ -288,7 +295,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     # `offset` counts cache slots consumed; `content_length` counts real
     # positions. A padded flush consumes slots without advancing position, so
     # the two diverge and position ids must follow content_length.
-    defstruct [:runtime, :cache, :offset, :content_length, :audio_tokens, :pending_samples]
+    # `mel_carry` (E4B only) is the unconsumed tail of the padded sample
+    # stream, so chunked mel extraction matches whole-utterance extraction.
+    defstruct [
+      :runtime,
+      :cache,
+      :offset,
+      :content_length,
+      :audio_tokens,
+      :pending_samples,
+      :mel_carry
+    ]
   end
 
   @doc """
@@ -319,10 +336,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          offset: length,
          content_length: length,
          audio_tokens: 0,
-         pending_samples: []
+         pending_samples: [],
+         mel_carry: initial_mel_carry(runtime)
        }}
     end
   end
+
+  defp initial_mel_carry(%__MODULE__{e4b?: true} = runtime) do
+    Gemma4MicTranscribe.Gemma4E4B.MelFeatures.stream_carry(e4b_spec(runtime))
+  end
+
+  defp initial_mel_carry(_runtime), do: nil
 
   @doc """
   Appends audio samples, prefilling whole chunks into the cache.
@@ -343,7 +367,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       ready
       |> Enum.chunk_every(samples_per_chunk)
       |> Enum.reduce(utterance, fn chunk, acc ->
-        {input_features, _mask} = chunk_features(runtime, chunk, chunk_tokens)
+        {input_features, _mask, mel_carry} =
+          chunk_features(runtime, acc.mel_carry, chunk, chunk_tokens)
 
         audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, chunk_tokens)
 
@@ -355,7 +380,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           | cache: cache,
             offset: acc.offset + chunk_tokens,
             content_length: acc.content_length + chunk_tokens,
-            audio_tokens: acc.audio_tokens + chunk_tokens
+            audio_tokens: acc.audio_tokens + chunk_tokens,
+            mel_carry: mel_carry
         }
       end)
 
@@ -438,25 +464,33 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     samples_per_token = AudioFeatureExtractor.samples_per_token()
     total_tokens = ceil_div(length(utterance.pending_samples), samples_per_token)
 
-    total_tokens
-    |> decompose_tokens()
-    |> Enum.reduce({utterance.content_length, utterance.cache, 0}, fn size,
-                                                                      {offset, cache, flushed} ->
-      chunk =
-        Enum.slice(
-          utterance.pending_samples,
-          flushed * samples_per_token,
-          size * samples_per_token
-        )
+    # The flush is throwaway, so the mel carry threads through this reduce
+    # locally and is never written back: pending stays pending, and the next
+    # append re-consumes it from the utterance's own carry.
+    {offset, cache, _flushed, _mel_carry} =
+      total_tokens
+      |> decompose_tokens()
+      |> Enum.reduce(
+        {utterance.content_length, utterance.cache, 0, utterance.mel_carry},
+        fn size, {offset, cache, flushed, mel_carry} ->
+          chunk =
+            Enum.slice(
+              utterance.pending_samples,
+              flushed * samples_per_token,
+              size * samples_per_token
+            )
 
-      {input_features, _mask} = chunk_features(runtime, chunk, size)
+          {input_features, _mask, mel_carry} = chunk_features(runtime, mel_carry, chunk, size)
 
-      audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, size)
+          audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, size)
 
-      {_logits, cache} = predict_chunk(runtime, audio_ids, input_features, offset, cache)
+          {_logits, cache} = predict_chunk(runtime, audio_ids, input_features, offset, cache)
 
-      {offset + size, cache, flushed + size}
-    end)
+          {offset + size, cache, flushed + size, mel_carry}
+        end
+      )
+
+    {offset, cache, total_tokens}
   end
 
   # Largest size first, so a 37 token remainder becomes 25 + 10 + 2 rather than
@@ -477,23 +511,38 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   # Features for one appended chunk. Both front ends consume 640 samples per
-  # audio token, but E4B wants those as log-mel frames rather than raw PCM.
-  defp chunk_features(%__MODULE__{e4b?: true} = runtime, chunk, chunk_tokens) do
+  # audio token, but E4B wants those as log-mel frames rather than raw PCM,
+  # extracted continuously across chunks via the utterance's mel carry.
+  # Returns {input_features, mask, mel_carry}.
+  defp chunk_features(%__MODULE__{e4b?: true} = runtime, mel_carry, chunk, chunk_tokens) do
     alias Gemma4MicTranscribe.Gemma4E4B.MelFeatures
 
-    features = MelFeatures.extract(chunk, e4b_spec(runtime))
+    samples_per_token = AudioFeatureExtractor.samples_per_token()
 
-    prepare_audio_tensors(runtime, features, Nx.broadcast(1, {max(chunk_tokens, 1)}))
+    # a short final chunk pads out to whole tokens with silence, at most one
+    # partial token's worth
+    chunk =
+      chunk ++ List.duplicate(0.0, max(chunk_tokens * samples_per_token - length(chunk), 0))
+
+    {features, mel_carry} = MelFeatures.extract_stream(mel_carry, chunk, e4b_spec(runtime))
+
+    {input_features, mask} =
+      prepare_audio_tensors(runtime, features, Nx.broadcast(1, {max(chunk_tokens, 1)}))
+
+    {input_features, mask, mel_carry}
   end
 
-  defp chunk_features(runtime, chunk, chunk_tokens) do
+  defp chunk_features(runtime, mel_carry, chunk, chunk_tokens) do
     features =
       AudioFeatureExtractor.extract(chunk,
         audio_token_count: chunk_tokens,
         max_tokens: chunk_tokens
       )
 
-    prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+    {input_features, mask} =
+      prepare_audio_tensors(runtime, features.input_features, features.attention_mask)
+
+    {input_features, mask, mel_carry}
   end
 
   defp e4b_spec(runtime) do
