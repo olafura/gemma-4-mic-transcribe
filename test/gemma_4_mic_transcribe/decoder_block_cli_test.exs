@@ -135,5 +135,17 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLITest do
              ])
 
     assert split_opts.execution == :split
+
+    assert {:ok, :run_split, fused_opts} =
+             DecoderBlockCLI.parse([
+               "run-split",
+               "--prefix-artifact",
+               prefix,
+               "--artifact",
+               tail,
+               "--fused-ffn"
+             ])
+
+    assert fused_opts.fused_ffn
   end
 end

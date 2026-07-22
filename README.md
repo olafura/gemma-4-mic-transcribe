@@ -389,6 +389,14 @@ remained identical at roughly 1.40 seconds; its smaller gain is expected
 because prefill is unchanged. The 33-language gate again reported zero changed
 outputs and identical CER.
 
+`--fused-ffn` aliases each layer's existing packed gate/up tensors into one
+dual-projection custom call for composed decode; the independently stored
+artifacts and prefill graph are unchanged. A forced 64-token run fell from a
+5.916-second warm mean to 5.675 seconds (4.1%, about 3.8 ms/token), with all 64
+token ids unchanged. On the eight-token multilingual gate it reduced mean
+processing from 0.694 to 0.676 seconds (2.6%) with zero changed outputs and
+identical CER.
+
 Use `--execution split` when an observable runtime boundary is required. It
 dispatches the prefix and tail as separate XLA executables and measured
 2.12–2.16 seconds warm. The default `--execution composed` avoids that dispatch

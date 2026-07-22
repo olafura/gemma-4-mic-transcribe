@@ -24,6 +24,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     bypass_layers: :string,
     bypass_ffn_layers: :string,
     bypass_phase: :string,
+    fused_ffn: :boolean,
     prompt: :string,
     output: :string,
     baseline: :string,
@@ -105,6 +106,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         bypass_layers: parse_layers(Keyword.get(opts, :bypass_layers)),
         bypass_ffn_layers: parse_layers(Keyword.get(opts, :bypass_ffn_layers)),
         bypass_phase: parse_bypass_phase(Keyword.get(opts, :bypass_phase, "all")),
+        fused_ffn: Keyword.get(opts, :fused_ffn, false),
         prompt:
           Keyword.get(
             opts,
@@ -131,6 +133,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
            :ok <- valid_bypass_phase(values.bypass_phase),
            :ok <- valid_bypass_execution(values.bypass_layers, values.execution),
            :ok <- valid_bypass_execution(values.bypass_ffn_layers, values.execution),
+           :ok <- valid_fused_execution(values.fused_ffn, values.execution),
            :ok <- ffmpeg_available() do
         {:ok, values}
       end
@@ -162,7 +165,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend,
         bypass_layers: opts.bypass_layers,
         bypass_ffn_layers: opts.bypass_ffn_layers,
-        bypass_phase: opts.bypass_phase
+        bypass_phase: opts.bypass_phase,
+        fused_ffn: opts.fused_ffn
       )
 
     IO.puts(
@@ -174,6 +178,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         bypass_layers: opts.bypass_layers,
         bypass_ffn_layers: opts.bypass_ffn_layers,
         bypass_phase: opts.bypass_phase,
+        fused_ffn: opts.fused_ffn,
         seconds: opts.seconds
       })
     )
@@ -204,6 +209,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       bypass_layers: opts.bypass_layers,
       bypass_ffn_layers: opts.bypass_ffn_layers,
       bypass_phase: opts.bypass_phase,
+      fused_ffn: opts.fused_ffn,
       prompt: opts.prompt,
       prefix_artifact: Path.expand(opts.prefix_artifact),
       tail_artifact: Path.expand(opts.tail_artifact),
@@ -537,6 +543,12 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
   defp valid_bypass_execution(_layers, :split),
     do: {:error, "--bypass-layers requires --execution composed"}
 
+  defp valid_fused_execution(false, _execution), do: :ok
+  defp valid_fused_execution(true, :composed), do: :ok
+
+  defp valid_fused_execution(true, :split),
+    do: {:error, "--fused-ffn requires composed execution"}
+
   defp ffmpeg_available do
     case System.find_executable("ffmpeg") do
       nil -> {:error, "ffmpeg is required to decode corpus MP3 files"}
@@ -570,6 +582,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       --bypass-layers LIST      decoder layers replaced by identity, for example 11
       --bypass-ffn-layers LIST  retain attention but remove selected FFNs
       --bypass-phase PHASE      apply bypass to all, prefill, or decode; default all
+      --fused-ffn               fuse packed FFN gate/up projections during decode
       --prompt TEXT             fixed transcription instruction for every clip
     """
   end

@@ -10,6 +10,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
 
   alias Bumblebee.Layers
   alias Gemma4MicTranscribe.Gemma4Unified.CompressedTensors
+  alias Gemma4MicTranscribe.Gemma4Unified.Q4DualGemv
   alias Gemma4MicTranscribe.Gemma4Unified.Q4Gemv
 
   defstruct architecture: :for_conditional_generation,
@@ -55,7 +56,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             packed_linear: true,
             # true also loads dequantized bf16 kernels, so prefill can use rocBLAS
             # matrix cores while decode still reads packed int4
-            hybrid_linear: false
+            hybrid_linear: false,
+            # Artifact-runner experiment: combine FFN gate/up decode GEMVs.
+            fused_q4_ffn: false
 
   @impl true
   def architectures, do: [:for_conditional_generation]
@@ -836,23 +839,45 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   defp gated_ffn(hidden_state, intermediate_size, output_size, spec, opts) do
     name = opts[:name]
 
-    gate =
-      hidden_state
-      |> linear(intermediate_size, spec,
-        name: join(name, "gate"),
-        kernel_initializer: opts[:kernel_initializer],
-        use_bias: false
-      )
-      |> Layers.activation(opts[:activation])
+    {gate, intermediate} =
+      if quantized?(spec) and Map.get(spec, :fused_q4_ffn, false) do
+        gate_up =
+          quantized_dual_dense(hidden_state, intermediate_size, name: join(name, "gate_up"))
 
-    intermediate =
-      linear(hidden_state, intermediate_size, spec,
-        name: join(name, "intermediate"),
-        kernel_initializer: opts[:kernel_initializer],
-        use_bias: false
-      )
+        gate =
+          Axon.nx(gate_up, fn state ->
+            Nx.slice_along_axis(state, 0, intermediate_size, axis: Nx.rank(state) - 1)
+          end)
 
-    Axon.multiply(gate, intermediate)
+        intermediate =
+          Axon.nx(gate_up, fn state ->
+            Nx.slice_along_axis(state, intermediate_size, intermediate_size,
+              axis: Nx.rank(state) - 1
+            )
+          end)
+
+        {gate, intermediate}
+      else
+        gate =
+          linear(hidden_state, intermediate_size, spec,
+            name: join(name, "gate"),
+            kernel_initializer: opts[:kernel_initializer],
+            use_bias: false
+          )
+
+        intermediate =
+          linear(hidden_state, intermediate_size, spec,
+            name: join(name, "intermediate"),
+            kernel_initializer: opts[:kernel_initializer],
+            use_bias: false
+          )
+
+        {gate, intermediate}
+      end
+
+    gate
+    |> Layers.activation(opts[:activation])
+    |> Axon.multiply(intermediate)
     |> linear(output_size, spec,
       name: join(name, "output"),
       kernel_initializer: opts[:kernel_initializer],
@@ -938,6 +963,34 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     end
   end
 
+  defp quantized_dual_dense(input, units, opts) do
+    group_size = CompressedTensors.quant_group_size()
+
+    params =
+      Enum.flat_map(["gate", "up"], fn projection ->
+        [
+          Axon.param(
+            "#{projection}_packed",
+            fn shape -> {div(elem(shape, tuple_size(shape) - 1), 8), units} end,
+            type: {:s, 32},
+            initializer: :zeros
+          ),
+          Axon.param(
+            "#{projection}_scales",
+            fn shape -> {div(elem(shape, tuple_size(shape) - 1), group_size), units} end,
+            type: {:bf, 16},
+            initializer: :zeros
+          )
+        ]
+      end)
+
+    Axon.layer(&quantized_dual_dense_impl/6, [input | params],
+      name: opts[:name],
+      op_name: :gemma4_q4_dual_dense,
+      group_size: group_size
+    )
+  end
+
   # Decode is a GEMV over one token and is memory bound, so it reads packed
   # int4. Prefill is a GEMM over the whole sequence and is compute bound, so it
   # uses the dequantized kernel and rocBLAS matrix cores, which beat the hand
@@ -984,6 +1037,49 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         group_size: group_size
       )
       |> Nx.reshape(put_elem(shape, tuple_size(shape) - 1, units))
+      |> Nx.as_type(input_type)
+    end
+  end
+
+  defp quantized_dual_dense_impl(
+         input,
+         gate_packed,
+         gate_scales,
+         up_packed,
+         up_scales,
+         opts
+       ) do
+    group_size = opts[:group_size]
+    shape = Nx.shape(input)
+    hidden_size = elem(shape, tuple_size(shape) - 1)
+    {_words, units} = Nx.shape(gate_packed)
+    output_shape = put_elem(shape, tuple_size(shape) - 1, 2 * units)
+    input_type = Nx.type(input)
+
+    if single_token?(shape) do
+      input
+      |> Nx.reshape({hidden_size})
+      |> Nx.as_type({:bf, 16})
+      |> Q4DualGemv.dot(
+        Nx.as_type(gate_packed, {:s, 32}),
+        Nx.as_type(gate_scales, {:bf, 16}),
+        Nx.as_type(up_packed, {:s, 32}),
+        Nx.as_type(up_scales, {:bf, 16}),
+        group_size: group_size
+      )
+      |> Nx.reshape(output_shape)
+      |> Nx.as_type(input_type)
+    else
+      seq = div(Nx.size(input), hidden_size)
+      input = Nx.reshape(input, {seq, hidden_size}) |> Nx.as_type({:bf, 16})
+
+      gate =
+        Q4Gemv.matmul(input, gate_packed, gate_scales, group_size: group_size)
+
+      up = Q4Gemv.matmul(input, up_packed, up_scales, group_size: group_size)
+
+      Nx.concatenate([gate, up], axis: 1)
+      |> Nx.reshape(output_shape)
       |> Nx.as_type(input_type)
     end
   end

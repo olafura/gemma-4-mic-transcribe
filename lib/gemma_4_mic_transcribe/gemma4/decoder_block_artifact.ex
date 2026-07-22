@@ -292,9 +292,14 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     bypass_layers = Keyword.get(opts, :bypass_layers, [])
     bypass_ffn_layers = Keyword.get(opts, :bypass_ffn_layers, [])
     bypass_phase = Keyword.get(opts, :bypass_phase, :all)
+    fused_ffn = Keyword.get(opts, :fused_ffn, false)
 
     unless bypass_phase in [:all, :prefill, :decode] do
       raise ArgumentError, ":bypass_phase must be :all, :prefill, or :decode"
+    end
+
+    if fused_ffn and (bypass_layers != [] or bypass_ffn_layers != []) do
+      raise ArgumentError, ":fused_ffn cannot be combined with decoder bypasses"
     end
 
     if tail.layer_indices !=
@@ -317,10 +322,20 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
       end
 
     {prefill_generation_model, generation_model} =
-      case bypass_phase do
-        :all -> {nil, bypass_model}
-        :prefill -> {bypass_model, baseline_model}
-        :decode -> {baseline_model, bypass_model}
+      if fused_ffn do
+        fused_spec =
+          spec
+          |> Map.from_struct()
+          |> Map.put(:fused_q4_ffn, true)
+          |> then(&struct(Model, &1))
+
+        {baseline_model, Bumblebee.build_model(fused_spec)}
+      else
+        case bypass_phase do
+          :all -> {nil, bypass_model}
+          :prefill -> {bypass_model, baseline_model}
+          :decode -> {baseline_model, bypass_model}
+        end
       end
 
     {_init_fun, generation_predict_fun} = Axon.build(generation_model, build_opts(backend))
@@ -331,7 +346,10 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
         predict_fun
       end
 
-    generation_params = merge_model_states(prefix_artifact.prefix.params, tail.params)
+    generation_params =
+      prefix_artifact.prefix.params
+      |> merge_model_states(tail.params)
+      |> maybe_add_fused_ffn_params(spec, fused_ffn)
 
     %DecoderPipeline{
       prefix: prefix_artifact.prefix,
@@ -363,10 +381,19 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
               inspect(pipeline.tail.layer_indices)
     end
 
+    generation_params = merge_model_states(pipeline.prefix.params, tail.params)
+
+    generation_params =
+      if Enum.any?(Map.keys(pipeline.generation_params.data), &String.ends_with?(&1, ".gate_up")) do
+        maybe_add_fused_ffn_params(generation_params, pipeline.generation.spec, true)
+      else
+        generation_params
+      end
+
     %{
       pipeline
       | tail: tail,
-        generation_params: merge_model_states(pipeline.prefix.params, tail.params),
+        generation_params: generation_params,
         parameter_count: pipeline.prefix.parameter_count + tail.parameter_count
     }
   end
@@ -573,6 +600,28 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     data =
       Map.merge(prefix.data, tail.data, fn _node_name, prefix_parameters, tail_parameters ->
         Map.merge(prefix_parameters, tail_parameters)
+      end)
+
+    Axon.ModelState.new(data)
+  end
+
+  defp maybe_add_fused_ffn_params(params, _spec, false), do: params
+
+  defp maybe_add_fused_ffn_params(params, spec, true) do
+    data =
+      Enum.reduce(0..(spec.num_blocks - 1), params.data, fn layer, data ->
+        prefix = "decoder.blocks.#{layer}.ffn"
+        gate = Map.fetch!(data, "#{prefix}.gate")
+        up = Map.fetch!(data, "#{prefix}.intermediate")
+
+        fused = %{
+          "gate_packed" => Map.fetch!(gate, "packed"),
+          "gate_scales" => Map.fetch!(gate, "scales"),
+          "up_packed" => Map.fetch!(up, "packed"),
+          "up_scales" => Map.fetch!(up, "scales")
+        }
+
+        Map.put(data, "#{prefix}.gate_up", fused)
       end)
 
     Axon.ModelState.new(data)

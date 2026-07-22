@@ -25,6 +25,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     execution: :string,
     bypass_ffn_layers: :string,
     bypass_phase: :string,
+    fused_ffn: :boolean,
     layer: :integer,
     backend: :string,
     model_name: :string,
@@ -107,6 +108,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       execution: parse_execution(Keyword.get(opts, :execution, "composed")),
       bypass_ffn_layers: parse_layers(Keyword.get(opts, :bypass_ffn_layers)),
       bypass_phase: parse_bypass_phase(Keyword.get(opts, :bypass_phase, "all")),
+      fused_ffn: Keyword.get(opts, :fused_ffn, false),
       layer: Keyword.get(opts, :layer, 45),
       backend: Keyword.get(opts, :backend, defaults[:backend]),
       model_name: Keyword.get(opts, :model_name, "google/gemma-4-12B-it"),
@@ -128,6 +130,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
          :ok <- valid_layers(values.bypass_ffn_layers),
          :ok <- valid_bypass_phase(values.bypass_phase),
          :ok <- valid_bypass_execution(values.bypass_ffn_layers, values.execution),
+         :ok <- valid_fused_execution(values.fused_ffn, values.execution),
          :ok <- valid_layer(values.layer),
          :ok <- valid_run_paths(mode, values) do
       {:ok, mode, values}
@@ -330,7 +333,8 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         %{prefix_artifact: prefix} ->
           DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend,
             bypass_ffn_layers: opts.bypass_ffn_layers,
-            bypass_phase: opts.bypass_phase
+            bypass_phase: opts.bypass_phase,
+            fused_ffn: opts.fused_ffn
           )
 
         %DecoderPipeline{} = pipeline ->
@@ -362,6 +366,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         execution: opts.execution,
         bypass_ffn_layers: opts.bypass_ffn_layers,
         bypass_phase: opts.bypass_phase,
+        fused_ffn: opts.fused_ffn,
         samples: length(samples),
         runs: opts.runs
       })
@@ -603,6 +608,12 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   defp valid_bypass_execution(_layers, :split),
     do: {:error, "--bypass-ffn-layers requires --execution composed"}
 
+  defp valid_fused_execution(false, _execution), do: :ok
+  defp valid_fused_execution(true, :composed), do: :ok
+
+  defp valid_fused_execution(true, :split),
+    do: {:error, "--fused-ffn requires composed execution"}
+
   defp valid_run_paths(:extract, _opts), do: :ok
   defp valid_run_paths(:extract_prefix, _opts), do: :ok
   defp valid_run_paths(:extract_tail, _opts), do: :ok
@@ -731,6 +742,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
                                  split keeps the observable XLA boundary
       --bypass-ffn-layers LIST   retain attention but remove selected FFNs
       --bypass-phase PHASE       apply bypass to all, prefill, or decode; default all
+      --fused-ffn                 fuse packed FFN gate/up projections during decode
     """
   end
 end

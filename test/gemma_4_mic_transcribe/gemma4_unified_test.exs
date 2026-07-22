@@ -8,6 +8,7 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   alias Gemma4MicTranscribe.Gemma4Unified.CompressedTensors
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Model
+  alias Gemma4MicTranscribe.Gemma4Unified.Q4DualGemv
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.Gemma4Unified.Transcript
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
@@ -878,6 +879,21 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     max_value = Nx.to_number(Nx.reduce_max(Nx.abs(reference)))
 
     assert max_diff / max_value < 0.01
+  end
+
+  test "dual packed projection fallback concatenates both results" do
+    x = Nx.broadcast(Nx.tensor(1, type: :bf16), {32})
+    packed = Nx.broadcast(Nx.tensor(0, type: :s32), {4, 2})
+    first_scales = Nx.broadcast(Nx.tensor(0.5, type: :bf16), {1, 2})
+    second_scales = Nx.broadcast(Nx.tensor(0.25, type: :bf16), {1, 2})
+
+    project =
+      Nx.Defn.jit(fn x, packed, first_scales, second_scales ->
+        Q4DualGemv.dot(x, packed, first_scales, packed, second_scales)
+      end)
+
+    assert Nx.to_flat_list(project.(x, packed, first_scales, second_scales)) ==
+             [-128.0, -128.0, -64.0, -64.0]
   end
 
   test "banned ngram tokens block completing an already-generated trigram" do
