@@ -11,6 +11,7 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
     * `:attention` - the post-normalized attention residual contribution
     * `:ffn` - the post-normalized FFN residual contribution
     * `:per_layer_input` - E4B's gated, projected per-layer embedding contribution
+    * `:block_input` - the complete hidden state entering the decoder block
     * `:hidden_state` - the completed decoder layer output
 
   `:per_layer_input` is reported as unavailable for models without per-layer
@@ -22,6 +23,7 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
     attention: "post_attention_norm",
     ffn: "post_ffn_norm",
     per_layer_input: "per_layer.post_norm",
+    block_input: nil,
     hidden_state: "layer_scalar"
   }
   @captures Map.keys(@capture_nodes)
@@ -36,7 +38,7 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
   ## Options
 
     * `:layers` - layer indices to inspect (default: every layer)
-    * `:positions` - token positions or selectors (default: `[:last]`)
+    * `:positions` - token positions, selectors, or `:all` (default: `[:last]`)
     * `:capture` - capture points listed above (default: `[:hidden_state]`)
     * `:top_k_logits` - apply a logit lens to hidden states (default: `0`)
     * `:include_activations` - retain captured vectors in the report (default: `false`)
@@ -191,6 +193,16 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
     end
   end
 
+  defp resolve_positions(context, :all) do
+    ids = Nx.to_flat_list(context.inputs["input_ids"])
+
+    {:ok,
+     ids
+     |> Enum.with_index()
+     |> Enum.map(fn {_token_id, index} -> position({:index, index}, index, ids, context) end)
+     |> Enum.map(fn {:ok, position} -> position end)}
+  end
+
   defp resolve_positions(context, selectors) when is_list(selectors) and selectors != [] do
     ids = Nx.to_flat_list(context.inputs["input_ids"])
     attention_mask = Nx.to_flat_list(context.inputs["attention_mask"])
@@ -319,7 +331,7 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
     {outputs, available, unavailable} =
       Enum.reduce(layers, {%{}, [], []}, fn layer, acc ->
         Enum.reduce(captures, acc, fn capture, {outputs, available, unavailable} ->
-          node_name = "decoder.blocks.#{layer}.#{Map.fetch!(@capture_nodes, capture)}"
+          node_name = capture_node_name(layer, capture)
 
           case nodes[node_name] do
             nil when capture == :per_layer_input ->
@@ -351,6 +363,14 @@ defmodule Gemma4MicTranscribe.Gemma4.LayerProbe do
       {:ok, Axon.container(outputs), Enum.reverse(available), Enum.reverse(unavailable)}
     end
   end
+
+  defp capture_node_name(0, :block_input), do: "audio_embedding_replacement"
+
+  defp capture_node_name(layer, :block_input),
+    do: "decoder.blocks.#{layer - 1}.layer_scalar"
+
+  defp capture_node_name(layer, capture),
+    do: "decoder.blocks.#{layer}.#{Map.fetch!(@capture_nodes, capture)}"
 
   defp named_nodes(model) do
     Axon.reduce_nodes(model, %{}, fn node, nodes ->

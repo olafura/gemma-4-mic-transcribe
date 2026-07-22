@@ -152,6 +152,41 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     Layers.output(%{logits: logits, cache: outputs.cache})
   end
 
+  @doc false
+  def decoder_block_model(%__MODULE__{} = spec, layer_index)
+      when is_integer(layer_index) and layer_index >= 0 and layer_index < spec.num_blocks do
+    hidden_state =
+      Axon.input("hidden_state", shape: {nil, nil, spec.hidden_size})
+
+    position_ids = Axon.input("position_ids", shape: {nil, nil})
+    attention_mask = Axon.input("attention_mask", shape: {nil, nil})
+
+    block_cache =
+      Axon.container(%{
+        self_attention: Layers.none(),
+        cross_attention: Layers.none()
+      })
+
+    {hidden_state, _block_cache} =
+      decoder_block(
+        hidden_state,
+        position_ids,
+        attention_mask,
+        block_cache,
+        Layers.none(),
+        Enum.fetch!(layer_types(spec), layer_index),
+        spec,
+        name: "decoder.blocks.#{layer_index}"
+      )
+
+    hidden_state
+  end
+
+  def decoder_block_model(%__MODULE__{} = spec, layer_index) do
+    raise ArgumentError,
+          "expected a Gemma 4 layer index in 0..#{spec.num_blocks - 1}, got: #{inspect(layer_index)}"
+  end
+
   defp inputs(spec) do
     Bumblebee.Utils.Model.inputs_to_map([
       Axon.input("input_ids", shape: {nil, nil}),

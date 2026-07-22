@@ -156,6 +156,40 @@ the XLA autotuner. Layer probing therefore fails fast on `exla:rocm`; load a
 separate runtime with `backend: "torchx:cpu"` for probes. Ordinary EXLA/ROCm
 generation is unaffected.
 
+## Extracting a decoder block
+
+A loaded unified 12B runtime can isolate one complete decoder block and run it
+with only that block's parameters. Capture the full hidden-state sequence that
+enters the block, then pass it to the extracted block:
+
+```elixir
+{:ok, report} =
+  Gemma4MicTranscribe.Gemma4Unified.Runtime.probe(runtime, input,
+    layers: [46],
+    positions: :all,
+    capture: [:block_input, :hidden_state],
+    include_activations: true
+  )
+
+{:ok, block} = Gemma4MicTranscribe.Gemma4.extract_decoder_block(runtime, 46)
+
+standalone_output =
+  Gemma4MicTranscribe.Gemma4.DecoderBlocks.run!(
+    block,
+    report.activations["46:block_input"]
+  )
+```
+
+`run/3` generates contiguous position ids and an all-visible attention mask by
+default. Pass `position_ids:` and `attention_mask:` when the source sequence
+contains padding or custom positions. The extracted model state contains only
+the selected block's weights. E4B blocks are not yet supported because their
+KV sharing and per-layer embedding inputs require a different boundary.
+
+Materializing an internal bf16 activation can change tensor layout and reduction
+order. Compare standalone and in-model results with a numerical tolerance, not
+bit equality.
+
 ## Usage
 
 List known model variants and their required runtimes:
