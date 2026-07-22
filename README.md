@@ -325,6 +325,25 @@ ms and a 5s utterance 3561/3620/3505/3516 ms, so run to run spread is 26 ms and
 compiled, and differences above roughly 150 ms in the comparisons below are
 signal rather than noise.
 
+### Erlang VM tuning: measured, nothing to gain
+
+The BEAM is not on the critical path, so its tuning flags have nothing to
+give. Measured per-decode-step time (E4B, GPU, 35 warm steps per config):
+
+```text
+baseline (32 schedulers, JIT on)                        p50 72 ms  p90 77 ms
++sbwt/+sbwtdcpu/+sbwtdio very_long (spin-wait hard)     p50 74 ms  p90 78 ms
++S 8:8 +SDcpu 8:8 +SDio 4 (fewer BEAM threads)          p50 72 ms  p90 77 ms
+```
+
+A decode step is one dirty-NIF call into XLA; the GPU kernel is the whole
+72 ms, and scheduler wakeup costs sit in the microseconds the percentiles
+cannot see. Spin-waiting burned ~4 cores of idle CPU for a within-noise
+regression - actively harmful on a shared machine. beamasm (the JIT) is
+already on by default on this OTP. The one flag worth adopting is
+`+JPperf true`, which lets `perf`/Parca resolve JIT-compiled Elixir frames
+when profiling - observability, not speed.
+
 ## Latency budget
 
 Streaming ASR services report two separate numbers, and mixing them hides which
