@@ -7,14 +7,27 @@ defmodule Gemma4MicTranscribe.MixProject do
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
-      escript: [
-        main_module: Gemma4MicTranscribe.DecoderPipelineBenchmark.Escript,
-        name: "decoder_pipeline_bench",
-        app: nil,
-        shebang:
-          "#! /usr/bin/env -S XLA_FLAGS='--xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false' escript\n"
-      ],
+      escript: escript(),
       deps: deps()
+    ]
+  end
+
+  defp escript do
+    {main_module, name} =
+      case System.get_env("GEMMA4_ESCRIPT") do
+        "decoder_block" ->
+          {Gemma4MicTranscribe.DecoderBlockCLI.Escript, "decoder_block"}
+
+        _other ->
+          {Gemma4MicTranscribe.DecoderPipelineBenchmark.Escript, "decoder_pipeline_bench"}
+      end
+
+    [
+      main_module: main_module,
+      name: name,
+      app: nil,
+      shebang:
+        "#! /usr/bin/env -S XLA_FLAGS='--xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false' escript\n"
     ]
   end
 

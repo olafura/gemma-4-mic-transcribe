@@ -190,6 +190,54 @@ Materializing an internal bf16 activation can change tensor layout and reduction
 order. Compare standalone and in-model results with a numerical tolerance, not
 bit equality.
 
+To persist a genuinely independent block, build the dedicated escript and use
+its separate extract/run subcommands:
+
+```bash
+GEMMA4_ESCRIPT=decoder_block mix escript.build
+
+./decoder_block extract \
+  --artifact artifacts/gemma4-12b-layer-45 \
+  --layer 45 \
+  --backend torchx:cpu
+
+./decoder_block run \
+  --artifact artifacts/gemma4-12b-layer-45 \
+  --backend exla:rocm \
+  --runs 3
+```
+
+The real 12B layer-45 artifact contains 224,148,993 parameters in a
+448,299,060-byte safetensors file. It is about 1.7% of the complete 25.8 GB
+pipeline artifact and contains no embeddings, neighboring layers, output norm,
+or vocabulary head. The included eight-position verification fixture compares
+the fresh GPU result to the output recorded from the source block. It measured
+a maximum absolute CPU/GPU difference of `2.36e-5`; cold XLA compile plus
+execution took 1.20 seconds and warm executions took 16-17 ms.
+
+Block outputs use the same safetensors schema as block inputs (`hidden_state`,
+`position_ids`, and `attention_mask`), so independently loaded processes can be
+chained:
+
+```bash
+./decoder_block run \
+  --artifact artifacts/gemma4-12b-layer-45 \
+  --backend exla:rocm \
+  --runs 1 \
+  --output artifacts/layer-45-output.safetensors
+
+./decoder_block run \
+  --artifact artifacts/gemma4-12b-layer-46 \
+  --backend exla:rocm \
+  --input artifacts/layer-45-output.safetensors \
+  --output artifacts/layer-46-output.safetensors
+```
+
+Each runner loads only its roughly 448 MB block. A single block cannot accept
+audio or emit text by itself: it transforms the hidden-state stream supplied by
+the prefix, while a final tail still supplies the output norm and vocabulary
+head.
+
 Adjacent blocks can be extracted as one graph and run without materializing the
 hidden state between them:
 

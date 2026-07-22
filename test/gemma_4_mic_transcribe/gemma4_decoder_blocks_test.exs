@@ -2,6 +2,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocksTest do
   use ExUnit.Case, async: true
 
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks
+  alias Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact
   alias Gemma4MicTranscribe.Gemma4.LayerProbe
   alias Gemma4MicTranscribe.Gemma4Unified.Model
 
@@ -143,6 +144,44 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocksTest do
 
     assert {:error, message} = DecoderBlocks.extract_tail(runtime, [0])
     assert message =~ "final layer 1"
+  end
+
+  test "persists one decoder block and runs its verification fixture independently" do
+    {runtime, _inputs} = runtime()
+    block = DecoderBlocks.extract!(runtime, 0)
+
+    path =
+      Path.join(System.tmp_dir!(), "gemma-decoder-block-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf(path) end)
+    DecoderBlockArtifact.save!(block, path, verification_sequence_length: 3)
+
+    manifest = DecoderBlockArtifact.read_manifest!(path)
+    assert manifest.kind == :decoder_block
+    assert manifest.layer_index == 0
+    assert manifest.parameter_count == block.parameter_count
+
+    backend = {Torchx.Backend, device: :cpu}
+    standalone = DecoderBlockArtifact.load!(path, backend)
+    input = DecoderBlockArtifact.load_verification!(path, backend)
+    result = DecoderBlockArtifact.verify!(standalone, input, atol: 1.0e-5, rtol: 1.0e-5)
+
+    assert result.verified
+    assert result.max_abs_error == 0.0
+
+    assert Map.keys(standalone.params.data)
+           |> Enum.all?(&String.starts_with?(&1, "decoder.blocks.0."))
+
+    output_path = Path.join(path, "next-input.safetensors")
+
+    DecoderBlockArtifact.save_input!(output_path, result.output,
+      position_ids: input.position_ids,
+      attention_mask: input.attention_mask
+    )
+
+    next_input = DecoderBlockArtifact.load_input!(output_path, backend)
+    assert next_input.expected_output == nil
+    assert Nx.all_close(next_input.hidden_state, result.output) |> Nx.to_number() == 1
   end
 
   defp runtime do
