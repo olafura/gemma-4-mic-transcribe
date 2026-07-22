@@ -407,11 +407,22 @@ transcript latency  0.6-1.1 s   (E4B full path: 0.7-1.2 s)
 ```
 
 The gap grows with utterance length, since the full path re-prefills the
-whole utterance while the incremental final's cost stays flat. Mel frames
-are extracted continuously across chunks (the utterance carries the
-unconsumed tail of the padded sample stream), so chunked extraction is
-bitwise-identical to whole-utterance extraction; only the encoder's
-attention remains chunked.
+whole utterance while the incremental final's cost stays flat.
+
+Chunked audio encoding is **exact**, not approximate. Mel frames are
+extracted continuously across chunks (the utterance carries the unconsumed
+tail of the padded sample stream), so chunked extraction is
+bitwise-identical to whole-utterance extraction. The conformer encoder is
+causal at token granularity with a bounded receptive field (~183 mel
+frames: 11 frames of attention reach plus 4 of causal convolution per
+block, over 12 blocks, plus the subsampling overhang), so each chunk is
+encoded with the previous 200 mel frames prepended as lookback and only
+the last placeholder-count encoder tokens spliced - reproducing
+whole-utterance encoding exactly. Measured: incremental transcripts are
+verbatim identical to the full path's. The exactness costs ~150 ms over
+the approximate variant (lookback doubles encoder input per append, and
+flushes pad to one warmed size instead of decomposing), which is the
+right trade: deterministic parity with the reference-verified full path.
 
 ## Incremental prefill
 
