@@ -381,6 +381,14 @@ and identical CER while mean processing fell from 1.251 seconds to 0.675
 seconds, a 1.85x speedup. Other ROCm architectures retain the portable scalar
 dot-product loop.
 
+Decode uses the same gfx1151 packed BF16 instruction while retaining the
+scalar kernel's accumulate-then-scale order. In a forced 32-token run, this
+reduced warm processing from a 3.591-second scalar mean to 3.131 seconds
+(12.8%) with all 32 token ids unchanged. The natural ten-token journal result
+remained identical at roughly 1.40 seconds; its smaller gain is expected
+because prefill is unchanged. The 33-language gate again reported zero changed
+outputs and identical CER.
+
 Use `--execution split` when an observable runtime boundary is required. It
 dispatches the prefix and tail as separate XLA executables and measured
 2.12–2.16 seconds warm. The default `--execution composed` avoids that dispatch

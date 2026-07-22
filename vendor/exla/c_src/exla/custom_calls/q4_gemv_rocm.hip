@@ -33,6 +33,9 @@ namespace {
 constexpr int kCols = 32;
 constexpr int kSplitK = 8;
 constexpr int kNibblesPerWord = 8;
+#if defined(__gfx1151__)
+using bf16x2_bits = short __attribute__((ext_vector_type(2)));
+#endif
 
 // Reduction happens in LDS rather than across lanes, so the kernel does not
 // depend on the wavefront size (RDNA defaults to wave32, CDNA to wave64).
@@ -63,11 +66,30 @@ __global__ void q4_gemv_kernel(const int32_t *__restrict__ packed,
       float partial = 0.0f;
 
 #pragma unroll
+#if defined(__gfx1151__)
+      // Accumulate the integer weights before applying their shared scale, as
+      // in the scalar path, but consume two bf16 activations per instruction.
+      for (int pair = 0; pair < kNibblesPerWord / 2; ++pair) {
+        const int low = ((packed_word >> (pair * 8)) & 0xF) - 8;
+        const int high = ((packed_word >> (pair * 8 + 4)) & 0xF) - 8;
+        const __hip_bfloat162 quantized(__float2bfloat16(low),
+                                        __float2bfloat16(high));
+        const __hip_bfloat162_raw quantized_raw = quantized;
+        const bf16x2_bits weights = {
+            static_cast<short>(quantized_raw.x),
+            static_cast<short>(quantized_raw.y)};
+        const bf16x2_bits activations =
+            *reinterpret_cast<const bf16x2_bits *>(x + k_base + pair * 2);
+        partial = __builtin_amdgcn_fdot2_f32_bf16(
+            weights, activations, partial, false);
+      }
+#else
       for (int nib = 0; nib < kNibblesPerWord; ++nib) {
         const int weight = ((packed_word >> (nib * 4)) & 0xF) - 8;
         partial +=
             static_cast<float>(weight) * __bfloat162float(x[k_base + nib]);
       }
+#endif
 
       acc += partial * scale;
     }
@@ -94,9 +116,6 @@ __global__ void q4_gemv_kernel(const int32_t *__restrict__ packed,
 // tokens, keeping weight traffic proportional to seq / kSeqTile.
 constexpr int kGemmCols = 64;
 constexpr int kSeqTile = 16;
-#if defined(__gfx1151__)
-using bf16x2_bits = short __attribute__((ext_vector_type(2)));
-#endif
 
 __global__ void q4_gemm_kernel(const int32_t *__restrict__ packed,
                                const __hip_bfloat16 *__restrict__ scales,
