@@ -104,12 +104,12 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
              model_name: Keyword.get(opts, :model_name, "google/gemma-4-12B-it"),
              param_type: Keyword.get(opts, :param_type, "bf16"),
              tail_start: Keyword.get(opts, :tail_start, 45),
-             max_new_tokens: Keyword.get(opts, :max_new_tokens, 3),
-             min_new_tokens: Keyword.get(opts, :min_new_tokens, 3),
+             max_new_tokens: Keyword.get(opts, :max_new_tokens, 32),
+             min_new_tokens: Keyword.get(opts, :min_new_tokens, 0),
              transplants: transplants,
              runs: Keyword.get(opts, :runs, 2),
              sample_rate: Keyword.get(opts, :sample_rate, 16_000),
-             seconds: Keyword.get(opts, :seconds, 2.0),
+             seconds: Keyword.get(opts, :seconds, 5.0),
              debug: Keyword.get(opts, :debug, false)
            },
            :ok <- positive(values.runs, "--runs"),
@@ -346,13 +346,13 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmark do
       --model-name MODEL         default google/gemma-4-12B-it
       --param-type TYPE          bf16, f16, or f32; default bf16
       --tail-start LAYER         first extracted tail layer, default 45
-      --max-new-tokens COUNT     generated-token limit, default 3
-      --min-new-tokens COUNT     force generation through this step, default 3
+      --max-new-tokens COUNT     generated-token limit, default 32
+      --min-new-tokens COUNT     force generation through this step, default 0
       --transplant SOURCE:TARGET copy a compatible source layer into a target slot;
                                  comma-separate multiple transplants
       --runs COUNT               first run is cold, later runs are warm; default 2
       --sample-rate HZ           default 16000
-      --seconds SECONDS          leading audio duration, default 2.0
+      --seconds SECONDS          leading audio duration, default 5.0
       --debug                    enable runtime progress logging
     """
   end

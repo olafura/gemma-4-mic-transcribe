@@ -22,7 +22,9 @@ defmodule Gemma4MicTranscribe.DecoderPipelineBenchmarkTest do
     assert opts.tail_start == 45
     assert opts.transplants == [%{source: 44, target: 45}, %{source: 41, target: 47}]
     assert opts.runs == 3
-    assert opts.max_new_tokens == 3
+    assert opts.max_new_tokens == 32
+    assert opts.min_new_tokens == 0
+    assert opts.seconds == 5.0
   end
 
   test "rejects malformed layer transplants" do
