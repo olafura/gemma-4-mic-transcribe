@@ -813,6 +813,41 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert message =~ xla_extension
   end
 
+  test "ROCm compatibility-only preflight ignores allocator memory reservations" do
+    tmp_dir = Path.join(System.tmp_dir!(), "gemma-rocm-preflight-#{System.unique_integer()}")
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf(tmp_dir) end)
+
+    xla_extension = Path.join(tmp_dir, "libxla_extension.so")
+    llvm_objdump = Path.join(tmp_dir, "llvm-objdump")
+    rocm_agent = Path.join(tmp_dir, "rocm_agent_enumerator")
+
+    File.write!(xla_extension, "")
+
+    File.write!(
+      llvm_objdump,
+      "#!/bin/sh\nprintf '%s\\n' 'hipv4-amdgcn-amd-amdhsa--gfx1151'\n"
+    )
+
+    File.write!(rocm_agent, "#!/bin/sh\nprintf '%s\\n' 'gfx1151'\n")
+    File.chmod!(llvm_objdump, 0o755)
+    File.chmod!(rocm_agent, 0o755)
+
+    low_memory = """
+    {"card0": {"VRAM Total Memory (B)": "68719476736", "VRAM Total Used Memory (B)": "60129542144"}}
+    """
+
+    assert :ok =
+             RocmPreflight.check(
+               xla_extension_path: xla_extension,
+               llvm_objdump: llvm_objdump,
+               rocm_agent_enumerator: rocm_agent,
+               rocm_smi_output: low_memory,
+               min_free_bytes: 24 * 1024 * 1024 * 1024,
+               skip_memory_budget: true
+             )
+  end
+
   test "repacked int4 weights dequantize to the same matrix as the dequant path" do
     out_features = 4
     # in_features must cover whole 32-element quant groups

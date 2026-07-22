@@ -58,7 +58,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     with :ok <- verify_supported_model(model_name),
          :ok <- verify_bumblebee_available(),
-         {:ok, backend} <- backend(Keyword.get(opts, :backend, Config.backend())),
+         {:ok, backend} <- backend(Keyword.get(opts, :backend, Config.backend()), opts),
          {:ok, param_type} <- param_type(Keyword.get(opts, :param_type)) do
       repo_id = ModelCatalog.resolve(model_name)
       repo = {:hf, repo_id}
@@ -205,7 +205,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   @doc false
-  def resolve_backend(value), do: backend(value)
+  def resolve_backend(value), do: backend(value, [])
 
   @doc """
   Compiles and warms the generation executables for the given audio token
@@ -1532,19 +1532,19 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp build_opts(_backend), do: []
 
-  defp backend("host"), do: {:ok, Nx.BinaryBackend}
-  defp backend(nil), do: backend(Config.backend())
+  defp backend("host", _opts), do: {:ok, Nx.BinaryBackend}
+  defp backend(nil, opts), do: backend(Config.backend(), opts)
 
-  defp backend("exla"), do: exla_backend(:auto)
-  defp backend("exla:host"), do: exla_backend(:host)
-  defp backend("exla:cuda"), do: exla_backend(:cuda)
-  defp backend("exla:rocm"), do: exla_backend(:rocm)
+  defp backend("exla", opts), do: exla_backend(:auto, opts)
+  defp backend("exla:host", opts), do: exla_backend(:host, opts)
+  defp backend("exla:cuda", opts), do: exla_backend(:cuda, opts)
+  defp backend("exla:rocm", opts), do: exla_backend(:rocm, opts)
 
-  defp backend("torchx"), do: torchx_backend(:auto)
-  defp backend("torchx:cpu"), do: torchx_backend(:cpu)
-  defp backend("torchx:cuda"), do: torchx_backend(:cuda)
+  defp backend("torchx", _opts), do: torchx_backend(:auto)
+  defp backend("torchx:cpu", _opts), do: torchx_backend(:cpu)
+  defp backend("torchx:cuda", _opts), do: torchx_backend(:cuda)
 
-  defp backend(other), do: {:error, "unsupported backend #{inspect(other)}"}
+  defp backend(other, _opts), do: {:error, "unsupported backend #{inspect(other)}"}
 
   defp verify_supported_model(model_name) do
     case ModelCatalog.runtime_kind(model_name) do
@@ -1558,8 +1558,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     end
   end
 
-  defp exla_backend(:rocm) do
-    with :ok <- RocmPreflight.check(),
+  defp exla_backend(:rocm, opts) do
+    preflight_opts =
+      if Keyword.get(opts, :rocm_preflight) == :compatibility_only,
+        do: [skip_memory_budget: true],
+        else: []
+
+    with :ok <- RocmPreflight.check(preflight_opts),
          :ok <- apply_rocm_runtime_workarounds(),
          :ok <- configure_exla_gpu_client(:rocm),
          :ok <- ensure_exla_available(),
@@ -1568,7 +1573,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     end
   end
 
-  defp exla_backend(client) do
+  defp exla_backend(client, _opts) do
     with :ok <- configure_exla_gpu_client(client),
          :ok <- ensure_exla_available(),
          {:ok, backend} <- exla_backend_for_client(client) do

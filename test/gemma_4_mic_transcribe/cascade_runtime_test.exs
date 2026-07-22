@@ -10,7 +10,10 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
   end
 
   defmodule AccurateRuntime do
-    def load(_opts), do: {:ok, :accurate}
+    def load(opts) do
+      send(:cascade_runtime_test, {:accurate_load_opts, opts})
+      {:ok, :accurate}
+    end
 
     def generate(:accurate, _input, _opts) do
       send(:cascade_runtime_test, :accurate_called)
@@ -32,6 +35,13 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
              CascadeRuntime.generate(cascade, %{samples: List.duplicate(0.1, 16_000)})
 
     refute_received :accurate_called
+  end
+
+  test "uses compatibility-only ROCm preflight for the second model load" do
+    _cascade = load_cascade(fast_text: "fast transcript")
+
+    assert_received {:accurate_load_opts, opts}
+    assert opts[:rocm_preflight] == :compatibility_only
   end
 
   test "escalates empty fast transcripts" do

@@ -24,8 +24,13 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
       |> Keyword.put(:model_name, Keyword.get(opts, :cascade_fast_model_name, "gemma4-e4b"))
       |> Keyword.put(:fused_ffn, false)
 
+    # The first load performs the full VRAM safety check. Once EXLA has created
+    # its allocator, rocm-smi reports that allocator's reservation as used VRAM;
+    # the second load must not mistake our own reservation for another workload.
+    accurate_opts = Keyword.put(opts, :rocm_preflight, :compatibility_only)
+
     with {:ok, fast_runtime} <- fast_module.load(fast_opts),
-         {:ok, accurate_runtime} <- accurate_module.load(opts) do
+         {:ok, accurate_runtime} <- accurate_module.load(accurate_opts) do
       {:ok,
        %__MODULE__{
          fast_module: fast_module,

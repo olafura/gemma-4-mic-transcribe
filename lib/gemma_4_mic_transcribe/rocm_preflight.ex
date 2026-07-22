@@ -31,7 +31,7 @@ defmodule Gemma4MicTranscribe.RocmPreflight do
           {:error, xla_inspection_message(xla_inspection)}
 
         missing == [] ->
-          memory_budget(opts)
+          if Keyword.get(opts, :skip_memory_budget, false), do: :ok, else: memory_budget(opts)
 
         true ->
           {:error, incompatible_message(missing, xla_targets)}
