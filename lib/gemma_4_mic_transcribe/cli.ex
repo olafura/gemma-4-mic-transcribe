@@ -33,6 +33,7 @@ defmodule Gemma4MicTranscribe.CLI do
               backend: Config.backend(),
               param_type: "bf16",
               weights: "packed",
+              fused_ffn: false,
               incremental_prefill: false,
               warmup: true,
               speech_gate: Config.speech_gate?(),
@@ -78,6 +79,7 @@ defmodule Gemma4MicTranscribe.CLI do
     backend: :string,
     param_type: :string,
     weights: :string,
+    fused_ffn: :boolean,
     incremental_prefill: :boolean,
     warmup: :boolean,
     speech_gate: :boolean,
@@ -209,6 +211,7 @@ defmodule Gemma4MicTranscribe.CLI do
       backend: Keyword.get(opts, :backend, Config.backend()),
       param_type: Keyword.get(opts, :param_type, "bf16"),
       weights: Keyword.get(opts, :weights, "packed"),
+      fused_ffn: Keyword.get(opts, :fused_ffn, false),
       incremental_prefill: Keyword.get(opts, :incremental_prefill, false),
       warmup: Keyword.get(opts, :warmup, true),
       speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
@@ -265,6 +268,7 @@ defmodule Gemma4MicTranscribe.CLI do
          :ok <- validate_non_negative(config.no_repeat_ngram, "--no-repeat-ngram"),
          :ok <- validate_param_type(config.param_type),
          :ok <- validate_weights(config.weights),
+         :ok <- validate_fused_weights(config.fused_ffn, config.weights),
          :ok <- validate_output(config.output),
          {:ok, system_message, system_message_source} <-
            read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
@@ -284,6 +288,7 @@ defmodule Gemma4MicTranscribe.CLI do
              param_type: config.param_type,
              packed_weights: config.weights in ["packed", "hybrid"],
              hybrid_weights: config.weights == "hybrid",
+             fused_ffn: config.fused_ffn,
              warmup: config.warmup,
              max_response_tokens: config.max_response_tokens,
              no_repeat_ngram_size: config.no_repeat_ngram,
@@ -478,6 +483,7 @@ defmodule Gemma4MicTranscribe.CLI do
       param_type: config.param_type,
       packed_weights: config.weights in ["packed", "hybrid"],
       hybrid_weights: config.weights == "hybrid",
+      fused_ffn: config.fused_ffn,
       incremental_prefill: config.incremental_prefill,
       warmup: config.warmup,
       # Lag numbers are only meaningful against a loaded, warmed model, so
@@ -633,6 +639,12 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_param_type(_param_type), do: {:error, "--param-type must be bf16, f16, or f32"}
   defp validate_weights(weights) when weights in ["packed", "bf16", "hybrid"], do: :ok
   defp validate_weights(_weights), do: {:error, "--weights must be packed, bf16, or hybrid"}
+  defp validate_fused_weights(false, _weights), do: :ok
+  defp validate_fused_weights(true, weights) when weights in ["packed", "hybrid"], do: :ok
+
+  defp validate_fused_weights(true, _weights),
+    do: {:error, "--fused-ffn requires packed or hybrid weights"}
+
   defp validate_output(output) when output in ["text", "jsonl"], do: :ok
   defp validate_output(_output), do: {:error, "--output must be text or jsonl"}
   defp validate_optional_positive(nil, _name), do: :ok
@@ -746,6 +758,7 @@ defmodule Gemma4MicTranscribe.CLI do
                                         bf16: dequantized only (fast prefill, slower decode)
                                         hybrid: both, fast prefill and fast decode (~31GB)
                                         default packed
+      --fused-ffn                        Fuse packed 12B FFN gate/up projections during decode
       --incremental-prefill              Prefill audio during speech instead of after end-of-speech
       --no-warmup                        Skip startup generation warmup (JIT compiles on first utterance instead)
       --no-speech-gate                  Disable cheap local speech gating before model generation

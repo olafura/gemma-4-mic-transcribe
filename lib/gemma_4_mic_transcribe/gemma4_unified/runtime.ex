@@ -47,6 +47,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :no_repeat_ngram_size,
     :e4b?,
     :predict_fun,
+    :decode_predict_fun,
     :debug,
     :debug_top_k
   ]
@@ -121,6 +122,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             %{model_info | params: params}
           end)
 
+        {decode_predict_fun, model_info} =
+          maybe_build_fused_decode(
+            model_info,
+            backend,
+            Keyword.get(opts, :fused_ffn, false),
+            debug?
+          )
+
         generation_config =
           Bumblebee.configure(generation_config,
             max_new_tokens: Keyword.get(opts, :max_response_tokens, 512),
@@ -185,6 +194,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            no_repeat_ngram_size: Keyword.get(opts, :no_repeat_ngram_size, 0),
            e4b?: spec_module == Gemma4MicTranscribe.Gemma4E4B.Model,
            predict_fun: predict_fun,
+           decode_predict_fun: decode_predict_fun,
            debug: debug?,
            debug_top_k: Keyword.get(opts, :debug_top_k, 0)
          }}
@@ -1054,7 +1064,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         }
       end)
 
-    %{logits: logits, cache: cache} = runtime.predict_fun.(runtime.model_info.params, inputs)
+    predict_fun = runtime.decode_predict_fun || runtime.predict_fun
+    %{logits: logits, cache: cache} = predict_fun.(runtime.model_info.params, inputs)
 
     {logits, cache}
   end
@@ -1324,6 +1335,51 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       packed_linear: Keyword.get(opts, :packed_weights, true),
       hybrid_linear: Keyword.get(opts, :hybrid_weights, false)
     )
+  end
+
+  defp maybe_build_fused_decode(model_info, _backend, false, _debug?),
+    do: {nil, model_info}
+
+  defp maybe_build_fused_decode(
+         %{spec: %{quantization_config: nil}} = model_info,
+         _backend,
+         true,
+         _debug?
+       ),
+       do: {nil, model_info}
+
+  defp maybe_build_fused_decode(model_info, backend, true, debug?) do
+    fused_spec = Map.put(model_info.spec, :fused_q4_ffn, true)
+
+    {_init_fun, predict_fun} =
+      timed_debug(debug?, "runtime: build fused FFN decode graph", fn ->
+        fused_spec
+        |> Model.model()
+        |> Axon.build(build_opts(backend))
+      end)
+
+    params = add_fused_ffn_params(model_info.params, fused_spec)
+    {predict_fun, %{model_info | params: params}}
+  end
+
+  defp add_fused_ffn_params(%Axon.ModelState{} = params, spec) do
+    data =
+      Enum.reduce(0..(spec.num_blocks - 1), params.data, fn layer, data ->
+        prefix = "decoder.blocks.#{layer}.ffn"
+        gate = Map.fetch!(data, "#{prefix}.gate")
+        up = Map.fetch!(data, "#{prefix}.intermediate")
+
+        fused = %{
+          "gate_packed" => Map.fetch!(gate, "packed"),
+          "gate_scales" => Map.fetch!(gate, "scales"),
+          "up_packed" => Map.fetch!(up, "packed"),
+          "up_scales" => Map.fetch!(up, "scales")
+        }
+
+        Map.put(data, "#{prefix}.gate_up", fused)
+      end)
+
+    Axon.ModelState.new(data)
   end
 
   # A decode step carries no audio, but the graph still expects the input, so

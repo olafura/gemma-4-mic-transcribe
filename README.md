@@ -397,6 +397,21 @@ token ids unchanged. On the eight-token multilingual gate it reduced mean
 processing from 0.694 to 0.676 seconds (2.6%) with zero changed outputs and
 identical CER.
 
+The normal long-running transcription runtime exposes the same optimization:
+
+```bash
+./gemma_4_mic_transcribe --wav journal1.wav --stream-wav --realtime \
+  --backend exla:rocm --model-name gemma4-12b-qat-w4a16-ct \
+  --max-response-tokens 32 --no-partials --fused-ffn
+```
+
+It builds a second decode graph over aliases to the already-loaded parameters,
+so resident weights are not duplicated and the original graph still handles
+prefill. On 42 warm decode steps from two `journal1.wav` passes, p50/p90 fell
+from the previously measured 104/110 ms to 94/101 ms. Both transcripts remained
+verbatim identical. The flag requires packed or hybrid weights and has no effect
+on E4B.
+
 Use `--execution split` when an observable runtime boundary is required. It
 dispatches the prefix and tail as separate XLA executables and measured
 2.12–2.16 seconds warm. The default `--execution composed` avoids that dispatch

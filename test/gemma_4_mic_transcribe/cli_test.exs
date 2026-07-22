@@ -113,6 +113,15 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert {:ok, %RunConfig{realtime: true}} = CLI.parse(["--stream-wav", "--realtime"])
   end
 
+  test "parses fused FFN decode flag" do
+    assert {:ok, %RunConfig{fused_ffn: true}} = CLI.parse(["--fused-ffn"])
+  end
+
+  test "requires packed weights for fused FFN decode" do
+    assert {:error, message} = CLI.parse(["--fused-ffn", "--weights", "bf16"])
+    assert message =~ "packed or hybrid"
+  end
+
   test "validates output format" do
     assert {:error, message} = CLI.parse(["--output", "xml"])
     assert message =~ "--output"
