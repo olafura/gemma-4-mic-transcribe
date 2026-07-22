@@ -997,6 +997,9 @@ only the zero-margin Catalan error, raised the combined exact score from 8 to 9,
 and estimated 299 ms mean cascade processing versus 1,251 ms for 12B alone.
 The Polish `jeden`/`jedem` error remained confidently wrong, so this signal is
 useful but not sufficient and the threshold should be validated on more data.
+The same `0.125` threshold also accepted the journal transcript containing
+`biripo`; logit margin measures decisiveness, not correctness, and cannot be
+the cascade's only semantic quality signal.
 
 The cascade emits `[:gemma_4_mic_transcribe, :cascade, :route]` telemetry with
 the selected route, escalation reason, and per-model processing time. Streaming
