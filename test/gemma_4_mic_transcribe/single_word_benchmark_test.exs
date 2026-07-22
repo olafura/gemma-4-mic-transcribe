@@ -68,4 +68,26 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmarkTest do
     assert summary.p50_latency_ms == 10
     assert summary.p95_latency_ms == 30
   end
+
+  test "accepts a catalog model without extracted artifacts" do
+    root =
+      Path.join(System.tmp_dir!(), "single-word-corpus-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    assert {:ok, opts} =
+             SingleWordBenchmark.parse([
+               "--corpus",
+               root,
+               "--model-name",
+               "gemma4-e4b",
+               "--output",
+               Path.join(root, "result.json")
+             ])
+
+    assert opts.model_name == "gemma4-e4b"
+    assert opts.prefix_artifact == nil
+    assert opts.tail_artifact == nil
+  end
 end

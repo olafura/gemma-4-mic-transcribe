@@ -11,6 +11,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
 
   @switches [
     corpus: :string,
+    model_name: :string,
     prefix_artifact: :string,
     tail_artifact: :string,
     backend: :string,
@@ -93,6 +94,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     else
       values = %{
         corpus: opts[:corpus],
+        model_name: opts[:model_name],
         prefix_artifact: opts[:prefix_artifact],
         tail_artifact: opts[:tail_artifact],
         backend: Keyword.get(opts, :backend, "exla:rocm"),
@@ -119,8 +121,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       }
 
       with :ok <- required_directory(values.corpus, "--corpus"),
-           :ok <- required_directory(values.prefix_artifact, "--prefix-artifact"),
-           :ok <- required_directory(values.tail_artifact, "--tail-artifact"),
+           :ok <- valid_model_source(values),
            :ok <- required_path(values.output, "--output"),
            :ok <- optional_file(values.baseline, "--baseline"),
            :ok <- positive_integer(values.per_language, "--per-language"),
@@ -147,33 +148,15 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       abort("no labeled clips found for split #{inspect(opts.split)}")
     end
 
-    {:ok, backend} = Runtime.resolve_backend(opts.backend)
-
-    prefix =
-      timed_load(
-        "prefix_artifact_load",
-        fn -> DecoderBlockArtifact.load_prefix!(opts.prefix_artifact, backend) end
-      )
-
-    tail =
-      timed_load(
-        "tail_artifact_load",
-        fn -> DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend) end
-      )
-
-    pipeline =
-      DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend,
-        bypass_layers: opts.bypass_layers,
-        bypass_ffn_layers: opts.bypass_ffn_layers,
-        bypass_phase: opts.bypass_phase,
-        fused_ffn: opts.fused_ffn
-      )
+    runner = load_runner!(opts)
 
     IO.puts(
       Jason.encode!(%{
         event: "single_word_ready",
         samples: length(cases),
         languages: cases |> Enum.map(& &1.language) |> Enum.uniq() |> length(),
+        runner: runner_kind(runner),
+        model_name: opts.model_name,
         execution: opts.execution,
         bypass_layers: opts.bypass_layers,
         bypass_ffn_layers: opts.bypass_ffn_layers,
@@ -185,15 +168,12 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
 
     first_input = cases |> hd() |> build_input(opts.seconds, opts.prompt)
 
-    case DecoderPipeline.generate(pipeline, first_input,
-           max_new_tokens: opts.max_new_tokens,
-           execution: opts.execution
-         ) do
+    case generate(runner, first_input, opts) do
       {:ok, _output} -> :ok
       {:error, reason} -> abort("warmup failed: #{reason}")
     end
 
-    results = Enum.map(cases, &run_case!(pipeline, &1, opts))
+    results = Enum.map(cases, &run_case!(runner, &1, opts))
     summary = summarize(results)
     comparison = compare_baseline(results, summary, opts.baseline)
 
@@ -211,8 +191,9 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       bypass_phase: opts.bypass_phase,
       fused_ffn: opts.fused_ffn,
       prompt: opts.prompt,
-      prefix_artifact: Path.expand(opts.prefix_artifact),
-      tail_artifact: Path.expand(opts.tail_artifact),
+      model_name: opts.model_name,
+      prefix_artifact: expand_optional(opts.prefix_artifact),
+      tail_artifact: expand_optional(opts.tail_artifact),
       summary: summary,
       comparison: comparison,
       cases: results
@@ -238,15 +219,12 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     end
   end
 
-  defp run_case!(pipeline, sample, opts) do
+  defp run_case!(runner, sample, opts) do
     input = build_input(sample, opts.seconds, opts.prompt)
 
     {elapsed_us, result} =
       :timer.tc(fn ->
-        DecoderPipeline.generate(pipeline, input,
-          max_new_tokens: opts.max_new_tokens,
-          execution: opts.execution
-        )
+        generate(runner, input, opts)
       end)
 
     output =
@@ -276,6 +254,63 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     IO.puts(Jason.encode!(Map.put(result, :event, "single_word_case")))
     result
   end
+
+  defp load_runner!(%{model_name: model_name} = opts) when is_binary(model_name) do
+    timed_load("model_runtime_load", fn ->
+      case Runtime.load(
+             model_name: model_name,
+             backend: opts.backend,
+             max_response_tokens: opts.max_new_tokens,
+             fused_ffn: opts.fused_ffn
+           ) do
+        {:ok, runtime} -> {:runtime, runtime}
+        {:error, reason} -> abort("model load failed: #{reason}")
+      end
+    end)
+  end
+
+  defp load_runner!(opts) do
+    {:ok, backend} = Runtime.resolve_backend(opts.backend)
+
+    prefix =
+      timed_load(
+        "prefix_artifact_load",
+        fn -> DecoderBlockArtifact.load_prefix!(opts.prefix_artifact, backend) end
+      )
+
+    tail =
+      timed_load(
+        "tail_artifact_load",
+        fn -> DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend) end
+      )
+
+    pipeline =
+      DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend,
+        bypass_layers: opts.bypass_layers,
+        bypass_ffn_layers: opts.bypass_ffn_layers,
+        bypass_phase: opts.bypass_phase,
+        fused_ffn: opts.fused_ffn
+      )
+
+    {:pipeline, pipeline}
+  end
+
+  defp generate({:runtime, runtime}, input, opts) do
+    case Runtime.generate(runtime, input, max_new_tokens: opts.max_new_tokens) do
+      {:ok, text} -> {:ok, %{text: text, token_ids: []}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp generate({:pipeline, pipeline}, input, opts) do
+    DecoderPipeline.generate(pipeline, input,
+      max_new_tokens: opts.max_new_tokens,
+      execution: opts.execution
+    )
+  end
+
+  defp runner_kind({:runtime, _runtime}), do: :model
+  defp runner_kind({:pipeline, _pipeline}), do: :extracted_pipeline
 
   defp build_input(sample, seconds, prompt) do
     samples = decode_fixed_audio!(sample.path, seconds)
@@ -503,6 +538,19 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     if File.dir?(path), do: :ok, else: {:error, "directory does not exist: #{path}"}
   end
 
+  defp valid_model_source(%{model_name: model_name})
+       when is_binary(model_name) and model_name != "",
+       do: :ok
+
+  defp valid_model_source(values) do
+    with :ok <- required_directory(values.prefix_artifact, "--prefix-artifact") do
+      required_directory(values.tail_artifact, "--tail-artifact")
+    end
+  end
+
+  defp expand_optional(nil), do: nil
+  defp expand_optional(path), do: Path.expand(path)
+
   defp required_path(nil, option), do: {:error, "#{option} PATH is required"}
   defp required_path("", option), do: {:error, "#{option} PATH is required"}
   defp required_path(_path, _option), do: :ok
@@ -566,6 +614,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     Usage: single_word_bench [options]
 
       --corpus PATH             Common Voice single-word corpus root
+      --model-name MODEL        run a complete catalog model instead of extracted artifacts
       --prefix-artifact PATH    independently saved decoder prefix
       --tail-artifact PATH      independently saved decoder tail
       --output PATH             JSON result and future comparison baseline

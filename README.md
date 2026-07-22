@@ -443,6 +443,27 @@ shape, warms XLA before measuring, and records normalized exact match, character
 error rate, per-language results, and latency percentiles. A candidate run can
 compare the exact same seeded clips with `--baseline`:
 
+The same gate can run a complete catalog model without extracting it first.
+This is useful for measuring E4B on the identical multilingual sample used for
+12B topology experiments:
+
+```bash
+./single_word_bench \
+  --corpus /path/to/cv-corpus-7.0-singleword \
+  --model-name gemma4-e4b \
+  --baseline artifacts/single-word-packed-native-seed42.json \
+  --output artifacts/single-word-e4b-seed42.json \
+  --per-language 1 --seed 42 --backend exla:rocm --allow-regression
+```
+
+On the seed-42 sample, E4B averaged 268 ms per three-second clip versus
+1,251 ms for the packed 12B baseline: a 4.67x processing speedup. It improved
+exact matches from 5/33 to 8/33 and CER from 0.742 to 0.583. The outputs were
+not a strict quality superset: E4B gained five exact matches (including Tamil
+and Thai) but lost Catalan `sí` and Polish `jeden` to small transcription
+errors. Script- or output-shape routing cannot identify those subtle losses;
+the next useful routing signal is decoder token confidence.
+
 ```bash
 ./single_word_bench \
   --corpus /path/to/cv-corpus-7.0-singleword \
