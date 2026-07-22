@@ -21,4 +21,5 @@ __pycache__/
 *.log
 /decoder_pipeline_bench
 /decoder_block
+/single_word_bench
 /artifacts/

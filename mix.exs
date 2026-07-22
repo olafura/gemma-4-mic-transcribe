@@ -18,6 +18,9 @@ defmodule Gemma4MicTranscribe.MixProject do
         "decoder_block" ->
           {Gemma4MicTranscribe.DecoderBlockCLI.Escript, "decoder_block"}
 
+        "single_word_bench" ->
+          {Gemma4MicTranscribe.SingleWordBenchmark.Escript, "single_word_bench"}
+
         _other ->
           {Gemma4MicTranscribe.DecoderPipelineBenchmark.Escript, "decoder_pipeline_bench"}
       end

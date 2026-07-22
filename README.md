@@ -379,6 +379,49 @@ dispatches the prefix and tail as separate XLA executables and measured
 and materialization overhead without changing how the artifacts are stored or
 swapped.
 
+### Multilingual single-word regression gate
+
+Build the corpus benchmark as a dedicated escript and take a seeded random
+sample from every language with a non-empty test split:
+
+```bash
+GEMMA4_ESCRIPT=single_word_bench mix escript.build
+
+./single_word_bench \
+  --corpus /path/to/cv-corpus-7.0-singleword \
+  --prefix-artifact artifacts/gemma4-12b-packed-prefix-0-44 \
+  --tail-artifact artifacts/gemma4-12b-packed-tail-45-47 \
+  --output artifacts/single-word-packed-native-seed42.json \
+  --per-language 1 \
+  --seed 42 \
+  --seconds 3 \
+  --max-new-tokens 8 \
+  --backend exla:rocm
+```
+
+The runner decodes MP3 with `ffmpeg`, pads or truncates every clip to one fixed
+shape, warms XLA before measuring, and records normalized exact match, character
+error rate, per-language results, and latency percentiles. A candidate run can
+compare the exact same seeded clips with `--baseline`:
+
+```bash
+./single_word_bench \
+  --corpus /path/to/cv-corpus-7.0-singleword \
+  --prefix-artifact artifacts/candidate-prefix \
+  --tail-artifact artifacts/candidate-tail \
+  --baseline artifacts/single-word-packed-native-seed42.json \
+  --output artifacts/candidate-seed42.json \
+  --per-language 1 --seed 42
+```
+
+The comparison reports changed outputs, exact matches lost and gained, accuracy
+and character-error deltas, and processing speedup. The seed-42 packed baseline
+covered 33 languages and scored 5/33 normalized exact matches with 0.742 CER;
+its mean warm processing time was 1.251 seconds per three-second clip. The low
+absolute exact score reflects the model's frequent transliteration of less
+common native scripts, so topology experiments should guard both exact-match
+transitions and aggregate CER.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text
