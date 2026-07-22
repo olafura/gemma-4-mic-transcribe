@@ -17,6 +17,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             max_positions: 262_144,
             hidden_size: 3840,
             intermediate_size: 15_360,
+            enable_moe_block: false,
+            moe_intermediate_size: nil,
+            num_experts: 0,
+            top_k_experts: 0,
             num_blocks: 48,
             num_attention_heads: 16,
             num_key_value_heads: 8,
@@ -111,6 +115,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   end
 
   @impl true
+  def model(%__MODULE__{architecture: :for_conditional_generation, enable_moe_block: true}) do
+    raise ArgumentError,
+          "Gemma 4 MoE inference is not implemented yet; use Gemma4MicTranscribe.Gemma4.Experts.list/2 to inspect its experts"
+  end
+
   def model(%__MODULE__{architecture: :for_conditional_generation} = spec) do
     inputs = inputs(spec)
 
@@ -787,6 +796,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         max_positions: get_number(text_config, "max_position_embeddings", spec.max_positions),
         hidden_size: get_number(text_config, "hidden_size", spec.hidden_size),
         intermediate_size: get_number(text_config, "intermediate_size", spec.intermediate_size),
+        enable_moe_block: Map.get(text_config, "enable_moe_block", spec.enable_moe_block),
+        moe_intermediate_size:
+          Map.get(text_config, "moe_intermediate_size", spec.moe_intermediate_size),
+        num_experts: Map.get(text_config, "num_experts", spec.num_experts),
+        top_k_experts: Map.get(text_config, "top_k_experts", spec.top_k_experts),
         num_blocks: get_number(text_config, "num_hidden_layers", spec.num_blocks),
         num_attention_heads:
           get_number(text_config, "num_attention_heads", spec.num_attention_heads),

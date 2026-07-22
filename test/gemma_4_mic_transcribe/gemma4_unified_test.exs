@@ -608,6 +608,10 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
           "max_position_embeddings" => 128,
           "hidden_size" => 8,
           "intermediate_size" => 16,
+          "enable_moe_block" => true,
+          "moe_intermediate_size" => 4,
+          "num_experts" => 8,
+          "top_k_experts" => 2,
           "num_hidden_layers" => 2,
           "num_attention_heads" => 2,
           "num_key_value_heads" => 1,
@@ -632,6 +636,10 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
 
     assert spec.vocab_size == 32
     assert spec.hidden_size == 8
+    assert spec.enable_moe_block
+    assert spec.moe_intermediate_size == 4
+    assert spec.num_experts == 8
+    assert spec.top_k_experts == 2
     assert spec.boa_token_id == 11
     assert spec.audio_token_id == 12
     assert spec.eoa_token_id == 13
