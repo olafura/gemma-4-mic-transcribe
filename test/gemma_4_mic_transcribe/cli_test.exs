@@ -117,6 +117,19 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert {:ok, %RunConfig{fused_ffn: true}} = CLI.parse(["--fused-ffn"])
   end
 
+  test "parses E4B cascade controls" do
+    assert {:ok, %RunConfig{} = config} =
+             CLI.parse(["--e4b-cascade", "--cascade-min-chars-per-second", "1.5"])
+
+    assert config.e4b_cascade
+    assert config.cascade_min_chars_per_second == 1.5
+  end
+
+  test "rejects incremental prefill with the initial E4B cascade" do
+    assert {:error, message} = CLI.parse(["--e4b-cascade", "--incremental-prefill"])
+    assert message =~ "does not support"
+  end
+
   test "requires packed weights for fused FFN decode" do
     assert {:error, message} = CLI.parse(["--fused-ffn", "--weights", "bf16"])
     assert message =~ "packed or hybrid"

@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.CLI do
   require Logger
 
   alias Gemma4MicTranscribe.Audio
+  alias Gemma4MicTranscribe.CascadeRuntime
   alias Gemma4MicTranscribe.Config
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.StreamingSession
@@ -34,6 +35,8 @@ defmodule Gemma4MicTranscribe.CLI do
               param_type: "bf16",
               weights: "packed",
               fused_ffn: false,
+              e4b_cascade: false,
+              cascade_min_chars_per_second: 0.0,
               incremental_prefill: false,
               warmup: true,
               speech_gate: Config.speech_gate?(),
@@ -80,6 +83,8 @@ defmodule Gemma4MicTranscribe.CLI do
     param_type: :string,
     weights: :string,
     fused_ffn: :boolean,
+    e4b_cascade: :boolean,
+    cascade_min_chars_per_second: :float,
     incremental_prefill: :boolean,
     warmup: :boolean,
     speech_gate: :boolean,
@@ -212,6 +217,8 @@ defmodule Gemma4MicTranscribe.CLI do
       param_type: Keyword.get(opts, :param_type, "bf16"),
       weights: Keyword.get(opts, :weights, "packed"),
       fused_ffn: Keyword.get(opts, :fused_ffn, false),
+      e4b_cascade: Keyword.get(opts, :e4b_cascade, false),
+      cascade_min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
       incremental_prefill: Keyword.get(opts, :incremental_prefill, false),
       warmup: Keyword.get(opts, :warmup, true),
       speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
@@ -269,6 +276,12 @@ defmodule Gemma4MicTranscribe.CLI do
          :ok <- validate_param_type(config.param_type),
          :ok <- validate_weights(config.weights),
          :ok <- validate_fused_weights(config.fused_ffn, config.weights),
+         :ok <- validate_cascade_incremental(config.e4b_cascade, config.incremental_prefill),
+         :ok <-
+           validate_non_negative_float(
+             config.cascade_min_chars_per_second,
+             "--cascade-min-chars-per-second"
+           ),
          :ok <- validate_output(config.output),
          {:ok, system_message, system_message_source} <-
            read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
@@ -289,6 +302,7 @@ defmodule Gemma4MicTranscribe.CLI do
              packed_weights: config.weights in ["packed", "hybrid"],
              hybrid_weights: config.weights == "hybrid",
              fused_ffn: config.fused_ffn,
+             cascade_min_chars_per_second: config.cascade_min_chars_per_second,
              warmup: config.warmup,
              max_response_tokens: config.max_response_tokens,
              no_repeat_ngram_size: config.no_repeat_ngram,
@@ -490,6 +504,7 @@ defmodule Gemma4MicTranscribe.CLI do
       packed_weights: config.weights in ["packed", "hybrid"],
       hybrid_weights: config.weights == "hybrid",
       fused_ffn: config.fused_ffn,
+      cascade_min_chars_per_second: config.cascade_min_chars_per_second,
       incremental_prefill: config.incremental_prefill,
       warmup: config.warmup,
       # Lag numbers are only meaningful against a loaded, warmed model, so
@@ -680,6 +695,12 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_fused_weights(true, _weights),
     do: {:error, "--fused-ffn requires packed or hybrid weights"}
 
+  defp validate_cascade_incremental(false, _incremental), do: :ok
+  defp validate_cascade_incremental(true, false), do: :ok
+
+  defp validate_cascade_incremental(true, true),
+    do: {:error, "--e4b-cascade does not support --incremental-prefill yet"}
+
   defp validate_output(output) when output in ["text", "jsonl"], do: :ok
   defp validate_output(_output), do: {:error, "--output must be text or jsonl"}
   defp validate_optional_positive(nil, _name), do: :ok
@@ -702,9 +723,10 @@ defmodule Gemma4MicTranscribe.CLI do
   defp maybe_take(windows, count), do: Stream.take(windows, count)
 
   defp runtime_module(%RunConfig{} = config, opts) do
-    case Keyword.fetch(opts, :runtime_module) do
-      {:ok, runtime_module} -> {:ok, runtime_module}
-      :error -> ModelCatalog.runtime_module(config.model_name)
+    cond do
+      Keyword.has_key?(opts, :runtime_module) -> {:ok, Keyword.fetch!(opts, :runtime_module)}
+      config.e4b_cascade -> {:ok, CascadeRuntime}
+      true -> ModelCatalog.runtime_module(config.model_name)
     end
   end
 
@@ -794,6 +816,8 @@ defmodule Gemma4MicTranscribe.CLI do
                                         hybrid: both, fast prefill and fast decode (~31GB)
                                         default packed
       --fused-ffn                        Fuse packed 12B FFN gate/up projections during decode
+      --e4b-cascade                       Use E4B first and escalate suspicious transcripts to 12B
+      --cascade-min-chars-per-second N   Escalate sparse E4B transcripts; 0 disables (default)
       --incremental-prefill              Prefill audio during speech instead of after end-of-speech
       --no-warmup                        Skip startup generation warmup (JIT compiles on first utterance instead)
       --no-speech-gate                  Disable cheap local speech gating before model generation

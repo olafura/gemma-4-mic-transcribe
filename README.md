@@ -948,6 +948,27 @@ from 1709 to 1577 ms (7.7%), and total transcript latency fell from 2209 to
 2077 ms (6.0%). The additional shapes increase startup warmup only; they do not
 duplicate weights.
 
+### E4B-first cascade experiment
+
+`--e4b-cascade` keeps E4B and the selected accurate model loaded, runs E4B
+first, and accepts a usable E4B transcript without touching 12B. Empty output,
+refusals, malformed control tags, decoding replacement characters, and E4B
+runtime errors fall back to 12B. An optional density rule can catch unusually
+sparse output:
+
+```bash
+./gemma_4_mic_transcribe --wav journal1.wav --stream-wav --realtime \
+  --backend exla:rocm --model-name gemma4-12b-qat-w4a16-ct \
+  --weights packed --fused-ffn --e4b-cascade \
+  --cascade-min-chars-per-second 1.5 --no-partials
+```
+
+The density threshold defaults to zero (disabled), because characters per
+second is not language-independent confidence. This first cascade is therefore
+a hard-failure fallback rather than a learned confidence model. It deliberately
+does not expose incremental prefill yet; accepted requests use E4B's full path,
+while escalated requests use the already-loaded optimized 12B path.
+
 Prefill is the one place where packed int4 loses: it gives up rocBLAS matrix
 cores for a hand kernel (~1100 ms versus ~240 ms measured on the older
 `Axon.dense` path).

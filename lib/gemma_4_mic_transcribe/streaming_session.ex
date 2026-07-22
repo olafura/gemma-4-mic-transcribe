@@ -219,6 +219,8 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       packed_weights: Keyword.get(opts, :packed_weights, true),
       hybrid_weights: Keyword.get(opts, :hybrid_weights, false),
       fused_ffn: Keyword.get(opts, :fused_ffn, false),
+      cascade_min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
+      sample_rate: Keyword.get(opts, :sample_rate, 16_000),
       prompt: Keyword.get(opts, :prompt, Config.default_prompt()),
       system_message: Keyword.get(opts, :system_message),
       debug: Keyword.get(opts, :debug, false),
