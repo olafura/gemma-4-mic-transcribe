@@ -287,8 +287,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     }
   end
 
-  def build_split_pipeline!(prefix_artifact, %Tail{} = tail, backend) do
+  def build_split_pipeline!(prefix_artifact, %Tail{} = tail, backend, opts \\ []) do
     spec = prefix_artifact.generation.spec
+    bypass_layers = Keyword.get(opts, :bypass_layers, [])
 
     if tail.layer_indices !=
          Enum.to_list((prefix_artifact.prefix.last_layer + 1)..(spec.num_blocks - 1)) do
@@ -297,7 +298,13 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
 
     cached_tail_model = Model.cached_decoder_tail_model(spec, tail.layer_indices)
     {_init_fun, cached_tail_predict_fun} = Axon.build(cached_tail_model, build_opts(backend))
-    generation_model = Bumblebee.build_model(spec)
+
+    generation_model =
+      case bypass_layers do
+        [] -> Bumblebee.build_model(spec)
+        layers -> Model.cached_decoder_bypass_model(spec, layers)
+      end
+
     {_init_fun, generation_predict_fun} = Axon.build(generation_model, build_opts(backend))
     generation_params = merge_model_states(prefix_artifact.prefix.params, tail.params)
 

@@ -269,6 +269,34 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     Axon.container(%{logits: logits, cache: cache})
   end
 
+  @doc false
+  def cached_decoder_bypass_model(%__MODULE__{} = spec, bypass_layers) do
+    bypass_layers = MapSet.new(bypass_layers)
+    inputs = inputs(spec)
+    hidden_state = input_hidden_state(inputs, spec)
+
+    {attention_mask, cache} =
+      Layers.Decoder.cached_attention_mask(inputs["attention_mask"], inputs["cache"])
+
+    offset = Layers.Decoder.get_cache_offset(cache)
+
+    outputs =
+      apply_cached_decoder_blocks(
+        hidden_state,
+        inputs["position_ids"],
+        attention_mask,
+        cache,
+        offset,
+        spec,
+        Enum.to_list(0..(spec.num_blocks - 1)),
+        bypass_layers
+      )
+
+    cache = Layers.Decoder.update_cache_offset(outputs.cache, outputs.hidden_state)
+    logits = output_logits(outputs.hidden_state, spec)
+    Axon.container(%{logits: logits, cache: cache})
+  end
+
   defp apply_decoder_blocks(hidden_state, position_ids, attention_mask, spec, layer_indices) do
     Enum.reduce(layer_indices, hidden_state, fn layer_index, hidden_state ->
       block_cache =
@@ -300,28 +328,33 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
          cache,
          offset,
          spec,
-         layer_indices
+         layer_indices,
+         bypass_layers \\ MapSet.new()
        ) do
     Enum.reduce(layer_indices, %{hidden_state: hidden_state, cache: cache}, fn layer_index,
                                                                                state ->
-      block_cache = Layers.Decoder.get_block_cache(state.cache, layer_index)
+      if MapSet.member?(bypass_layers, layer_index) do
+        state
+      else
+        block_cache = Layers.Decoder.get_block_cache(state.cache, layer_index)
 
-      {hidden_state, block_cache} =
-        decoder_block(
-          state.hidden_state,
-          position_ids,
-          attention_mask,
-          block_cache,
-          offset,
-          Enum.fetch!(layer_types(spec), layer_index),
-          spec,
-          name: "decoder.blocks.#{layer_index}"
-        )
+        {hidden_state, block_cache} =
+          decoder_block(
+            state.hidden_state,
+            position_ids,
+            attention_mask,
+            block_cache,
+            offset,
+            Enum.fetch!(layer_types(spec), layer_index),
+            spec,
+            name: "decoder.blocks.#{layer_index}"
+          )
 
-      %{
-        hidden_state: hidden_state,
-        cache: Layers.Decoder.put_block_cache(state.cache, layer_index, block_cache)
-      }
+        %{
+          hidden_state: hidden_state,
+          cache: Layers.Decoder.put_block_cache(state.cache, layer_index, block_cache)
+        }
+      end
     end)
   end
 

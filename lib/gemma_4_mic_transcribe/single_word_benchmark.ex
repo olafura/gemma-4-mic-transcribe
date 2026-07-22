@@ -21,9 +21,11 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     seconds: :float,
     max_new_tokens: :integer,
     execution: :string,
+    bypass_layers: :string,
     prompt: :string,
     output: :string,
     baseline: :string,
+    allow_regression: :boolean,
     help: :boolean
   ]
 
@@ -98,6 +100,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         seconds: Keyword.get(opts, :seconds, 3.0),
         max_new_tokens: Keyword.get(opts, :max_new_tokens, 8),
         execution: parse_execution(Keyword.get(opts, :execution, "composed")),
+        bypass_layers: parse_layers(Keyword.get(opts, :bypass_layers)),
         prompt:
           Keyword.get(
             opts,
@@ -105,7 +108,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
             "Transcribe the single spoken word exactly as spoken. Use the speaker's language and native writing system. Spell out numbers as words. Return only the word."
           ),
         output: opts[:output],
-        baseline: opts[:baseline]
+        baseline: opts[:baseline],
+        allow_regression: Keyword.get(opts, :allow_regression, false)
       }
 
       with :ok <- required_directory(values.corpus, "--corpus"),
@@ -118,6 +122,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
            :ok <- positive_integer(values.max_new_tokens, "--max-new-tokens"),
            :ok <- positive_number(values.seconds, "--seconds"),
            :ok <- valid_execution(values.execution),
+           :ok <- valid_layers(values.bypass_layers),
+           :ok <- valid_bypass_execution(values.bypass_layers, values.execution),
            :ok <- ffmpeg_available() do
         {:ok, values}
       end
@@ -145,7 +151,10 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         fn -> DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend) end
       )
 
-    pipeline = DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend)
+    pipeline =
+      DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend,
+        bypass_layers: opts.bypass_layers
+      )
 
     IO.puts(
       Jason.encode!(%{
@@ -153,6 +162,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         samples: length(cases),
         languages: cases |> Enum.map(& &1.language) |> Enum.uniq() |> length(),
         execution: opts.execution,
+        bypass_layers: opts.bypass_layers,
         seconds: opts.seconds
       })
     )
@@ -180,6 +190,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       seconds: opts.seconds,
       max_new_tokens: opts.max_new_tokens,
       execution: opts.execution,
+      bypass_layers: opts.bypass_layers,
       prompt: opts.prompt,
       prefix_artifact: Path.expand(opts.prefix_artifact),
       tail_artifact: Path.expand(opts.tail_artifact),
@@ -199,6 +210,13 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         output: Path.expand(opts.output)
       })
     )
+
+    if comparison && not opts.allow_regression && regression?(comparison) do
+      abort(
+        "candidate regressed: lost #{comparison.lost_exact_matches} exact matches, " <>
+          "CER delta #{Float.round(comparison.character_error_rate_delta, 4)}"
+      )
+    end
   end
 
   defp run_case!(pipeline, sample, opts) do
@@ -315,7 +333,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
 
   defp compare_baseline(_results, _summary, nil), do: nil
 
-  defp compare_baseline(results, summary, path) do
+  defp compare_baseline(results, _summary, path) do
     baseline = path |> File.read!() |> Jason.decode!()
     baseline_cases = Map.new(baseline["cases"], &{&1["key"], &1})
 
@@ -338,18 +356,41 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     gained =
       Enum.count(paired, fn {before, candidate} -> not before["exact"] && candidate.exact end)
 
-    baseline_summary = baseline["summary"]
+    paired_count = length(paired)
+    baseline_exact = Enum.count(paired, fn {before, _candidate} -> before["exact"] end)
+    candidate_exact = Enum.count(paired, fn {_before, candidate} -> candidate.exact end)
+
+    reference_characters =
+      Enum.sum(
+        Enum.map(paired, fn {before, _candidate} ->
+          before["normalized_expected"] |> String.graphemes() |> length()
+        end)
+      )
+
+    baseline_edits =
+      Enum.sum(Enum.map(paired, fn {before, _candidate} -> before["edit_distance"] end))
+
+    candidate_edits =
+      Enum.sum(Enum.map(paired, fn {_before, candidate} -> candidate.edit_distance end))
+
+    baseline_latency =
+      mean(Enum.map(paired, fn {before, _candidate} -> before["elapsed_ms"] end))
+
+    candidate_latency =
+      mean(Enum.map(paired, fn {_before, candidate} -> candidate.elapsed_ms end))
 
     %{
-      paired_samples: length(paired),
+      paired_samples: paired_count,
       changed_outputs: changed,
       lost_exact_matches: lost,
       gained_exact_matches: gained,
-      exact_accuracy_delta: summary.exact_accuracy - baseline_summary["exact_accuracy"],
+      exact_accuracy_delta:
+        ratio(candidate_exact, paired_count) - ratio(baseline_exact, paired_count),
       character_error_rate_delta:
-        summary.character_error_rate - baseline_summary["character_error_rate"],
-      mean_latency_delta_ms: summary.mean_latency_ms - baseline_summary["mean_latency_ms"],
-      speedup: ratio(baseline_summary["mean_latency_ms"], summary.mean_latency_ms)
+        ratio(candidate_edits, reference_characters) -
+          ratio(baseline_edits, reference_characters),
+      mean_latency_delta_ms: candidate_latency - baseline_latency,
+      speedup: ratio(baseline_latency, candidate_latency)
     }
   end
 
@@ -366,6 +407,10 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
          exact_accuracy: ratio(exact, length(language_cases))
        }}
     end)
+  end
+
+  defp regression?(comparison) do
+    comparison.lost_exact_matches > 0 or comparison.character_error_rate_delta > 0.0
   end
 
   defp edit_distance(expected, actual) do
@@ -416,6 +461,19 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
   defp parse_execution("split"), do: :split
   defp parse_execution(value), do: {:invalid, value}
 
+  defp parse_layers(nil), do: []
+
+  defp parse_layers(value) do
+    value
+    |> String.split(",", trim: true)
+    |> Enum.map(fn layer ->
+      case Integer.parse(layer) do
+        {layer, ""} -> layer
+        _other -> {:invalid, layer}
+      end
+    end)
+  end
+
   defp required_directory(nil, option), do: {:error, "#{option} PATH is required"}
 
   defp required_directory(path, _option) when is_binary(path) and path != "" do
@@ -443,6 +501,20 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
   defp valid_execution({:invalid, value}),
     do: {:error, "--execution must be composed or split, got: #{inspect(value)}"}
 
+  defp valid_layers(layers) do
+    if Enum.all?(layers, &is_integer/1) and Enum.all?(layers, &(&1 in 0..47)) do
+      :ok
+    else
+      {:error, "--bypass-layers must contain comma-separated indices in 0..47"}
+    end
+  end
+
+  defp valid_bypass_execution([], _execution), do: :ok
+  defp valid_bypass_execution(_layers, :composed), do: :ok
+
+  defp valid_bypass_execution(_layers, :split),
+    do: {:error, "--bypass-layers requires --execution composed"}
+
   defp ffmpeg_available do
     case System.find_executable("ffmpeg") do
       nil -> {:error, "ffmpeg is required to decode corpus MP3 files"}
@@ -464,6 +536,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       --tail-artifact PATH      independently saved decoder tail
       --output PATH             JSON result and future comparison baseline
       --baseline PATH           optional prior JSON result to compare
+      --allow-regression        report regressions without a non-zero exit
       --backend BACKEND         default exla:rocm
       --split NAME              TSV split, default test
       --languages LIST          comma-separated language codes; default all
@@ -472,6 +545,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       --seconds SECONDS         pad/truncate every clip to this shape, default 3
       --max-new-tokens COUNT    default 8
       --execution MODE          composed (default) or split
+      --bypass-layers LIST      decoder layers replaced by identity, for example 11
       --prompt TEXT             fixed transcription instruction for every clip
     """
   end

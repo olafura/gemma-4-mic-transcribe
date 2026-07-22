@@ -420,7 +420,16 @@ covered 33 languages and scored 5/33 normalized exact matches with 0.742 CER;
 its mean warm processing time was 1.251 seconds per three-second clip. The low
 absolute exact score reflects the model's frequent transliteration of less
 common native scripts, so topology experiments should guard both exact-match
-transitions and aggregate CER.
+transitions and aggregate CER. A baseline comparison exits non-zero when it
+loses any exact match or worsens CER; pass `--allow-regression` only for an
+exploratory run whose rejected result still needs to be recorded.
+
+Initial identity-bypass smoke tests rejected every untrained layer deletion:
+layer 11 lost all five known-correct words, layers 24 and 25 each lost the
+Catalan accent, and layers 36 and 42 each lost two of five exact matches. No
+shortened graph is selected by default. The `--bypass-layers` option remains an
+experimental mechanism for evaluating a distilled or fine-tuned shortened
+checkpoint against the same gate.
 
 ## Splitting raw-audio inference
 
