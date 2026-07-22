@@ -122,6 +122,34 @@ The descriptor treats the pre/post RMS norms and residual connection as the
 FFN's surrounding context. They are intentionally not included in the three
 weights needed to run the extracted FFN itself.
 
+## Probing layer behavior
+
+An already-loaded runtime can run one instrumented prefill pass over the same
+input used for generation. The probe copies only selected token positions out
+of the compiled graph:
+
+```elixir
+{:ok, report} =
+  Gemma4MicTranscribe.Gemma4Unified.Runtime.probe(runtime, input,
+    layers: [0, 5, 11, runtime.model_info.spec.num_blocks - 1],
+    positions: [:audio_begin, :first_audio, :last_audio, :audio_end, :last],
+    capture: [:attention, :ffn, :per_layer_input, :hidden_state],
+    top_k_logits: 10
+  )
+```
+
+`:attention` and `:ffn` are the normalized contributions added to the residual
+stream, not raw attention probabilities. `:per_layer_input` captures E4B's
+actual gated and projected per-layer embedding contribution; it is reported as
+unavailable on 12B. For each position the report includes norm, RMS, maximum
+absolute value, contribution-to-hidden-state norm ratio, adjacent captured-layer
+cosine similarity, and optional logit-lens candidates.
+
+Use `include_activations: true` to retain the selected hidden vectors. The first
+call for a new combination of input shape and probe outputs compiles an
+instrumented graph, and `top_k_logits` adds a vocabulary projection for every
+captured layer, so start with a small layer set.
+
 ## Usage
 
 List known model variants and their required runtimes:

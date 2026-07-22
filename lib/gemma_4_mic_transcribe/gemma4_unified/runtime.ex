@@ -7,6 +7,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
   alias Gemma4MicTranscribe.Gemma4Unified.ChannelState
   alias Gemma4MicTranscribe.Gemma4Unified.Input
+  alias Gemma4MicTranscribe.Gemma4.LayerProbe
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Gemma4MicTranscribe.Gemma4Unified.Prompt
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
@@ -721,6 +722,52 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         |> Transcript.decode(token_ids)
 
       {:ok, transcript}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  @doc """
+  Runs a decoder-layer activation probe over the same prepared input accepted
+  by `generate/3`.
+
+  This performs one prefill-shaped forward pass through an instrumented Axon
+  graph. It does not generate tokens. See `Gemma4MicTranscribe.Gemma4.LayerProbe`
+  for supported layers, positions, capture points, and logit-lens options.
+  """
+  def probe(%__MODULE__{} = runtime, input, opts \\ []) do
+    input = maybe_rebuild_for_e4b(runtime, input)
+
+    with {:ok, input_ids} <- tokenize(runtime.tokenizer, input.prompt),
+         {:ok, audio_tokens} <-
+           validate_audio_tokens(runtime, input_ids, input.audio.token_count) do
+      {input_features, input_features_mask} =
+        prepare_audio_tensors(runtime, input.audio.input_features, input.audio.attention_mask)
+
+      actual_audio_tokens = input.audio.attention_mask |> Nx.sum() |> Nx.to_number()
+
+      masks =
+        prefill_masks(
+          length(input_ids),
+          audio_tokens.audio_start_index,
+          actual_audio_tokens,
+          audio_tokens.audio
+        )
+
+      backend = runtime_backend(runtime)
+
+      inputs =
+        Nx.with_default_backend(backend, fn ->
+          %{
+            "input_ids" => Nx.tensor([input_ids], type: :s64),
+            "attention_mask" => Nx.tensor([masks.attention_mask], type: :s64),
+            "position_ids" => Nx.tensor([masks.position_ids], type: :s64),
+            "input_features" => Nx.new_axis(input_features, 0),
+            "input_features_mask" => Nx.new_axis(input_features_mask, 0)
+          }
+        end)
+
+      LayerProbe.run(runtime, inputs, opts)
     end
   rescue
     exception -> {:error, Exception.message(exception)}
