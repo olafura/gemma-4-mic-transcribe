@@ -93,7 +93,10 @@ __global__ void q4_gemv_kernel(const int32_t *__restrict__ packed,
 // unpacks each weight once into registers and reuses it across a tile of
 // tokens, keeping weight traffic proportional to seq / kSeqTile.
 constexpr int kGemmCols = 64;
-constexpr int kSeqTile = 32;
+constexpr int kSeqTile = 16;
+#if defined(__gfx1151__)
+using bf16x2_bits = short __attribute__((ext_vector_type(2)));
+#endif
 
 __global__ void q4_gemm_kernel(const int32_t *__restrict__ packed,
                                const __hip_bfloat16 *__restrict__ scales,
@@ -117,12 +120,28 @@ __global__ void q4_gemm_kernel(const int32_t *__restrict__ packed,
         __bfloat162float(scales[(word / words_per_group) * n + col]);
     const int k_base = word * kNibblesPerWord;
 
+#if defined(__gfx1151__)
+    // gfx1151 can accumulate two bf16 products per instruction. Keeping the
+    // dequantized weights in bf16 also matches the model's weight dtype.
+    bf16x2_bits weights[kNibblesPerWord / 2];
+#pragma unroll
+    for (int pair = 0; pair < kNibblesPerWord / 2; ++pair) {
+      const int low = ((packed_word >> (pair * 8)) & 0xF) - 8;
+      const int high = ((packed_word >> (pair * 8 + 4)) & 0xF) - 8;
+      const __hip_bfloat162 values(__float2bfloat16(low * scale),
+                                   __float2bfloat16(high * scale));
+      const __hip_bfloat162_raw raw = values;
+      weights[pair] = {static_cast<short>(raw.x),
+                       static_cast<short>(raw.y)};
+    }
+#else
     float weights[kNibblesPerWord];
 #pragma unroll
     for (int nib = 0; nib < kNibblesPerWord; ++nib) {
       weights[nib] =
           static_cast<float>(((packed_word >> (nib * 4)) & 0xF) - 8) * scale;
     }
+#endif
 
 #pragma unroll
     for (int t = 0; t < kSeqTile; ++t) {
@@ -131,9 +150,18 @@ __global__ void q4_gemm_kernel(const int32_t *__restrict__ packed,
         const __hip_bfloat16 *row = x + static_cast<size_t>(token) * k + k_base;
         float sum = 0.0f;
 #pragma unroll
+#if defined(__gfx1151__)
+        for (int pair = 0; pair < kNibblesPerWord / 2; ++pair) {
+          const bf16x2_bits values =
+              *reinterpret_cast<const bf16x2_bits *>(row + pair * 2);
+          sum = __builtin_amdgcn_fdot2_f32_bf16(weights[pair], values, sum,
+                                                 false);
+        }
+#else
         for (int nib = 0; nib < kNibblesPerWord; ++nib) {
           sum += weights[nib] * __bfloat162float(row[nib]);
         }
+#endif
         acc[t] += sum;
       }
     }

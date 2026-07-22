@@ -373,6 +373,14 @@ resident packed runtime at 2.020–2.054 seconds. A one-token run measured about
 ms/token. Artifact and checkpoint load times are intentionally excluded because
 they occur before the long-running service accepts work.
 
+The gfx1151 ROCm prefill kernel now uses the GPU's packed BF16 dot-product
+instruction and a 16-token reuse tile. On the same 12B journal input, warm
+processing fell to 1.415–1.429 seconds (about 30% faster) with identical token
+ids. The seeded 33-language single-word gate also produced zero changed outputs
+and identical CER while mean processing fell from 1.251 seconds to 0.675
+seconds, a 1.85x speedup. Other ROCm architectures retain the portable scalar
+dot-product loop.
+
 Use `--execution split` when an observable runtime boundary is required. It
 dispatches the prefix and tail as separate XLA executables and measured
 2.12–2.16 seconds warm. The default `--execution composed` avoids that dispatch
