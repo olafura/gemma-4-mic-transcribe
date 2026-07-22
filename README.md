@@ -278,6 +278,67 @@ On the Radeon 8060S, a forced two-token 12B run produced `"."` with token ids
 second, compiled run took 483 ms. The escript emits JSON records so later runs
 can be compared without editing inline Elixir commands.
 
+### Frankenstein layer transplants
+
+A pipeline can install one compatible decoder layer's weights into another
+slot without changing or recompiling the graph:
+
+```elixir
+frankenstein =
+  Gemma4MicTranscribe.Gemma4.DecoderPipeline.transplant_layer!(pipeline, 44, 45)
+```
+
+Source and target must have the same attention type and identical parameter
+layouts. The target retains its position, cache slot, and residual path; all of
+its learned parameter tensors come from the source. Both `execution: :composed`
+and `execution: :split` use the transplanted weights.
+
+The benchmark compares baseline and mutant in one loaded, compiled process:
+
+```bash
+./decoder_pipeline_bench --backend exla:rocm --wav journal1.wav \
+  --max-new-tokens 8 --transplant 44:45 --runs 2
+```
+
+For the first two seconds of `journal1.wav`, baseline layer 45 produced `"."`
+with `[106, 236761]`; replacing it with layer 44 deterministically produced
+`"C'erl'o'er"` with
+`[236780, 236789, 497, 236752, 236789, 236748, 236789, 497]`. This does not by
+itself identify an audio-specific layer, but it shows that adjacent
+shape-compatible late layers are not functionally interchangeable.
+
+Extraction and execution can also happen in separate processes. The extractor
+loads the source checkpoint once and writes a self-contained directory with the
+recomposed safetensors, model/generation manifest, and tokenizer files:
+
+```bash
+./decoder_pipeline_bench extract \
+  --artifact artifacts/gemma4-12b-44-to-45 \
+  --backend torchx:cpu \
+  --tail-start 45 \
+  --transplant 44:45
+```
+
+The runner loads only that directory and compiles it for GPU XLA; it does not
+load the Hugging Face model checkpoint or donor runtime:
+
+```bash
+./decoder_pipeline_bench run \
+  --artifact artifacts/gemma4-12b-44-to-45 \
+  --backend exla:rocm \
+  --wav journal1.wav \
+  --max-new-tokens 8 \
+  --runs 4
+```
+
+The real 12B artifact is 25 GB. It took 48.1 seconds to write and 6.4 seconds
+to load. In a fresh process it deterministically produced `"C'erl's/e"` with
+`[236780, 236789, 497, 236752, 236789, 236751, 236786, 236744]`; cold compilation
+and generation took 12.7 seconds, then eight-token warm runs took about 5.48
+seconds. The difference from the in-memory mutant begins after their shared
+five-token prefix and remains an open numerical/loading-path question. Artifact
+manifests use Erlang terms and must only be loaded from trusted sources.
+
 ## Usage
 
 List known model variants and their required runtimes:

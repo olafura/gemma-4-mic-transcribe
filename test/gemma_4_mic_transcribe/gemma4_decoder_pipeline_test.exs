@@ -2,6 +2,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
   use ExUnit.Case, async: true
 
   alias Gemma4MicTranscribe.Gemma4.DecoderPipeline
+  alias Gemma4MicTranscribe.Gemma4.DecoderPipelineArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.Model
 
   test "splits prepared-input inference at a replaceable decoder boundary" do
@@ -75,6 +76,90 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
              DecoderPipeline.generate_prepared(pipeline, inputs, execution: :unknown)
   end
 
+  test "transplants compatible layer weights into a compiled pipeline" do
+    {runtime, inputs} = runtime(nil, num_blocks: 3)
+    pipeline = DecoderPipeline.extract!(runtime, [1, 2])
+    source_name = "decoder.blocks.0.ffn.gate"
+    target_name = "decoder.blocks.1.ffn.gate"
+    source_kernel = pipeline.generation_params.data[source_name]["kernel"]
+    original_target = pipeline.generation_params.data[target_name]["kernel"]
+
+    refute Nx.to_binary(source_kernel) == Nx.to_binary(original_target)
+    assert {:ok, frankenstein} = DecoderPipeline.transplant_layer(pipeline, 0, 1)
+
+    transplanted = frankenstein.generation_params.data[target_name]["kernel"]
+    standalone_tail = frankenstein.tail.params.data[target_name]["kernel"]
+
+    assert Nx.to_binary(transplanted) == Nx.to_binary(source_kernel)
+    assert Nx.to_binary(standalone_tail) == Nx.to_binary(source_kernel)
+    assert frankenstein.generation_predict_fun == pipeline.generation_predict_fun
+
+    assert {:ok, composed_ids} =
+             DecoderPipeline.generate_prepared(frankenstein, inputs,
+               max_new_tokens: 2,
+               min_new_tokens: 3,
+               execution: :composed
+             )
+
+    assert {:ok, split_ids} =
+             DecoderPipeline.generate_prepared(frankenstein, inputs,
+               max_new_tokens: 2,
+               min_new_tokens: 3,
+               execution: :split
+             )
+
+    assert length(composed_ids) == 2
+    assert split_ids == composed_ids
+  end
+
+  test "rejects transplants between different attention types" do
+    {runtime, _inputs} = runtime()
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+    spec = %{pipeline.generation.spec | layer_types: [:sliding_attention, :full_attention]}
+    pipeline = %{pipeline | generation: %{pipeline.generation | spec: spec}}
+
+    assert {:error, message} = DecoderPipeline.transplant_layer(pipeline, 0, 1)
+    assert message =~ "cannot transplant sliding_attention layer 0"
+  end
+
+  test "saves and reloads a transplanted pipeline independently" do
+    {runtime, inputs} = runtime(nil, num_blocks: 3)
+
+    pipeline =
+      runtime
+      |> DecoderPipeline.extract!([1, 2])
+      |> DecoderPipeline.transplant_layer!(0, 1)
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "gemma-decoder-artifact-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(path) end)
+    DecoderPipelineArtifact.save!(pipeline, path, transplants: [%{source: 0, target: 1}])
+
+    backend = {Torchx.Backend, device: :cpu}
+    artifact = DecoderPipelineArtifact.load!(path, backend, load_tokenizer: false)
+    reloaded = DecoderPipelineArtifact.build_pipeline!(artifact, backend)
+
+    target_name = "decoder.blocks.1.ffn.gate"
+    source_name = "decoder.blocks.0.ffn.gate"
+
+    assert Nx.to_binary(reloaded.generation_params.data[target_name]["kernel"]) ==
+             Nx.to_binary(reloaded.generation_params.data[source_name]["kernel"])
+
+    assert artifact.manifest.transplants == [%{source: 0, target: 1}]
+
+    assert {:ok, token_ids} =
+             DecoderPipeline.generate_prepared(reloaded, inputs,
+               max_new_tokens: 2,
+               min_new_tokens: 3
+             )
+
+    assert length(token_ids) == 2
+  end
+
   test "compiles the composed generation graph with XLA" do
     assert {:ok, _started} = Application.ensure_all_started(:exla)
     {runtime, inputs} = runtime({EXLA.Backend, client: :host})
@@ -89,28 +174,35 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
     assert length(token_ids) == 2
   end
 
-  defp runtime(backend \\ nil)
+  defp runtime(backend \\ nil, opts \\ [])
 
-  defp runtime(nil), do: build_runtime(nil)
+  defp runtime(nil, opts), do: build_runtime(nil, opts)
 
-  defp runtime(backend) do
-    Nx.with_default_backend(backend, fn -> build_runtime(backend) end)
+  defp runtime(backend, opts) do
+    Nx.with_default_backend(backend, fn -> build_runtime(backend, opts) end)
   end
 
-  defp build_runtime(backend) do
+  defp build_runtime(backend, opts) do
+    num_blocks = Keyword.get(opts, :num_blocks, 2)
+
+    layer_types =
+      if num_blocks == 3,
+        do: [:sliding_attention, :sliding_attention, :full_attention],
+        else: [:sliding_attention, :full_attention]
+
     spec =
       Bumblebee.configure(Model,
         vocab_size: 32,
         max_positions: 16,
         hidden_size: 8,
         intermediate_size: 16,
-        num_blocks: 2,
+        num_blocks: num_blocks,
         num_attention_heads: 2,
         num_key_value_heads: 1,
         num_global_key_value_heads: 1,
         attention_head_size: 4,
         global_attention_head_size: 4,
-        layer_types: [:sliding_attention, :full_attention],
+        layer_types: layer_types,
         attention_window_size: 4,
         audio_embed_dim: 4,
         audio_token_id: 7,

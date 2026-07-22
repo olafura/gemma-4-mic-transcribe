@@ -20,3 +20,4 @@ __pycache__/
 # Artifacts
 *.log
 /decoder_pipeline_bench
+/artifacts/

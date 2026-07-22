@@ -128,6 +128,58 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     end
   end
 
+  @doc """
+  Replaces one decoder slot with the weights from another compatible layer.
+
+  The graph and KV-cache slot remain those of `target_layer`; only its parameter
+  tensors are replaced. Source and target must use the same attention type and
+  expose identical parameter names, shapes, and types. This makes the returned
+  pipeline a shape-safe "Frankenstein" model without recompiling its graph.
+  """
+  def transplant_layer(%__MODULE__{} = pipeline, source_layer, target_layer) do
+    spec = pipeline.generation.spec
+
+    with :ok <- validate_layer_index(source_layer, spec.num_blocks, "source"),
+         :ok <- validate_layer_index(target_layer, spec.num_blocks, "target"),
+         :ok <- validate_layer_types(spec, source_layer, target_layer),
+         {:ok, replacements} <-
+           layer_replacements(pipeline.generation_params.data, source_layer, target_layer) do
+      generation_params = replace_params(pipeline.generation_params, replacements)
+
+      prefix =
+        if target_layer <= pipeline.prefix.last_layer do
+          %{pipeline.prefix | params: replace_params(pipeline.prefix.params, replacements)}
+        else
+          pipeline.prefix
+        end
+
+      tail =
+        if target_layer in pipeline.tail.layer_indices do
+          %{pipeline.tail | params: replace_params(pipeline.tail.params, replacements)}
+        else
+          pipeline.tail
+        end
+
+      {:ok,
+       %{
+         pipeline
+         | prefix: prefix,
+           tail: tail,
+           generation_params: generation_params
+       }}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  @doc "Like `transplant_layer/3`, but raises when the layers are incompatible."
+  def transplant_layer!(%__MODULE__{} = pipeline, source_layer, target_layer) do
+    case transplant_layer(pipeline, source_layer, target_layer) do
+      {:ok, pipeline} -> pipeline
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
   @doc "Prepares a unified input, runs the split pipeline, and returns next-token candidates."
   def top_k(%__MODULE__{} = pipeline, input, k) do
     with {:ok, prepared} <- Runtime.prepare_input(pipeline.input_context, input) do
@@ -365,6 +417,90 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
   defp cache_length(prompt_length, max_new_tokens) do
     needed = prompt_length + max_new_tokens
     div(needed + @cache_length_step - 1, @cache_length_step) * @cache_length_step
+  end
+
+  defp validate_layer_index(layer, count, _label)
+       when is_integer(layer) and layer >= 0 and layer < count,
+       do: :ok
+
+  defp validate_layer_index(layer, count, label),
+    do: {:error, "#{label} layer must be in 0..#{count - 1}, got: #{inspect(layer)}"}
+
+  defp validate_layer_types(spec, source_layer, target_layer) do
+    source_type = layer_type(spec, source_layer)
+    target_type = layer_type(spec, target_layer)
+
+    if source_type == target_type do
+      :ok
+    else
+      {:error,
+       "cannot transplant #{source_type} layer #{source_layer} into #{target_type} layer #{target_layer}"}
+    end
+  end
+
+  defp layer_type(spec, layer) do
+    spec.layer_types
+    |> Kernel.||(default_layer_types(spec.num_blocks))
+    |> Enum.fetch!(layer)
+  end
+
+  defp default_layer_types(count) do
+    Enum.map(0..(count - 1), fn index ->
+      if rem(index + 1, 6) == 0, do: :full_attention, else: :sliding_attention
+    end)
+  end
+
+  defp layer_replacements(data, source_layer, target_layer) do
+    source_prefix = "decoder.blocks.#{source_layer}."
+    target_prefix = "decoder.blocks.#{target_layer}."
+
+    replacements =
+      data
+      |> Enum.filter(fn {name, _params} -> String.starts_with?(name, source_prefix) end)
+      |> Map.new(fn {name, params} ->
+        suffix = String.replace_prefix(name, source_prefix, "")
+        {target_prefix <> suffix, params}
+      end)
+
+    target = Map.filter(data, fn {name, _params} -> String.starts_with?(name, target_prefix) end)
+
+    cond do
+      map_size(replacements) == 0 ->
+        {:error, "source layer #{source_layer} has no parameters"}
+
+      Map.keys(replacements) |> Enum.sort() != Map.keys(target) |> Enum.sort() ->
+        {:error, "layers #{source_layer} and #{target_layer} expose different parameter nodes"}
+
+      true ->
+        validate_replacement_layouts(replacements, target, source_layer, target_layer)
+    end
+  end
+
+  defp validate_replacement_layouts(replacements, target, source_layer, target_layer) do
+    mismatch =
+      Enum.find(replacements, fn {name, source_params} ->
+        parameter_layout(source_params) != parameter_layout(Map.fetch!(target, name))
+      end)
+
+    case mismatch do
+      nil ->
+        {:ok, replacements}
+
+      {name, _params} ->
+        {:error,
+         "layers #{source_layer} and #{target_layer} have incompatible parameters at #{name}"}
+    end
+  end
+
+  defp parameter_layout(params) do
+    params
+    |> Enum.map(fn {name, tensor} -> {name, Nx.shape(tensor), Nx.type(tensor)} end)
+    |> Enum.sort()
+  end
+
+  defp replace_params(%Axon.ModelState{data: data} = state, replacements) do
+    selected = Map.take(replacements, Map.keys(data))
+    %{state | data: Map.merge(data, selected)}
   end
 
   defp extract_prefix_params(%Axon.ModelState{data: data}, last_layer) do

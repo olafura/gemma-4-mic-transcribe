@@ -194,6 +194,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     exception -> {:error, Exception.message(exception)}
   end
 
+  @doc false
+  def resolve_backend(value), do: backend(value)
+
   @doc """
   Compiles and warms the generation executables for the given audio token
   buckets by running a tiny generation over silence.
