@@ -106,13 +106,22 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLITest do
                "--wav",
                "journal1.wav",
                "--max-new-tokens",
-               "16"
+               "16",
+               "--min-new-tokens",
+               "12",
+               "--bypass-ffn-layers",
+               "15,37",
+               "--bypass-phase",
+               "decode"
              ])
 
     assert opts.max_new_tokens == 16
+    assert opts.min_new_tokens == 12
     assert opts.backend == "exla:rocm"
     assert opts.prefix_artifact == prefix
     assert opts.execution == :composed
+    assert opts.bypass_ffn_layers == [15, 37]
+    assert opts.bypass_phase == :decode
 
     assert {:ok, :run_split, split_opts} =
              DecoderBlockCLI.parse([

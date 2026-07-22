@@ -47,7 +47,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     :generation_predict_fun,
     :parameter_count
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++
+              [prefill_generation_model: nil, prefill_generation_predict_fun: nil]
 
   @doc "Extracts a raw-input prefix and final decoder tail from a loaded runtime."
   def extract(runtime, tail_layers) do
@@ -337,7 +338,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         Model.init_cache(pipeline.generation.spec, 1, max_cache_length, %{})
       end)
 
-    outputs = predict_cached(pipeline, Map.put(prepared, "cache", cache), execution)
+    outputs = predict_cached(pipeline, Map.put(prepared, "cache", cache), execution, :prefill)
 
     channel_state = ChannelState.content()
     suppression_mask = suppression_mask(pipeline, channel_state)
@@ -405,7 +406,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         }
       end)
 
-    outputs = predict_cached(pipeline, prefix_inputs, execution)
+    outputs = predict_cached(pipeline, prefix_inputs, execution, :decode)
 
     suppression_mask = suppression_mask(pipeline, channel_state)
 
@@ -439,11 +440,18 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     end
   end
 
-  defp predict_cached(pipeline, inputs, :composed) do
+  defp predict_cached(pipeline, inputs, :composed, :prefill) do
+    predict_fun =
+      pipeline.prefill_generation_predict_fun || pipeline.generation_predict_fun
+
+    predict_fun.(pipeline.generation_params, inputs)
+  end
+
+  defp predict_cached(pipeline, inputs, :composed, :decode) do
     pipeline.generation_predict_fun.(pipeline.generation_params, inputs)
   end
 
-  defp predict_cached(pipeline, inputs, :split) do
+  defp predict_cached(pipeline, inputs, :split, _phase) do
     prefix_outputs = pipeline.cached_prefix_predict_fun.(pipeline.prefix.params, inputs)
 
     pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{

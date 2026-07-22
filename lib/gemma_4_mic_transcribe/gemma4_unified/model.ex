@@ -270,8 +270,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   end
 
   @doc false
-  def cached_decoder_bypass_model(%__MODULE__{} = spec, bypass_layers) do
+  def cached_decoder_bypass_model(%__MODULE__{} = spec, bypass_layers, opts \\ []) do
     bypass_layers = MapSet.new(bypass_layers)
+    bypass_ffn_layers = opts |> Keyword.get(:bypass_ffn_layers, []) |> MapSet.new()
     inputs = inputs(spec)
     hidden_state = input_hidden_state(inputs, spec)
 
@@ -289,7 +290,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
         offset,
         spec,
         Enum.to_list(0..(spec.num_blocks - 1)),
-        bypass_layers
+        bypass_layers,
+        bypass_ffn_layers
       )
 
     cache = Layers.Decoder.update_cache_offset(outputs.cache, outputs.hidden_state)
@@ -329,7 +331,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
          offset,
          spec,
          layer_indices,
-         bypass_layers \\ MapSet.new()
+         bypass_layers \\ MapSet.new(),
+         bypass_ffn_layers \\ MapSet.new()
        ) do
     Enum.reduce(layer_indices, %{hidden_state: hidden_state, cache: cache}, fn layer_index,
                                                                                state ->
@@ -347,7 +350,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             offset,
             Enum.fetch!(layer_types(spec), layer_index),
             spec,
-            name: "decoder.blocks.#{layer_index}"
+            name: "decoder.blocks.#{layer_index}",
+            bypass_ffn: MapSet.member?(bypass_ffn_layers, layer_index)
           )
 
         %{
@@ -583,28 +587,33 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       )
 
     hidden_state = Axon.add(shortcut, hidden_state)
-    shortcut = hidden_state
 
     hidden_state =
-      hidden_state
-      |> rms_norm(spec.hidden_size,
-        name: join(name, "pre_ffn_norm"),
-        epsilon: spec.layer_norm_epsilon
-      )
-      |> gated_ffn(spec.intermediate_size, spec.hidden_size, spec,
-        name: join(name, "ffn"),
-        activation: spec.activation,
-        kernel_initializer: kernel_initializer(spec)
-      )
-      |> rms_norm(spec.hidden_size,
-        name: join(name, "post_ffn_norm"),
-        epsilon: spec.layer_norm_epsilon
-      )
+      if opts[:bypass_ffn] do
+        layer_scalar(hidden_state, name: join(name, "layer_scalar"))
+      else
+        shortcut = hidden_state
 
-    hidden_state =
-      shortcut
-      |> Axon.add(hidden_state)
-      |> layer_scalar(name: join(name, "layer_scalar"))
+        hidden_state =
+          hidden_state
+          |> rms_norm(spec.hidden_size,
+            name: join(name, "pre_ffn_norm"),
+            epsilon: spec.layer_norm_epsilon
+          )
+          |> gated_ffn(spec.intermediate_size, spec.hidden_size, spec,
+            name: join(name, "ffn"),
+            activation: spec.activation,
+            kernel_initializer: kernel_initializer(spec)
+          )
+          |> rms_norm(spec.hidden_size,
+            name: join(name, "post_ffn_norm"),
+            epsilon: spec.layer_norm_epsilon
+          )
+
+        shortcut
+        |> Axon.add(hidden_state)
+        |> layer_scalar(name: join(name, "layer_scalar"))
+      end
 
     {hidden_state, block_cache}
   end

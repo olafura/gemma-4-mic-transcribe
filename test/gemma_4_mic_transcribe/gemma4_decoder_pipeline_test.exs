@@ -246,6 +246,42 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
              )
 
     assert length(bypassed_ids) == 2
+
+    ffn_bypassed =
+      DecoderBlockArtifact.build_split_pipeline!(prefix, pipeline.tail, backend,
+        bypass_ffn_layers: [0]
+      )
+
+    assert {:ok, ffn_bypassed_ids} =
+             DecoderPipeline.generate_prepared(ffn_bypassed, inputs,
+               max_new_tokens: 2,
+               min_new_tokens: 3,
+               execution: :composed
+             )
+
+    assert length(ffn_bypassed_ids) == 2
+
+    decode_ffn_bypassed =
+      DecoderBlockArtifact.build_split_pipeline!(prefix, pipeline.tail, backend,
+        bypass_ffn_layers: [0],
+        bypass_phase: :decode
+      )
+
+    assert decode_ffn_bypassed.prefill_generation_predict_fun
+
+    assert {:ok, [baseline_first]} =
+             DecoderPipeline.generate_prepared(split, inputs,
+               max_new_tokens: 1,
+               min_new_tokens: 2,
+               execution: :composed
+             )
+
+    assert {:ok, [^baseline_first]} =
+             DecoderPipeline.generate_prepared(decode_ffn_bypassed, inputs,
+               max_new_tokens: 1,
+               min_new_tokens: 2,
+               execution: :composed
+             )
   end
 
   test "preserves packed weights and scales in separate prefix and tail artifacts" do

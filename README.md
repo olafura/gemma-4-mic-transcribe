@@ -431,6 +431,34 @@ shortened graph is selected by default. The `--bypass-layers` option remains an
 experimental mechanism for evaluating a distilled or fine-tuned shortened
 checkpoint against the same gate.
 
+FFNs can be tested separately with `--bypass-ffn-layers`. Use
+`--bypass-phase decode` to run the complete graph for audio/prompt prefill and
+the shortened graph only for autoregressive token steps. This keeps the audio
+representation intact and allows the prefill KV cache to flow directly into a
+different compiled decode graph:
+
+```bash
+./single_word_bench \
+  --corpus /path/to/cv-corpus-7.0-singleword \
+  --prefix-artifact artifacts/gemma4-12b-packed-prefix-0-44 \
+  --tail-artifact artifacts/gemma4-12b-packed-tail-45-47 \
+  --baseline artifacts/single-word-packed-native-seed42.json \
+  --output artifacts/single-word-no-ffn-25-43-decode-seed42.json \
+  --bypass-ffn-layers 25,43 \
+  --bypass-phase decode
+```
+
+On the seed-42 33-language gate, decode-only FFN layers 25 and 43 lost no exact
+matches, improved exact matches from 5 to 6, and reduced CER from 0.742 to
+0.717. They also preserved all ten baseline tokens for the first five seconds
+of `journal1.wav`. A fixed 32-step run measured 3.830 seconds warm for the full
+graph and 3.767 seconds for the candidate: 1.7% end-to-end, or approximately
+3.1% for the repeated decode portion after subtracting their shared prefill
+cost. This is a useful experimental candidate, not a production-quality proof:
+the regression corpus has only one seeded clip per language. Skipping six FFNs
+passed that small gate but truncated the journal transcript, demonstrating why
+both checks are required.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text

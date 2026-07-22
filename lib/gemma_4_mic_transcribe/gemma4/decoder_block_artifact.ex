@@ -290,6 +290,12 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
   def build_split_pipeline!(prefix_artifact, %Tail{} = tail, backend, opts \\ []) do
     spec = prefix_artifact.generation.spec
     bypass_layers = Keyword.get(opts, :bypass_layers, [])
+    bypass_ffn_layers = Keyword.get(opts, :bypass_ffn_layers, [])
+    bypass_phase = Keyword.get(opts, :bypass_phase, :all)
+
+    unless bypass_phase in [:all, :prefill, :decode] do
+      raise ArgumentError, ":bypass_phase must be :all, :prefill, or :decode"
+    end
 
     if tail.layer_indices !=
          Enum.to_list((prefix_artifact.prefix.last_layer + 1)..(spec.num_blocks - 1)) do
@@ -299,13 +305,32 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     cached_tail_model = Model.cached_decoder_tail_model(spec, tail.layer_indices)
     {_init_fun, cached_tail_predict_fun} = Axon.build(cached_tail_model, build_opts(backend))
 
-    generation_model =
-      case bypass_layers do
-        [] -> Bumblebee.build_model(spec)
-        layers -> Model.cached_decoder_bypass_model(spec, layers)
+    baseline_model = Bumblebee.build_model(spec)
+
+    bypass_model =
+      case {bypass_layers, bypass_ffn_layers} do
+        {[], []} ->
+          baseline_model
+
+        {layers, ffn_layers} ->
+          Model.cached_decoder_bypass_model(spec, layers, bypass_ffn_layers: ffn_layers)
+      end
+
+    {prefill_generation_model, generation_model} =
+      case bypass_phase do
+        :all -> {nil, bypass_model}
+        :prefill -> {bypass_model, baseline_model}
+        :decode -> {baseline_model, bypass_model}
       end
 
     {_init_fun, generation_predict_fun} = Axon.build(generation_model, build_opts(backend))
+
+    prefill_generation_predict_fun =
+      if prefill_generation_model do
+        {_init_fun, predict_fun} = Axon.build(prefill_generation_model, build_opts(backend))
+        predict_fun
+      end
+
     generation_params = merge_model_states(prefix_artifact.prefix.params, tail.params)
 
     %DecoderPipeline{
@@ -325,6 +350,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
       generation_model: generation_model,
       generation_params: generation_params,
       generation_predict_fun: generation_predict_fun,
+      prefill_generation_model: prefill_generation_model,
+      prefill_generation_predict_fun: prefill_generation_predict_fun,
       parameter_count: prefix_artifact.prefix.parameter_count + tail.parameter_count
     }
   end

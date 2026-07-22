@@ -21,7 +21,10 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     tail_start: :integer,
     top_k: :integer,
     max_new_tokens: :integer,
+    min_new_tokens: :integer,
     execution: :string,
+    bypass_ffn_layers: :string,
+    bypass_phase: :string,
     layer: :integer,
     backend: :string,
     model_name: :string,
@@ -100,7 +103,10 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       tail_start: Keyword.get(opts, :tail_start, 45),
       top_k: Keyword.get(opts, :top_k, 10),
       max_new_tokens: Keyword.get(opts, :max_new_tokens, 32),
+      min_new_tokens: Keyword.get(opts, :min_new_tokens, 0),
       execution: parse_execution(Keyword.get(opts, :execution, "composed")),
+      bypass_ffn_layers: parse_layers(Keyword.get(opts, :bypass_ffn_layers)),
+      bypass_phase: parse_bypass_phase(Keyword.get(opts, :bypass_phase, "all")),
       layer: Keyword.get(opts, :layer, 45),
       backend: Keyword.get(opts, :backend, defaults[:backend]),
       model_name: Keyword.get(opts, :model_name, "google/gemma-4-12B-it"),
@@ -114,9 +120,14 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
          :ok <- positive_number(values.seconds, "--seconds"),
          :ok <- positive(values.top_k, "--top-k"),
          :ok <- positive(values.max_new_tokens, "--max-new-tokens"),
+         :ok <- non_negative(values.min_new_tokens, "--min-new-tokens"),
+         :ok <- valid_token_limits(values.min_new_tokens, values.max_new_tokens),
          :ok <- positive(values.sequence_length, "--sequence-length"),
          :ok <- positive(values.runs, "--runs"),
          :ok <- valid_execution(values.execution),
+         :ok <- valid_layers(values.bypass_ffn_layers),
+         :ok <- valid_bypass_phase(values.bypass_phase),
+         :ok <- valid_bypass_execution(values.bypass_ffn_layers, values.execution),
          :ok <- valid_layer(values.layer),
          :ok <- valid_run_paths(mode, values) do
       {:ok, mode, values}
@@ -317,7 +328,10 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     pipeline =
       case pipeline do
         %{prefix_artifact: prefix} ->
-          DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend)
+          DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend,
+            bypass_ffn_layers: opts.bypass_ffn_layers,
+            bypass_phase: opts.bypass_phase
+          )
 
         %DecoderPipeline{} = pipeline ->
           if tail.layer_indices != pipeline.tail.layer_indices do
@@ -346,6 +360,8 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         tail_layers: tail.layer_indices,
         backend: opts.backend,
         execution: opts.execution,
+        bypass_ffn_layers: opts.bypass_ffn_layers,
+        bypass_phase: opts.bypass_phase,
         samples: length(samples),
         runs: opts.runs
       })
@@ -356,6 +372,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         :timer.tc(fn ->
           DecoderPipeline.generate(pipeline, input,
             max_new_tokens: opts.max_new_tokens,
+            min_new_tokens: opts.min_new_tokens,
             execution: opts.execution
           )
         end)
@@ -526,6 +543,14 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   defp positive(value, _name) when is_integer(value) and value > 0, do: :ok
   defp positive(_value, name), do: {:error, "#{name} must be positive"}
 
+  defp non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
+  defp non_negative(_value, name), do: {:error, "#{name} must be non-negative"}
+
+  defp valid_token_limits(minimum, maximum) when minimum <= maximum, do: :ok
+
+  defp valid_token_limits(_minimum, _maximum),
+    do: {:error, "--min-new-tokens must not exceed --max-new-tokens"}
+
   defp positive_number(value, _name) when is_number(value) and value > 0, do: :ok
   defp positive_number(_value, name), do: {:error, "#{name} must be positive"}
 
@@ -536,10 +561,47 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   defp parse_execution("split"), do: :split
   defp parse_execution(value), do: {:invalid, value}
 
+  defp parse_layers(nil), do: []
+
+  defp parse_layers(value) do
+    value
+    |> String.split(",", trim: true)
+    |> Enum.map(fn layer ->
+      case Integer.parse(layer) do
+        {layer, ""} -> layer
+        _other -> {:invalid, layer}
+      end
+    end)
+  end
+
+  defp parse_bypass_phase("all"), do: :all
+  defp parse_bypass_phase("prefill"), do: :prefill
+  defp parse_bypass_phase("decode"), do: :decode
+  defp parse_bypass_phase(value), do: {:invalid, value}
+
   defp valid_execution(execution) when execution in [:composed, :split], do: :ok
 
   defp valid_execution({:invalid, value}),
     do: {:error, "--execution must be composed or split, got: #{inspect(value)}"}
+
+  defp valid_layers(layers) do
+    if Enum.all?(layers, &is_integer/1) and Enum.all?(layers, &(&1 in 0..47)) do
+      :ok
+    else
+      {:error, "--bypass-ffn-layers must contain comma-separated indices in 0..47"}
+    end
+  end
+
+  defp valid_bypass_phase(phase) when phase in [:all, :prefill, :decode], do: :ok
+
+  defp valid_bypass_phase({:invalid, value}),
+    do: {:error, "--bypass-phase must be all, prefill, or decode, got: #{inspect(value)}"}
+
+  defp valid_bypass_execution([], _execution), do: :ok
+  defp valid_bypass_execution(_layers, :composed), do: :ok
+
+  defp valid_bypass_execution(_layers, :split),
+    do: {:error, "--bypass-ffn-layers requires --execution composed"}
 
   defp valid_run_paths(:extract, _opts), do: :ok
   defp valid_run_paths(:extract_prefix, _opts), do: :ok
@@ -565,6 +627,9 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
 
   defp valid_run_paths(:run_split, opts) do
     cond do
+      opts.bypass_ffn_layers != [] and is_nil(opts.prefix_artifact) ->
+        {:error, "--bypass-ffn-layers requires --prefix-artifact"}
+
       opts.prefix_artifact && not File.dir?(opts.prefix_artifact) ->
         {:error, "prefix artifact directory does not exist: #{opts.prefix_artifact}"}
 
@@ -661,8 +726,11 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     and tail artifacts. --pipeline-artifact remains as a compatibility fallback.
       --prefix-artifact PATH     artifact created by extract-prefix
       --max-new-tokens COUNT     generated-token limit, default 32
+      --min-new-tokens COUNT     force this many decode steps, default 0
       --execution MODE           composed (default) fuses the loaded artifacts;
                                  split keeps the observable XLA boundary
+      --bypass-ffn-layers LIST   retain attention but remove selected FFNs
+      --bypass-phase PHASE       apply bypass to all, prefill, or decode; default all
     """
   end
 end

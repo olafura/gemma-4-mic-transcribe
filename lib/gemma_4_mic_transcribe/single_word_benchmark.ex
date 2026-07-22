@@ -22,6 +22,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     max_new_tokens: :integer,
     execution: :string,
     bypass_layers: :string,
+    bypass_ffn_layers: :string,
+    bypass_phase: :string,
     prompt: :string,
     output: :string,
     baseline: :string,
@@ -101,6 +103,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         max_new_tokens: Keyword.get(opts, :max_new_tokens, 8),
         execution: parse_execution(Keyword.get(opts, :execution, "composed")),
         bypass_layers: parse_layers(Keyword.get(opts, :bypass_layers)),
+        bypass_ffn_layers: parse_layers(Keyword.get(opts, :bypass_ffn_layers)),
+        bypass_phase: parse_bypass_phase(Keyword.get(opts, :bypass_phase, "all")),
         prompt:
           Keyword.get(
             opts,
@@ -123,7 +127,10 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
            :ok <- positive_number(values.seconds, "--seconds"),
            :ok <- valid_execution(values.execution),
            :ok <- valid_layers(values.bypass_layers),
+           :ok <- valid_layers(values.bypass_ffn_layers),
+           :ok <- valid_bypass_phase(values.bypass_phase),
            :ok <- valid_bypass_execution(values.bypass_layers, values.execution),
+           :ok <- valid_bypass_execution(values.bypass_ffn_layers, values.execution),
            :ok <- ffmpeg_available() do
         {:ok, values}
       end
@@ -153,7 +160,9 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
 
     pipeline =
       DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend,
-        bypass_layers: opts.bypass_layers
+        bypass_layers: opts.bypass_layers,
+        bypass_ffn_layers: opts.bypass_ffn_layers,
+        bypass_phase: opts.bypass_phase
       )
 
     IO.puts(
@@ -163,6 +172,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
         languages: cases |> Enum.map(& &1.language) |> Enum.uniq() |> length(),
         execution: opts.execution,
         bypass_layers: opts.bypass_layers,
+        bypass_ffn_layers: opts.bypass_ffn_layers,
+        bypass_phase: opts.bypass_phase,
         seconds: opts.seconds
       })
     )
@@ -191,6 +202,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       max_new_tokens: opts.max_new_tokens,
       execution: opts.execution,
       bypass_layers: opts.bypass_layers,
+      bypass_ffn_layers: opts.bypass_ffn_layers,
+      bypass_phase: opts.bypass_phase,
       prompt: opts.prompt,
       prefix_artifact: Path.expand(opts.prefix_artifact),
       tail_artifact: Path.expand(opts.tail_artifact),
@@ -460,6 +473,10 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
   defp parse_execution("composed"), do: :composed
   defp parse_execution("split"), do: :split
   defp parse_execution(value), do: {:invalid, value}
+  defp parse_bypass_phase("all"), do: :all
+  defp parse_bypass_phase("prefill"), do: :prefill
+  defp parse_bypass_phase("decode"), do: :decode
+  defp parse_bypass_phase(value), do: {:invalid, value}
 
   defp parse_layers(nil), do: []
 
@@ -500,6 +517,11 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
 
   defp valid_execution({:invalid, value}),
     do: {:error, "--execution must be composed or split, got: #{inspect(value)}"}
+
+  defp valid_bypass_phase(phase) when phase in [:all, :prefill, :decode], do: :ok
+
+  defp valid_bypass_phase({:invalid, value}),
+    do: {:error, "--bypass-phase must be all, prefill, or decode, got: #{inspect(value)}"}
 
   defp valid_layers(layers) do
     if Enum.all?(layers, &is_integer/1) and Enum.all?(layers, &(&1 in 0..47)) do
@@ -546,6 +568,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       --max-new-tokens COUNT    default 8
       --execution MODE          composed (default) or split
       --bypass-layers LIST      decoder layers replaced by identity, for example 11
+      --bypass-ffn-layers LIST  retain attention but remove selected FFNs
+      --bypass-phase PHASE      apply bypass to all, prefill, or decode; default all
       --prompt TEXT             fixed transcription instruction for every clip
     """
   end
