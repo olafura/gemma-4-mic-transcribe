@@ -78,17 +78,29 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLITest do
 
   test "parses cache-aware split generation with an independent tail" do
     root = Path.join(System.tmp_dir!(), "split-cli-#{System.unique_integer([:positive])}")
-    pipeline = Path.join(root, "pipeline")
+    prefix = Path.join(root, "prefix")
     tail = Path.join(root, "tail")
-    File.mkdir_p!(pipeline)
+    File.mkdir_p!(prefix)
     File.mkdir_p!(tail)
     on_exit(fn -> File.rm_rf(root) end)
+
+    assert {:ok, :extract_prefix, extract} =
+             DecoderBlockCLI.parse([
+               "extract-prefix",
+               "--artifact",
+               Path.join(root, "new-prefix"),
+               "--tail-start",
+               "45"
+             ])
+
+    assert extract.backend == "torchx:cpu"
+    assert extract.tail_start == 45
 
     assert {:ok, :run_split, opts} =
              DecoderBlockCLI.parse([
                "run-split",
-               "--pipeline-artifact",
-               pipeline,
+               "--prefix-artifact",
+               prefix,
                "--artifact",
                tail,
                "--wav",
@@ -99,5 +111,6 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLITest do
 
     assert opts.max_new_tokens == 16
     assert opts.backend == "exla:rocm"
+    assert opts.prefix_artifact == prefix
   end
 end

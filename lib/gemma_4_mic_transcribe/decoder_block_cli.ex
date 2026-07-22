@@ -12,6 +12,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
 
   @switches [
     artifact: :string,
+    prefix_artifact: :string,
     pipeline_artifact: :string,
     input: :string,
     output: :string,
@@ -37,6 +38,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       {:ok, :extract, opts} -> extract!(opts)
       {:ok, :run, opts} -> run!(opts)
       {:ok, :extract_tail, opts} -> extract_tail!(opts)
+      {:ok, :extract_prefix, opts} -> extract_prefix!(opts)
       {:ok, :run_tail, opts} -> run_tail!(opts)
       {:ok, :capture_prefix, opts} -> capture_prefix!(opts)
       {:ok, :run_split, opts} -> run_split!(opts)
@@ -49,6 +51,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       when command in [
              "extract",
              "run",
+             "extract-prefix",
              "extract-tail",
              "run-tail",
              "capture-prefix",
@@ -78,12 +81,16 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   defp parse_values(mode, opts) do
     defaults =
       case mode do
-        mode when mode in [:extract, :extract_tail] -> [backend: "torchx:cpu"]
-        _other -> [backend: "exla:rocm"]
+        mode when mode in [:extract, :extract_prefix, :extract_tail] ->
+          [backend: "torchx:cpu"]
+
+        _other ->
+          [backend: "exla:rocm"]
       end
 
     values = %{
       artifact: opts[:artifact],
+      prefix_artifact: opts[:prefix_artifact],
       pipeline_artifact: opts[:pipeline_artifact],
       input: opts[:input],
       output: opts[:output],
@@ -147,6 +154,42 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         input_size: tail.input_size,
         vocab_size: tail.vocab_size,
         parameter_count: tail.parameter_count,
+        parameter_bytes: parameter_bytes
+      })
+    )
+  end
+
+  defp extract_prefix!(opts) do
+    runtime =
+      timed!("model_load", fn ->
+        Runtime.load(
+          model_name: opts.model_name,
+          backend: opts.backend,
+          param_type: opts.param_type,
+          max_response_tokens: 1,
+          debug: opts.debug
+        )
+      end)
+
+    last_layer = runtime.model_info.spec.num_blocks - 1
+    pipeline = DecoderPipeline.extract!(runtime, opts.tail_start..last_layer)
+
+    artifact =
+      timed!("artifact_save", fn ->
+        {:ok,
+         DecoderBlockArtifact.save_prefix!(pipeline, opts.artifact,
+           tokenizer_repository: runtime.repo_id
+         )}
+      end)
+
+    parameter_bytes = File.stat!(Path.join(artifact, "parameters.safetensors")).size
+
+    IO.puts(
+      Jason.encode!(%{
+        event: "prefix_artifact",
+        artifact: artifact,
+        last_layer: pipeline.prefix.last_layer,
+        parameter_count: pipeline.prefix.parameter_count,
         parameter_bytes: parameter_bytes
       })
     )
@@ -246,9 +289,20 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     {:ok, backend} = Runtime.resolve_backend(opts.backend)
 
     pipeline =
-      timed!("pipeline_artifact_load", fn ->
-        {:ok, load_prefix_pipeline!(opts.pipeline_artifact, backend)}
-      end)
+      case opts.prefix_artifact do
+        nil ->
+          timed!("pipeline_artifact_load", fn ->
+            {:ok, load_prefix_pipeline!(opts.pipeline_artifact, backend)}
+          end)
+
+        path ->
+          prefix =
+            timed!("prefix_artifact_load", fn ->
+              {:ok, DecoderBlockArtifact.load_prefix!(path, backend)}
+            end)
+
+          %{prefix_artifact: prefix}
+      end
 
     :erlang.garbage_collect(self())
 
@@ -257,14 +311,21 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         {:ok, DecoderBlockArtifact.load_tail!(opts.artifact, backend)}
       end)
 
-    if tail.layer_indices != pipeline.tail.layer_indices do
-      abort(
-        "tail artifact layers #{inspect(tail.layer_indices)} do not match pipeline tail " <>
-          inspect(pipeline.tail.layer_indices)
-      )
-    end
+    pipeline =
+      case pipeline do
+        %{prefix_artifact: prefix} ->
+          DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend)
 
-    pipeline = %{pipeline | tail: tail}
+        %DecoderPipeline{} = pipeline ->
+          if tail.layer_indices != pipeline.tail.layer_indices do
+            abort(
+              "tail artifact layers #{inspect(tail.layer_indices)} do not match pipeline tail " <>
+                inspect(pipeline.tail.layer_indices)
+            )
+          end
+
+          %{pipeline | tail: tail}
+      end
 
     samples =
       opts.wav
@@ -276,7 +337,8 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     IO.puts(
       Jason.encode!(%{
         event: "split_ready",
-        pipeline_artifact: Path.expand(opts.pipeline_artifact),
+        prefix_artifact: opts.prefix_artifact && Path.expand(opts.prefix_artifact),
+        pipeline_artifact: opts.pipeline_artifact && Path.expand(opts.pipeline_artifact),
         tail_artifact: Path.expand(opts.artifact),
         tail_layers: tail.layer_indices,
         backend: opts.backend,
@@ -443,9 +505,15 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   end
 
   defp required_paths(:run_split, values) do
-    with :ok <- required(values.pipeline_artifact, "--pipeline-artifact PATH is required"),
-         :ok <- required(values.artifact, "--artifact PATH is required") do
-      :ok
+    cond do
+      is_nil(values.prefix_artifact) and is_nil(values.pipeline_artifact) ->
+        {:error, "--prefix-artifact PATH or --pipeline-artifact PATH is required"}
+
+      values.prefix_artifact && values.pipeline_artifact ->
+        {:error, "choose either --prefix-artifact or --pipeline-artifact"}
+
+      true ->
+        required(values.artifact, "--artifact PATH is required")
     end
   end
 
@@ -461,6 +529,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   defp valid_layer(_layer), do: {:error, "--layer must be a non-negative integer"}
 
   defp valid_run_paths(:extract, _opts), do: :ok
+  defp valid_run_paths(:extract_prefix, _opts), do: :ok
   defp valid_run_paths(:extract_tail, _opts), do: :ok
 
   defp valid_run_paths(:capture_prefix, opts) do
@@ -483,7 +552,10 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
 
   defp valid_run_paths(:run_split, opts) do
     cond do
-      not File.dir?(opts.pipeline_artifact) ->
+      opts.prefix_artifact && not File.dir?(opts.prefix_artifact) ->
+        {:error, "prefix artifact directory does not exist: #{opts.prefix_artifact}"}
+
+      opts.pipeline_artifact && not File.dir?(opts.pipeline_artifact) ->
         {:error, "pipeline artifact directory does not exist: #{opts.pipeline_artifact}"}
 
       not File.dir?(opts.artifact) ->
@@ -538,10 +610,11 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     Usage:
       decoder_block extract --artifact PATH [options]
       decoder_block run --artifact PATH [options]
+      decoder_block extract-prefix --artifact PATH [options]
       decoder_block extract-tail --artifact PATH [options]
       decoder_block run-tail --artifact PATH --input PATH [options]
       decoder_block capture-prefix --pipeline-artifact PATH --output PATH [options]
-      decoder_block run-split --pipeline-artifact PATH --artifact TAIL [options]
+      decoder_block run-split --prefix-artifact PATH --artifact TAIL [options]
 
     extract loads the source checkpoint and writes only one decoder block.
       --layer INDEX              layer to extract, default 45
@@ -561,14 +634,19 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       --tail-start INDEX         first tail layer, default 45
       --top-k COUNT              candidates returned by run-tail, default 10
 
+    extract-prefix persists embeddings, audio projection, and all layers before
+    --tail-start. Together, independently persisted prefix and tail artifacts
+    are sufficient for run-split generation.
+
     capture-prefix runs layers 0 through tail-start-1 from a complete pipeline
     artifact and saves the real audio-conditioned boundary hidden state.
       --pipeline-artifact PATH   complete pipeline artifact used only for capture
       --wav PATH                 PCM WAV input, default journal1.wav
       --seconds SECONDS          leading audio duration, default 5.0
 
-    run-split performs cache-aware generation with the prefix from a complete
-    pipeline artifact and parameters loaded from an independent tail artifact.
+    run-split performs cache-aware generation with independently loaded prefix
+    and tail artifacts. --pipeline-artifact remains as a compatibility fallback.
+      --prefix-artifact PATH     artifact created by extract-prefix
       --max-new-tokens COUNT     generated-token limit, default 32
     """
   end

@@ -2,6 +2,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
   use ExUnit.Case, async: true
 
   alias Gemma4MicTranscribe.Gemma4.DecoderPipeline
+  alias Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact
   alias Gemma4MicTranscribe.Gemma4.DecoderPipelineArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.Model
 
@@ -203,6 +204,32 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
              )
 
     assert length(token_ids) == 2
+  end
+
+  test "rebuilds cache-aware generation from separate prefix and tail components" do
+    {runtime, inputs} = runtime()
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+    path = Path.join(System.tmp_dir!(), "gemma-prefix-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(path) end)
+
+    DecoderBlockArtifact.save_prefix!(pipeline, path)
+    backend = {Torchx.Backend, device: :cpu}
+    prefix = DecoderBlockArtifact.load_prefix!(path, backend)
+    split = DecoderBlockArtifact.build_split_pipeline!(prefix, pipeline.tail, backend)
+
+    assert {:ok, expected} =
+             DecoderPipeline.generate_prepared(pipeline, inputs,
+               max_new_tokens: 2,
+               min_new_tokens: 3,
+               execution: :split
+             )
+
+    assert {:ok, ^expected} =
+             DecoderPipeline.generate_prepared(split, inputs,
+               max_new_tokens: 2,
+               min_new_tokens: 3,
+               execution: :split
+             )
   end
 
   test "compiles the composed generation graph with XLA" do

@@ -10,6 +10,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks.Extracted
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks.Tail
+  alias Gemma4MicTranscribe.Gemma4.DecoderPipeline
+  alias Gemma4MicTranscribe.Gemma4.DecoderPipeline.Prefix
   alias Gemma4MicTranscribe.Gemma4Unified.Model
   alias Bumblebee.HuggingFace.Hub
 
@@ -189,6 +191,135 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     }
   end
 
+  def save_prefix!(%DecoderPipeline{} = pipeline, path, opts \\ []) do
+    path = Path.expand(path)
+
+    if File.exists?(path) do
+      raise ArgumentError, "artifact path already exists: #{path}"
+    end
+
+    File.mkdir_p!(Path.dirname(path))
+    temporary = path <> ".tmp-#{System.unique_integer([:positive])}"
+    File.mkdir_p!(temporary)
+
+    try do
+      {tensors, parameter_paths} = flatten_parameters(pipeline.prefix.params.data)
+
+      tensors =
+        tensors
+        |> Map.put("g0", pipeline.generation.suppression_mask)
+        |> Map.put("g1", pipeline.generation.inside_channel_suppression_mask)
+        |> Map.put("g2", pipeline.generation.content_suppression_mask)
+
+      Safetensors.write!(Path.join(temporary, @parameters), tensors)
+      maybe_copy_tokenizer!(temporary, Keyword.get(opts, :tokenizer_repository))
+
+      manifest = %{
+        version: @version,
+        kind: :decoder_prefix,
+        id: "language_model.prefix.0-#{pipeline.prefix.last_layer}",
+        last_layer: pipeline.prefix.last_layer,
+        parameter_count: pipeline.prefix.parameter_count,
+        spec: pipeline.generation.spec,
+        parameter_paths: parameter_paths,
+        generation: %{
+          channel_token_ids: pipeline.generation.channel_token_ids,
+          eos_token_ids: pipeline.generation.eos_token_ids,
+          no_repeat_ngram_size: pipeline.generation.no_repeat_ngram_size,
+          suppression_mask: "g0",
+          inside_channel_suppression_mask: "g1",
+          content_suppression_mask: "g2"
+        }
+      }
+
+      File.write!(Path.join(temporary, @manifest), :erlang.term_to_binary(manifest))
+      File.rename!(temporary, path)
+      path
+    rescue
+      exception ->
+        File.rm_rf(temporary)
+        reraise exception, __STACKTRACE__
+    end
+  end
+
+  def load_prefix!(path, backend) do
+    path = Path.expand(path)
+    manifest = read_manifest!(path)
+
+    if manifest.kind != :decoder_prefix do
+      raise ArgumentError, "artifact is not a decoder prefix"
+    end
+
+    tensors = Safetensors.read!(Path.join(path, @parameters), lazy: true)
+    params = load_parameters!(tensors, manifest.parameter_paths, backend)
+    model = Model.decoder_prefix_model(manifest.spec, manifest.last_layer)
+    {_init_fun, predict_fun} = Axon.build(model, build_opts(backend))
+    cached_model = Model.cached_decoder_prefix_model(manifest.spec, manifest.last_layer)
+    {_init_fun, cached_predict_fun} = Axon.build(cached_model, build_opts(backend))
+
+    tokenizer = maybe_load_tokenizer(path)
+    generation = manifest.generation
+
+    %{
+      manifest: manifest,
+      prefix: %Prefix{
+        last_layer: manifest.last_layer,
+        parameter_count: manifest.parameter_count,
+        model: model,
+        params: params,
+        predict_fun: predict_fun,
+        backend: backend
+      },
+      cached_model: cached_model,
+      cached_predict_fun: cached_predict_fun,
+      tokenizer: tokenizer,
+      generation: %{
+        spec: manifest.spec,
+        suppression_mask: load_tensor!(tensors, generation.suppression_mask, backend),
+        inside_channel_suppression_mask:
+          load_tensor!(tensors, generation.inside_channel_suppression_mask, backend),
+        content_suppression_mask:
+          load_tensor!(tensors, generation.content_suppression_mask, backend),
+        channel_token_ids: generation.channel_token_ids,
+        eos_token_ids: generation.eos_token_ids,
+        no_repeat_ngram_size: generation.no_repeat_ngram_size
+      }
+    }
+  end
+
+  def build_split_pipeline!(prefix_artifact, %Tail{} = tail, backend) do
+    spec = prefix_artifact.generation.spec
+
+    if tail.layer_indices !=
+         Enum.to_list((prefix_artifact.prefix.last_layer + 1)..(spec.num_blocks - 1)) do
+      raise ArgumentError, "prefix and tail layers are not contiguous"
+    end
+
+    cached_tail_model = Model.cached_decoder_tail_model(spec, tail.layer_indices)
+    {_init_fun, cached_tail_predict_fun} = Axon.build(cached_tail_model, build_opts(backend))
+    empty_params = Axon.ModelState.new(%{})
+
+    %DecoderPipeline{
+      prefix: prefix_artifact.prefix,
+      tail: tail,
+      input_context: %{
+        backend: backend,
+        tokenizer: prefix_artifact.tokenizer,
+        e4b?: false,
+        model_info: %{spec: spec}
+      },
+      generation: prefix_artifact.generation,
+      cached_prefix_model: prefix_artifact.cached_model,
+      cached_prefix_predict_fun: prefix_artifact.cached_predict_fun,
+      cached_tail_model: cached_tail_model,
+      cached_tail_predict_fun: cached_tail_predict_fun,
+      generation_model: nil,
+      generation_params: empty_params,
+      generation_predict_fun: nil,
+      parameter_count: prefix_artifact.prefix.parameter_count + tail.parameter_count
+    }
+  end
+
   def load_verification!(path, backend) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
@@ -302,8 +433,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
         raise ArgumentError,
               "unsupported decoder block artifact version #{inspect(manifest.version)}"
 
-      manifest.kind not in [:decoder_block, :decoder_tail] ->
-        raise ArgumentError, "artifact is not a decoder block or tail"
+      manifest.kind not in [:decoder_block, :decoder_tail, :decoder_prefix] ->
+        raise ArgumentError, "artifact is not a decoder block, prefix, or tail"
 
       true ->
         manifest
@@ -366,6 +497,16 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     end)
   end
 
+  defp load_parameters!(tensors, parameter_paths, backend) do
+    parameter_paths
+    |> Enum.map(fn {tensor_name, [node_name, parameter_name]} ->
+      {node_name, parameter_name, load_tensor!(tensors, tensor_name, backend)}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &{elem(&1, 1), elem(&1, 2)})
+    |> Map.new(fn {node_name, parameters} -> {node_name, Map.new(parameters)} end)
+    |> Axon.ModelState.new()
+  end
+
   defp load_tensor!(tensors, name, backend) do
     tensor =
       Nx.with_default_backend(Nx.BinaryBackend, fn -> Nx.to_tensor(Map.fetch!(tensors, name)) end)
@@ -411,6 +552,15 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
         {:error, reason} -> raise "could not copy tokenizer into artifact: #{reason}"
       end
     end)
+  end
+
+  defp maybe_load_tokenizer(path) do
+    if File.dir?(Path.join(path, "tokenizer")) do
+      {:ok, tokenizer} =
+        Bumblebee.load_tokenizer({:local, Path.join(path, "tokenizer")}, type: :gemma)
+
+      tokenizer
+    end
   end
 
   defp build_opts(EXLA.Backend), do: [compiler: EXLA]

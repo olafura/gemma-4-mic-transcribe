@@ -312,8 +312,13 @@ in one orchestrating process while passing the KV cache across their graph
 boundary on every token:
 
 ```bash
+./decoder_block extract-prefix \
+  --artifact artifacts/gemma4-12b-prefix-0-44 \
+  --tail-start 45 \
+  --backend torchx:cpu
+
 ./decoder_block run-split \
-  --pipeline-artifact artifacts/gemma4-12b-baseline \
+  --prefix-artifact artifacts/gemma4-12b-prefix-0-44 \
   --artifact artifacts/gemma4-12b-tail-45-47 \
   --wav journal1.wav \
   --seconds 5 \
@@ -322,13 +327,13 @@ boundary on every token:
   --runs 2
 ```
 
-The runner drops the baseline artifact's tail parameter references before
-loading the independent tail, avoiding duplicate GPU residency. It reproduced
-the complete reference text and all nine token ids exactly through the split
-cache path: `"all cavalry today feelingly fresh the morning light"`. Cold split
-compilation plus generation took 18.3 seconds and the warm run took 7.30
-seconds. The remaining packaging step is to persist the 0–44 prefix directly,
-so the runner never needs to transiently read and discard the baseline tail.
+The dedicated prefix contains embeddings, audio projection, and layers 0–44:
+11.220 billion parameters in a 22,440,161,051-byte tensor file. The runner loads
+that prefix and the 3.39 GB tail directly; it never loads a complete-model
+artifact. It reproduced the complete reference text and all nine token ids
+exactly through the split cache path:
+`"all cavalry today feelingly fresh the morning light"`. Cold split compilation
+plus generation took 17.23 seconds and the warm run took 7.27 seconds.
 
 ## Splitting raw-audio inference
 
