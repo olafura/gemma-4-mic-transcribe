@@ -3,6 +3,7 @@ defmodule Gemma4MicTranscribe.Gemma4 do
 
   alias Gemma4MicTranscribe.Gemma4.Experts
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks
+  alias Gemma4MicTranscribe.Gemma4.DecoderPipeline
   alias Gemma4MicTranscribe.Gemma4.FFNs
 
   @doc "Lists the routed and shared experts in a Gemma 4 MoE model."
@@ -23,4 +24,9 @@ defmodule Gemma4MicTranscribe.Gemma4 do
   defdelegate extract_decoder_tail(runtime, layer_indices),
     to: DecoderBlocks,
     as: :extract_tail
+
+  @doc "Splits a unified model into a raw-input prefix and replaceable decoder tail."
+  defdelegate extract_decoder_pipeline(runtime, tail_layers),
+    to: DecoderPipeline,
+    as: :extract
 end

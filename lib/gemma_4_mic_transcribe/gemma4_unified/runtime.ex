@@ -728,14 +728,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   @doc """
-  Runs a decoder-layer activation probe over the same prepared input accepted
-  by `generate/3`.
-
-  This performs one prefill-shaped forward pass through an instrumented Axon
-  graph. It does not generate tokens. See `Gemma4MicTranscribe.Gemma4.LayerProbe`
-  for supported layers, positions, capture points, and logit-lens options.
+  Converts a unified input into the tensors consumed by the model graph.
   """
-  def probe(%__MODULE__{} = runtime, input, opts \\ []) do
+  def prepare_input(runtime, input) when is_map(runtime) do
     input = maybe_rebuild_for_e4b(runtime, input)
 
     with {:ok, input_ids} <- tokenize(runtime.tokenizer, input.prompt),
@@ -756,17 +751,31 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
       backend = runtime_backend(runtime)
 
-      inputs =
-        Nx.with_default_backend(backend, fn ->
-          %{
-            "input_ids" => Nx.tensor([input_ids], type: :s64),
-            "attention_mask" => Nx.tensor([masks.attention_mask], type: :s64),
-            "position_ids" => Nx.tensor([masks.position_ids], type: :s64),
-            "input_features" => Nx.new_axis(input_features, 0),
-            "input_features_mask" => Nx.new_axis(input_features_mask, 0)
-          }
-        end)
+      {:ok,
+       Nx.with_default_backend(backend, fn ->
+         %{
+           "input_ids" => Nx.tensor([input_ids], type: :s64),
+           "attention_mask" => Nx.tensor([masks.attention_mask], type: :s64),
+           "position_ids" => Nx.tensor([masks.position_ids], type: :s64),
+           "input_features" => Nx.new_axis(input_features, 0),
+           "input_features_mask" => Nx.new_axis(input_features_mask, 0)
+         }
+       end)}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
 
+  @doc """
+  Runs a decoder-layer activation probe over the same input accepted by
+  `generate/3`.
+
+  This performs one prefill-shaped forward pass through an instrumented Axon
+  graph. It does not generate tokens. See `Gemma4MicTranscribe.Gemma4.LayerProbe`
+  for supported layers, positions, capture points, and logit-lens options.
+  """
+  def probe(%__MODULE__{} = runtime, input, opts \\ []) do
+    with {:ok, inputs} <- prepare_input(runtime, input) do
       LayerProbe.run(runtime, inputs, opts)
     end
   rescue
@@ -1058,6 +1067,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp runtime_backend(%__MODULE__{backend: nil}), do: Nx.BinaryBackend
   defp runtime_backend(%__MODULE__{backend: backend}), do: backend
+  defp runtime_backend(%{backend: nil}), do: Nx.BinaryBackend
+  defp runtime_backend(%{backend: backend}), do: backend
   defp runtime_backend_from_backend(nil), do: Nx.BinaryBackend
   defp runtime_backend_from_backend(backend), do: backend
 

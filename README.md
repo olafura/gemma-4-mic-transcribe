@@ -228,6 +228,31 @@ the tied 262k-token vocabulary matrix accounts for roughly 2 GB of that total.
 The returned tail retains only its 43 parameter nodes, compiled graph, backend,
 and tokenizer, so the original runtime can be released afterward.
 
+## Splitting raw-audio inference
+
+The model can also be partitioned at the tail boundary. The prefix owns text
+and audio embeddings plus layers 0–44; the replaceable tail owns layers 45–47
+and the vocabulary head:
+
+```elixir
+{:ok, pipeline} =
+  Gemma4MicTranscribe.Gemma4.extract_decoder_pipeline(runtime, 45..47)
+
+# `runtime` may now be released.
+{:ok, candidates} =
+  Gemma4MicTranscribe.Gemma4.DecoderPipeline.top_k_samples(
+    pipeline,
+    samples_16khz,
+    5
+  )
+```
+
+This currently performs one raw-audio prefill and returns next-token candidates;
+it does not implement an autoregressive KV-cache loop. On the real 12B bf16
+checkpoint the prefix retains 11.220 billion parameter references (22.44 GB)
+and the tail 1.697 billion (3.39 GB). The split is therefore a swappable model
+boundary, not compression: every intervening decoder layer remains necessary.
+
 ## Usage
 
 List known model variants and their required runtimes:

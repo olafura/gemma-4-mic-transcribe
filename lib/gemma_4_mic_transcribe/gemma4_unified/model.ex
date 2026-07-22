@@ -178,6 +178,45 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     position_ids = Axon.input("position_ids", shape: {nil, nil})
     attention_mask = Axon.input("attention_mask", shape: {nil, nil})
 
+    apply_decoder_blocks(hidden_state, position_ids, attention_mask, spec, layer_indices)
+  end
+
+  @doc false
+  def decoder_prefix_model(%__MODULE__{} = spec, last_layer)
+      when is_integer(last_layer) and last_layer >= 0 and last_layer < spec.num_blocks do
+    inputs = inputs(spec)
+    input_ids = inputs["input_ids"]
+
+    audio_mask = Axon.nx(input_ids, &Nx.equal(&1, spec.audio_token_id))
+
+    llm_input_ids =
+      Axon.nx(input_ids, fn input_ids ->
+        Nx.select(Nx.equal(input_ids, spec.audio_token_id), spec.pad_token_id, input_ids)
+      end)
+
+    hidden_state =
+      llm_input_ids
+      |> embedder(spec, name: "embedder")
+      |> replace_audio_embeddings(
+        audio_embedder(inputs["input_features"], spec, name: "audio_embedder"),
+        audio_mask
+      )
+
+    apply_decoder_blocks(
+      hidden_state,
+      inputs["position_ids"],
+      inputs["attention_mask"],
+      spec,
+      Enum.to_list(0..last_layer)
+    )
+  end
+
+  def decoder_prefix_model(%__MODULE__{} = spec, last_layer) do
+    raise ArgumentError,
+          "expected a Gemma 4 prefix endpoint in 0..#{spec.num_blocks - 1}, got: #{inspect(last_layer)}"
+  end
+
+  defp apply_decoder_blocks(hidden_state, position_ids, attention_mask, spec, layer_indices) do
     Enum.reduce(layer_indices, hidden_state, fn layer_index, hidden_state ->
       block_cache =
         Axon.container(%{
