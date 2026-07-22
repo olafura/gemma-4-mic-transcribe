@@ -297,7 +297,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
 
     cached_tail_model = Model.cached_decoder_tail_model(spec, tail.layer_indices)
     {_init_fun, cached_tail_predict_fun} = Axon.build(cached_tail_model, build_opts(backend))
-    empty_params = Axon.ModelState.new(%{})
+    generation_model = Bumblebee.build_model(spec)
+    {_init_fun, generation_predict_fun} = Axon.build(generation_model, build_opts(backend))
+    generation_params = merge_model_states(prefix_artifact.prefix.params, tail.params)
 
     %DecoderPipeline{
       prefix: prefix_artifact.prefix,
@@ -313,10 +315,25 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
       cached_prefix_predict_fun: prefix_artifact.cached_predict_fun,
       cached_tail_model: cached_tail_model,
       cached_tail_predict_fun: cached_tail_predict_fun,
-      generation_model: nil,
-      generation_params: empty_params,
-      generation_predict_fun: nil,
+      generation_model: generation_model,
+      generation_params: generation_params,
+      generation_predict_fun: generation_predict_fun,
       parameter_count: prefix_artifact.prefix.parameter_count + tail.parameter_count
+    }
+  end
+
+  def install_tail!(%DecoderPipeline{} = pipeline, %Tail{} = tail) do
+    if tail.layer_indices != pipeline.tail.layer_indices do
+      raise ArgumentError,
+            "tail artifact layers #{inspect(tail.layer_indices)} do not match pipeline tail " <>
+              inspect(pipeline.tail.layer_indices)
+    end
+
+    %{
+      pipeline
+      | tail: tail,
+        generation_params: merge_model_states(pipeline.prefix.params, tail.params),
+        parameter_count: pipeline.prefix.parameter_count + tail.parameter_count
     }
   end
 
@@ -516,6 +533,15 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
       nil -> tensor
       backend -> Nx.backend_transfer(tensor, backend)
     end
+  end
+
+  defp merge_model_states(prefix, tail) do
+    data =
+      Map.merge(prefix.data, tail.data, fn _node_name, prefix_parameters, tail_parameters ->
+        Map.merge(prefix_parameters, tail_parameters)
+      end)
+
+    Axon.ModelState.new(data)
   end
 
   defp maybe_load_tensor(tensors, name, backend) do

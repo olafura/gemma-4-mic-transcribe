@@ -224,12 +224,14 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
                execution: :split
              )
 
-    assert {:ok, ^expected} =
-             DecoderPipeline.generate_prepared(split, inputs,
-               max_new_tokens: 2,
-               min_new_tokens: 3,
-               execution: :split
-             )
+    for execution <- [:composed, :split] do
+      assert {:ok, ^expected} =
+               DecoderPipeline.generate_prepared(split, inputs,
+                 max_new_tokens: 2,
+                 min_new_tokens: 3,
+                 execution: execution
+               )
+    end
   end
 
   test "preserves packed weights and scales in separate prefix and tail artifacts" do

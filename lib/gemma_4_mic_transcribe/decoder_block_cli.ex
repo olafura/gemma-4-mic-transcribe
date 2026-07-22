@@ -21,6 +21,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     tail_start: :integer,
     top_k: :integer,
     max_new_tokens: :integer,
+    execution: :string,
     layer: :integer,
     backend: :string,
     model_name: :string,
@@ -99,6 +100,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       tail_start: Keyword.get(opts, :tail_start, 45),
       top_k: Keyword.get(opts, :top_k, 10),
       max_new_tokens: Keyword.get(opts, :max_new_tokens, 32),
+      execution: parse_execution(Keyword.get(opts, :execution, "composed")),
       layer: Keyword.get(opts, :layer, 45),
       backend: Keyword.get(opts, :backend, defaults[:backend]),
       model_name: Keyword.get(opts, :model_name, "google/gemma-4-12B-it"),
@@ -114,6 +116,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
          :ok <- positive(values.max_new_tokens, "--max-new-tokens"),
          :ok <- positive(values.sequence_length, "--sequence-length"),
          :ok <- positive(values.runs, "--runs"),
+         :ok <- valid_execution(values.execution),
          :ok <- valid_layer(values.layer),
          :ok <- valid_run_paths(mode, values) do
       {:ok, mode, values}
@@ -324,7 +327,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
             )
           end
 
-          %{pipeline | tail: tail}
+          DecoderBlockArtifact.install_tail!(pipeline, tail)
       end
 
     samples =
@@ -342,6 +345,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         tail_artifact: Path.expand(opts.artifact),
         tail_layers: tail.layer_indices,
         backend: opts.backend,
+        execution: opts.execution,
         samples: length(samples),
         runs: opts.runs
       })
@@ -352,7 +356,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
         :timer.tc(fn ->
           DecoderPipeline.generate(pipeline, input,
             max_new_tokens: opts.max_new_tokens,
-            execution: :split
+            execution: opts.execution
           )
         end)
 
@@ -528,6 +532,15 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   defp valid_layer(layer) when is_integer(layer) and layer >= 0, do: :ok
   defp valid_layer(_layer), do: {:error, "--layer must be a non-negative integer"}
 
+  defp parse_execution("composed"), do: :composed
+  defp parse_execution("split"), do: :split
+  defp parse_execution(value), do: {:invalid, value}
+
+  defp valid_execution(execution) when execution in [:composed, :split], do: :ok
+
+  defp valid_execution({:invalid, value}),
+    do: {:error, "--execution must be composed or split, got: #{inspect(value)}"}
+
   defp valid_run_paths(:extract, _opts), do: :ok
   defp valid_run_paths(:extract_prefix, _opts), do: :ok
   defp valid_run_paths(:extract_tail, _opts), do: :ok
@@ -648,6 +661,8 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     and tail artifacts. --pipeline-artifact remains as a compatibility fallback.
       --prefix-artifact PATH     artifact created by extract-prefix
       --max-new-tokens COUNT     generated-token limit, default 32
+      --execution MODE           composed (default) fuses the loaded artifacts;
+                                 split keeps the observable XLA boundary
     """
   end
 end

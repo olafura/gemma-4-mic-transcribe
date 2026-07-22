@@ -364,13 +364,20 @@ bf16 model:
 ```
 
 On the reference AMD Radeon 8060S, the packed artifacts occupy 14.20 GB total
-instead of 25.83 GB for bf16. Warm split generation took 2.12–2.16 seconds and
-produced `"I woke up today feeling refreshed. The morning light"`, exactly
-matching the resident packed runtime. The resident baseline took 2.02–2.05
-seconds, leaving only about a 4.8% median separation overhead. A one-token run
-measured 1.18 seconds of prefill; the remaining nine tokens averaged roughly
-106 ms/token. Artifact and checkpoint load times are intentionally excluded
-because they occur before the long-running service accepts work.
+instead of 25.83 GB for bf16. `run-split` keeps the files independently
+replaceable but merges their parameter maps into one XLA graph after loading.
+Warm fused generation took 2.019–2.022 seconds and produced
+`"I woke up today feeling refreshed. The morning light"`, exactly matching the
+resident packed runtime at 2.020–2.054 seconds. A one-token run measured about
+1.19 seconds of prefill; the remaining nine tokens averaged roughly 92
+ms/token. Artifact and checkpoint load times are intentionally excluded because
+they occur before the long-running service accepts work.
+
+Use `--execution split` when an observable runtime boundary is required. It
+dispatches the prefix and tail as separate XLA executables and measured
+2.12–2.16 seconds warm. The default `--execution composed` avoids that dispatch
+and materialization overhead without changing how the artifacts are stored or
+swapped.
 
 ## Splitting raw-audio inference
 

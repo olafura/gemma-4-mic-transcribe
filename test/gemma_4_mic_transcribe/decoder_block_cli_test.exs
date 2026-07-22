@@ -112,5 +112,19 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLITest do
     assert opts.max_new_tokens == 16
     assert opts.backend == "exla:rocm"
     assert opts.prefix_artifact == prefix
+    assert opts.execution == :composed
+
+    assert {:ok, :run_split, split_opts} =
+             DecoderBlockCLI.parse([
+               "run-split",
+               "--prefix-artifact",
+               prefix,
+               "--artifact",
+               tail,
+               "--execution",
+               "split"
+             ])
+
+    assert split_opts.execution == :split
   end
 end
