@@ -13,4 +13,9 @@ defmodule Gemma4MicTranscribe.Gemma4 do
 
   @doc "Extracts one unified Gemma 4 decoder block for standalone execution."
   defdelegate extract_decoder_block(runtime, layer_index), to: DecoderBlocks, as: :extract
+
+  @doc "Extracts contiguous unified Gemma 4 decoder blocks as one standalone graph."
+  defdelegate extract_decoder_chain(runtime, layer_indices),
+    to: DecoderBlocks,
+    as: :extract_chain
 end

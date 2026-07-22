@@ -63,6 +63,40 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocksTest do
     assert Nx.all_close(default_output, explicit_output) |> Nx.to_number() == 1
   end
 
+  test "chains contiguous extracted blocks in one standalone graph" do
+    {runtime, inputs} = runtime()
+
+    assert {:ok, report} =
+             LayerProbe.run(runtime, inputs,
+               layers: [0, 1],
+               positions: :all,
+               capture: [:block_input, :hidden_state],
+               include_activations: true
+             )
+
+    chain = DecoderBlocks.extract_chain!(runtime, 0..1)
+
+    assert chain.id == "language_model.layers.0-1"
+    assert chain.layer_indices == [0, 1]
+    assert chain.layer_types == [:sliding_attention, :full_attention]
+
+    output =
+      DecoderBlocks.run!(chain, report.activations["0:block_input"],
+        position_ids: inputs["position_ids"],
+        attention_mask: inputs["attention_mask"]
+      )
+
+    assert Nx.all_close(output, report.activations["1:hidden_state"], atol: 1.0e-5, rtol: 1.0e-5)
+           |> Nx.to_number() == 1
+  end
+
+  test "rejects non-contiguous chains" do
+    {runtime, _inputs} = runtime()
+
+    assert {:error, message} = DecoderBlocks.extract_chain(runtime, [1, 0])
+    assert message =~ "contiguous ascending"
+  end
+
   defp runtime do
     spec =
       Bumblebee.configure(Model,

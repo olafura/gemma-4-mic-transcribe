@@ -1,6 +1,6 @@
 defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
   @moduledoc """
-  Extracts one dense Gemma 4 decoder block for standalone prefill execution.
+  Extracts dense Gemma 4 decoder blocks for standalone prefill execution.
 
   The extracted block owns only that layer's parameters. Its input is the full
   hidden-state sequence produced by the preceding layer (or by the input
@@ -21,6 +21,23 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
       :id,
       :layer_index,
       :layer_type,
+      :input_size,
+      :parameter_count,
+      :model,
+      :params,
+      :predict_fun,
+      :backend
+    ]
+    defstruct @enforce_keys
+  end
+
+  defmodule Chain do
+    @moduledoc "A contiguous sequence of standalone decoder blocks."
+
+    @enforce_keys [
+      :id,
+      :layer_indices,
+      :layer_types,
       :input_size,
       :parameter_count,
       :model,
@@ -69,22 +86,81 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
     end
   end
 
-  @doc "Runs an extracted block over a complete hidden-state sequence."
-  @spec run(Extracted.t(), Nx.Tensor.t(), keyword()) :: {:ok, Nx.Tensor.t()} | {:error, term()}
-  def run(%Extracted{} = block, %Nx.Tensor{} = hidden_state, opts \\ []) do
-    hidden_state = copy_to_backend(hidden_state, block.backend)
+  @doc "Extracts a contiguous ascending decoder-block chain."
+  @spec extract_chain(map(), Enumerable.t()) :: {:ok, Chain.t()} | {:error, term()}
+  def extract_chain(runtime, layer_indices) do
+    layer_indices = Enum.to_list(layer_indices)
 
-    with :ok <- validate_hidden_state(hidden_state, block.input_size),
-         {:ok, inputs} <- inputs(hidden_state, opts, block.backend) do
-      {:ok, block.predict_fun.(block.params, inputs)}
+    with {:ok, model_info} <- fetch(runtime, :model_info),
+         {:ok, spec} <- fetch(model_info, :spec),
+         :ok <- validate_spec(spec),
+         :ok <- validate_chain(layer_indices, spec.num_blocks),
+         {:ok, source_params} <- fetch(model_info, :params),
+         {:ok, params} <- extract_chain_params(source_params, layer_indices) do
+      model = Model.decoder_block_chain_model(spec, layer_indices)
+      backend = Map.get(runtime, :backend)
+      {_init_fun, predict_fun} = Axon.build(model, build_opts(backend))
+
+      {:ok,
+       %Chain{
+         id: "language_model.layers.#{hd(layer_indices)}-#{List.last(layer_indices)}",
+         layer_indices: layer_indices,
+         layer_types: Enum.map(layer_indices, &layer_type(spec, &1)),
+         input_size: spec.hidden_size,
+         parameter_count: parameter_count(params.data),
+         model: model,
+         params: params,
+         predict_fun: predict_fun,
+         backend: backend
+       }}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  @doc "Like `extract_chain/2`, but raises when extraction fails."
+  def extract_chain!(runtime, layer_indices) do
+    case extract_chain(runtime, layer_indices) do
+      {:ok, chain} -> chain
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
+  @doc "Runs an extracted block or chain over a complete hidden-state sequence."
+  @spec run(Extracted.t(), Nx.Tensor.t(), keyword()) :: {:ok, Nx.Tensor.t()} | {:error, term()}
+  def run(component, hidden_state, opts \\ [])
+
+  def run(%Extracted{} = block, %Nx.Tensor{} = hidden_state, opts) do
+    run_model(block, hidden_state, opts)
+  end
+
+  def run(%Chain{} = chain, %Nx.Tensor{} = hidden_state, opts) do
+    run_model(chain, hidden_state, opts)
+  end
+
+  defp run_model(component, hidden_state, opts) do
+    hidden_state = copy_to_backend(hidden_state, component.backend)
+
+    with :ok <- validate_hidden_state(hidden_state, component.input_size),
+         {:ok, inputs} <- inputs(hidden_state, opts, component.backend) do
+      {:ok, component.predict_fun.(component.params, inputs)}
     end
   rescue
     exception -> {:error, Exception.message(exception)}
   end
 
   @doc "Like `run/3`, but raises when standalone execution fails."
-  def run!(%Extracted{} = block, %Nx.Tensor{} = hidden_state, opts \\ []) do
+  def run!(component, hidden_state, opts \\ [])
+
+  def run!(%Extracted{} = block, %Nx.Tensor{} = hidden_state, opts) do
     case run(block, hidden_state, opts) do
+      {:ok, output} -> output
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
+  def run!(%Chain{} = chain, %Nx.Tensor{} = hidden_state, opts) do
+    case run(chain, hidden_state, opts) do
       {:ok, output} -> output
       {:error, reason} -> raise ArgumentError, reason
     end
@@ -169,6 +245,29 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
   defp extract_params(other, _layer_index),
     do: {:error, "expected Axon model parameters, got: #{inspect(other)}"}
 
+  defp extract_chain_params(%Axon.ModelState{data: data}, layer_indices) do
+    prefixes = Enum.map(layer_indices, &"decoder.blocks.#{&1}.")
+
+    missing_layers =
+      Enum.reject(layer_indices, fn layer_index ->
+        prefix = "decoder.blocks.#{layer_index}."
+        Enum.any?(data, fn {name, _value} -> String.starts_with?(name, prefix) end)
+      end)
+
+    data =
+      Map.filter(data, fn {name, _value} ->
+        Enum.any?(prefixes, &String.starts_with?(name, &1))
+      end)
+
+    case missing_layers do
+      [] -> {:ok, Axon.ModelState.new(data)}
+      missing -> {:error, "runtime contains no parameters for decoder layers #{inspect(missing)}"}
+    end
+  end
+
+  defp extract_chain_params(other, _layer_indices),
+    do: {:error, "expected Axon model parameters, got: #{inspect(other)}"}
+
   defp parameter_count(data) do
     Enum.reduce(data, 0, fn {_name, parameters}, count ->
       count + Enum.reduce(parameters, 0, fn {_name, tensor}, sum -> sum + Nx.size(tensor) end)
@@ -189,6 +288,29 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
 
   defp validate_layer(layer_index, count),
     do: {:error, "expected layer index in 0..#{count - 1}, got: #{inspect(layer_index)}"}
+
+  defp validate_chain([], _count), do: {:error, "decoder block chain must not be empty"}
+
+  defp validate_chain(layer_indices, count) do
+    with :ok <- validate_chain_layers(layer_indices, count) do
+      first = hd(layer_indices)
+      last = List.last(layer_indices)
+      expected = if last >= first, do: Enum.to_list(first..last//1), else: []
+
+      if layer_indices == expected do
+        :ok
+      else
+        {:error, "decoder block chain must use contiguous ascending layer indices"}
+      end
+    end
+  end
+
+  defp validate_chain_layers(layer_indices, count) do
+    case Enum.find(layer_indices, &(not (is_integer(&1) and &1 >= 0 and &1 < count))) do
+      nil -> :ok
+      invalid -> {:error, "expected layer index in 0..#{count - 1}, got: #{inspect(invalid)}"}
+    end
+  end
 
   defp layer_type(spec, layer_index) do
     spec.layer_types

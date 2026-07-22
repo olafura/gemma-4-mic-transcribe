@@ -155,36 +155,50 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   @doc false
   def decoder_block_model(%__MODULE__{} = spec, layer_index)
       when is_integer(layer_index) and layer_index >= 0 and layer_index < spec.num_blocks do
+    decoder_block_chain_model(spec, [layer_index])
+  end
+
+  def decoder_block_model(%__MODULE__{} = spec, layer_index) do
+    raise ArgumentError,
+          "expected a Gemma 4 layer index in 0..#{spec.num_blocks - 1}, got: #{inspect(layer_index)}"
+  end
+
+  @doc false
+  def decoder_block_chain_model(%__MODULE__{} = spec, [first | _rest] = layer_indices) do
+    last = List.last(layer_indices)
+
+    unless Enum.all?(layer_indices, &(&1 in 0..(spec.num_blocks - 1))) and
+             last >= first and layer_indices == Enum.to_list(first..last//1) do
+      raise ArgumentError, "decoder block chains must contain contiguous ascending layer indices"
+    end
+
     hidden_state =
       Axon.input("hidden_state", shape: {nil, nil, spec.hidden_size})
 
     position_ids = Axon.input("position_ids", shape: {nil, nil})
     attention_mask = Axon.input("attention_mask", shape: {nil, nil})
 
-    block_cache =
-      Axon.container(%{
-        self_attention: Layers.none(),
-        cross_attention: Layers.none()
-      })
+    Enum.reduce(layer_indices, hidden_state, fn layer_index, hidden_state ->
+      block_cache =
+        Axon.container(%{
+          self_attention: Layers.none(),
+          cross_attention: Layers.none()
+        })
 
-    {hidden_state, _block_cache} =
-      decoder_block(
-        hidden_state,
-        position_ids,
-        attention_mask,
-        block_cache,
-        Layers.none(),
-        Enum.fetch!(layer_types(spec), layer_index),
-        spec,
-        name: "decoder.blocks.#{layer_index}"
-      )
+      {hidden_state, _block_cache} =
+        decoder_block(
+          hidden_state,
+          position_ids,
+          attention_mask,
+          block_cache,
+          Layers.none(),
+          Enum.fetch!(layer_types(spec), layer_index),
+          spec,
+          name: "decoder.blocks.#{layer_index}"
+        )
 
-    hidden_state
-  end
-
-  def decoder_block_model(%__MODULE__{} = spec, layer_index) do
-    raise ArgumentError,
-          "expected a Gemma 4 layer index in 0..#{spec.num_blocks - 1}, got: #{inspect(layer_index)}"
+      hidden_state
+    end)
   end
 
   defp inputs(spec) do

@@ -190,6 +190,23 @@ Materializing an internal bf16 activation can change tensor layout and reduction
 order. Compare standalone and in-model results with a numerical tolerance, not
 bit equality.
 
+Adjacent blocks can be extracted as one graph and run without materializing the
+hidden state between them:
+
+```elixir
+{:ok, chain} = Gemma4MicTranscribe.Gemma4.extract_decoder_chain(runtime, 45..47)
+
+final_hidden_state =
+  Gemma4MicTranscribe.Gemma4.DecoderBlocks.run!(
+    chain,
+    report.activations["45:block_input"]
+  )
+```
+
+Chains must use contiguous ascending layers. Skipping from layer 6 directly to
+layer 29 is not compositionally valid because layers 7 through 28 produce the
+representation expected by layer 29.
+
 ## Usage
 
 List known model variants and their required runtimes:
