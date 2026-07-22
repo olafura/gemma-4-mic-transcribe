@@ -125,6 +125,9 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
              {2, 4.0},
              {4, 3.0}
            ]
+
+    assert TokenSelection.next_token_with_margin_from_sequence(logits, suppression_mask) ==
+             {2, 1.0}
   end
 
   test "transcript filtering removes tagged channel spans before decode" do

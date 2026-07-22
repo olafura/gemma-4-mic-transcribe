@@ -248,7 +248,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
       exact: normalized_expected == normalized_actual,
       edit_distance: distance,
       elapsed_ms: div(elapsed_us, 1_000),
-      token_ids: output.token_ids
+      token_ids: output.token_ids,
+      confidence: Map.get(output, :confidence)
     }
 
     IO.puts(Jason.encode!(Map.put(result, :event, "single_word_case")))
@@ -296,10 +297,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
   end
 
   defp generate({:runtime, runtime}, input, opts) do
-    case Runtime.generate(runtime, input, max_new_tokens: opts.max_new_tokens) do
-      {:ok, text} -> {:ok, %{text: text, token_ids: []}}
-      {:error, reason} -> {:error, reason}
-    end
+    Runtime.generate_with_confidence(runtime, input, max_new_tokens: opts.max_new_tokens)
   end
 
   defp generate({:pipeline, pipeline}, input, opts) do

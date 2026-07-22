@@ -669,6 +669,17 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   def generate(%__MODULE__{} = runtime, input, opts \\ []) do
+    with {:ok, result} <- generate_result(runtime, input, opts, false) do
+      {:ok, result.text}
+    end
+  end
+
+  @doc "Runs generation while collecting per-token top-two logit margins."
+  def generate_with_confidence(%__MODULE__{} = runtime, input, opts \\ []) do
+    generate_result(runtime, input, opts, true)
+  end
+
+  defp generate_result(runtime, input, opts, confidence?) do
     input = maybe_rebuild_for_e4b(runtime, input)
 
     log_debug(runtime, fn ->
@@ -716,15 +727,28 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           "content_tokens=#{masks.content_length}"
       end)
 
-      token_ids =
-        cached_greedy_generate(
-          runtime,
-          input_ids,
-          input_features,
-          input_features_mask,
-          masks,
-          generate_limits(runtime, opts)
-        )
+      limits = generate_limits(runtime, opts)
+
+      {token_ids, margins} =
+        if confidence? do
+          cached_greedy_generate_with_confidence(
+            runtime,
+            input_ids,
+            input_features,
+            input_features_mask,
+            masks,
+            limits
+          )
+        else
+          {cached_greedy_generate(
+             runtime,
+             input_ids,
+             input_features,
+             input_features_mask,
+             masks,
+             limits
+           ), []}
+        end
 
       log_debug(runtime, fn ->
         "runtime: generation finished generated_tokens=#{length(token_ids)}"
@@ -734,10 +758,26 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         runtime.tokenizer
         |> Transcript.decode(token_ids)
 
-      {:ok, transcript}
+      {:ok,
+       %{
+         text: transcript,
+         token_ids: token_ids,
+         confidence: confidence_summary(margins)
+       }}
     end
   rescue
     exception -> {:error, Exception.message(exception)}
+  end
+
+  defp confidence_summary([]),
+    do: %{token_count: 0, min_logit_margin: 0.0, mean_logit_margin: 0.0}
+
+  defp confidence_summary(margins) do
+    %{
+      token_count: length(margins),
+      min_logit_margin: Enum.min(margins),
+      mean_logit_margin: Enum.sum(margins) / length(margins)
+    }
   end
 
   @doc """
@@ -849,6 +889,140 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   defp cached_greedy_generate(
+         runtime,
+         input_ids,
+         input_features,
+         input_features_mask,
+         masks,
+         limits
+       ) do
+    cached_greedy_generate_nonempty(
+      runtime,
+      input_ids,
+      input_features,
+      input_features_mask,
+      masks,
+      limits
+    )
+  end
+
+  defp cached_greedy_generate_with_confidence(
+         _runtime,
+         _input_ids,
+         _input_features,
+         _input_features_mask,
+         _masks,
+         %{max_new_tokens: max_new_tokens}
+       )
+       when max_new_tokens <= 0,
+       do: {[], []}
+
+  defp cached_greedy_generate_with_confidence(
+         runtime,
+         input_ids,
+         input_features,
+         input_features_mask,
+         masks,
+         limits
+       ) do
+    prompt_length = length(input_ids)
+    max_cache_length = cache_length(prompt_length, runtime.max_response_tokens)
+    cache = init_generation_cache(runtime, max_cache_length)
+
+    {logits, cache} =
+      predict_prefill_next_logits(
+        runtime,
+        input_ids,
+        input_features,
+        input_features_mask,
+        masks,
+        cache
+      )
+
+    channel_state = ChannelState.content()
+    suppression_mask = suppression_mask_for_state(runtime, channel_state)
+
+    {token_id, margin} =
+      TokenSelection.next_token_with_margin_from_sequence(logits, suppression_mask)
+
+    eos? = eos?(token_id, runtime.generation_config.eos_token_id)
+    pad? = token_id == runtime.model_info.spec.pad_token_id
+
+    if stop?(eos?, pad?, 1, limits) do
+      {[], []}
+    else
+      greedy_decode_with_confidence(
+        runtime,
+        cache,
+        token_id,
+        masks.content_length,
+        [token_id],
+        [margin],
+        1,
+        limits,
+        channel_state
+      )
+    end
+  end
+
+  defp greedy_decode_with_confidence(
+         _runtime,
+         _cache,
+         _previous_token_id,
+         _prompt_length,
+         generated,
+         margins,
+         generated_count,
+         %{max_new_tokens: max_new_tokens},
+         _channel_state
+       )
+       when generated_count >= max_new_tokens,
+       do: {Enum.reverse(generated), Enum.reverse(margins)}
+
+  defp greedy_decode_with_confidence(
+         runtime,
+         cache,
+         previous_token_id,
+         prompt_length,
+         generated,
+         margins,
+         generated_count,
+         limits,
+         channel_state
+       ) do
+    previous_token_position = prompt_length + generated_count - 1
+
+    {logits, cache} =
+      predict_decode_next_logits(runtime, previous_token_id, previous_token_position, cache)
+
+    suppression_mask = suppression_mask_for_state(runtime, channel_state)
+    banned_ids = banned_ngram_token_ids(generated, runtime.no_repeat_ngram_size)
+
+    {token_id, margin} =
+      TokenSelection.next_token_with_margin_from_sequence(logits, suppression_mask, banned_ids)
+
+    step = generated_count + 1
+    eos? = eos?(token_id, runtime.generation_config.eos_token_id)
+    pad? = token_id == runtime.model_info.spec.pad_token_id
+
+    if stop?(eos?, pad?, step, limits) do
+      {Enum.reverse(generated), Enum.reverse(margins)}
+    else
+      greedy_decode_with_confidence(
+        runtime,
+        cache,
+        token_id,
+        prompt_length,
+        [token_id | generated],
+        [margin | margins],
+        step,
+        limits,
+        ChannelState.advance(channel_state, token_id, runtime.channel_token_ids)
+      )
+    end
+  end
+
+  defp cached_greedy_generate_nonempty(
          runtime,
          input_ids,
          input_features,

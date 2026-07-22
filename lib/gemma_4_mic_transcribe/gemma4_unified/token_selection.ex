@@ -57,6 +57,31 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.TokenSelection do
     end)
   end
 
+  def next_token_with_margin_from_sequence(logits, suppression_mask, banned_ids \\ []) do
+    count =
+      if banned_ids == [],
+        do: min(2, Nx.axis_size(logits, -1)),
+        else: min(8, Nx.axis_size(logits, -1))
+
+    banned = MapSet.new(banned_ids)
+
+    allowed =
+      logits
+      |> top_tokens_from_sequence(suppression_mask, count)
+      |> Enum.reject(fn {token_id, _score} -> MapSet.member?(banned, token_id) end)
+
+    case allowed do
+      [{token_id, score}, {_runner_up, runner_up_score} | _rest] ->
+        {token_id, score - runner_up_score}
+
+      [{token_id, _score}] ->
+        {token_id, 0.0}
+
+      [] ->
+        {next_token_id_from_sequence(logits, suppression_mask), 0.0}
+    end
+  end
+
   def top_tokens(logits, suppression_mask, count) when is_integer(count) and count > 0 do
     with_tensor_backend(suppression_mask, fn ->
       {values, indices} = top_tokens_tensor(logits, suppression_mask, k: count)
