@@ -12,8 +12,15 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
     :accurate_module,
     :accurate_runtime,
     :min_chars_per_second,
-    :sample_rate
+    :sample_rate,
+    :counters
   ]
+
+  @accepted 1
+  @escalated 2
+  @fast_errors 3
+  @fast_ms 4
+  @accurate_ms 5
 
   def load(opts) do
     fast_module = Keyword.get(opts, :fast_runtime_module, Runtime)
@@ -38,7 +45,8 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
          accurate_module: accurate_module,
          accurate_runtime: accurate_runtime,
          min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
-         sample_rate: Keyword.get(opts, :sample_rate, 16_000)
+         sample_rate: Keyword.get(opts, :sample_rate, 16_000),
+         counters: :atomics.new(5, [])
        }}
     end
   end
@@ -51,31 +59,63 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
   end
 
   def generate(%__MODULE__{} = cascade, input, opts \\ []) do
-    case cascade.fast_module.generate(cascade.fast_runtime, input, opts) do
+    {fast_result, fast_ms} =
+      timed(fn -> cascade.fast_module.generate(cascade.fast_runtime, input, opts) end)
+
+    :atomics.add(cascade.counters, @fast_ms, fast_ms)
+
+    case fast_result do
       {:ok, text} ->
         input = Map.put_new(input, :sample_rate, cascade.sample_rate)
 
-        if escalate?(text, input, cascade.min_chars_per_second) do
-          Logger.info("cascade: escalating E4B transcript to accurate model")
-          cascade.accurate_module.generate(cascade.accurate_runtime, input, opts)
-        else
-          {:ok, text}
+        case escalation_reason(text, input, cascade.min_chars_per_second) do
+          nil ->
+            :atomics.add(cascade.counters, @accepted, 1)
+            emit_route(:fast, nil, fast_ms, 0)
+            {:ok, text}
+
+          reason ->
+            Logger.info("cascade: escalating E4B transcript to accurate model reason=#{reason}")
+            run_accurate(cascade, input, opts, reason, fast_ms)
         end
 
       {:error, reason} ->
         Logger.warning("cascade: E4B failed, escalating reason=#{inspect(reason)}")
-        cascade.accurate_module.generate(cascade.accurate_runtime, input, opts)
+        :atomics.add(cascade.counters, @fast_errors, 1)
+        run_accurate(cascade, input, opts, :fast_error, fast_ms)
     end
+  end
+
+  def stats(%__MODULE__{} = cascade) do
+    accepted = :atomics.get(cascade.counters, @accepted)
+    escalated = :atomics.get(cascade.counters, @escalated)
+
+    %{
+      accepted: accepted,
+      escalated: escalated,
+      fast_errors: :atomics.get(cascade.counters, @fast_errors),
+      fast_ms: :atomics.get(cascade.counters, @fast_ms),
+      accurate_ms: :atomics.get(cascade.counters, @accurate_ms),
+      requests: accepted + escalated
+    }
   end
 
   @doc false
   def escalate?(text, input, min_chars_per_second) when is_binary(text) do
+    escalation_reason(text, input, min_chars_per_second) != nil
+  end
+
+  defp escalation_reason(text, input, min_chars_per_second) do
     normalized = String.trim(text)
 
-    normalized == "" or
-      StreamingSession.refusal?(normalized) or
-      String.contains?(normalized, ["<|", "|>", "�"]) or
-      below_density?(normalized, input, min_chars_per_second)
+    cond do
+      normalized == "" -> :empty
+      StreamingSession.refusal?(normalized) -> :refusal
+      String.contains?(normalized, ["<|", "|>"]) -> :malformed_control_token
+      String.contains?(normalized, "�") -> :replacement_character
+      below_density?(normalized, input, min_chars_per_second) -> :low_character_density
+      true -> nil
+    end
   end
 
   defp below_density?(_text, _input, threshold) when threshold <= 0, do: false
@@ -90,5 +130,29 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
 
   defp maybe_warmup(module, runtime, opts) do
     if function_exported?(module, :warmup, 2), do: module.warmup(runtime, opts), else: :ok
+  end
+
+  defp run_accurate(cascade, input, opts, reason, fast_ms) do
+    {result, accurate_ms} =
+      timed(fn -> cascade.accurate_module.generate(cascade.accurate_runtime, input, opts) end)
+
+    :atomics.add(cascade.counters, @escalated, 1)
+    :atomics.add(cascade.counters, @accurate_ms, accurate_ms)
+    emit_route(:accurate, reason, fast_ms, accurate_ms)
+    result
+  end
+
+  defp emit_route(route, reason, fast_ms, accurate_ms) do
+    :telemetry.execute(
+      [:gemma_4_mic_transcribe, :cascade, :route],
+      %{fast_ms: fast_ms, accurate_ms: accurate_ms},
+      %{route: route, reason: reason}
+    )
+  end
+
+  defp timed(fun) do
+    started_at = System.monotonic_time(:millisecond)
+    result = fun.()
+    {result, System.monotonic_time(:millisecond) - started_at}
   end
 end

@@ -28,6 +28,17 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
     def generate(:runtime, _input, _opts), do: {:ok, "hello world"}
   end
 
+  defmodule StatsRuntime do
+    def stats(:runtime), do: %{requests: 3}
+  end
+
+  test "exposes runtime-specific service statistics" do
+    {:ok, session} =
+      StreamingSession.start_link(runtime_module: StatsRuntime, runtime: :runtime)
+
+    assert StreamingSession.runtime_stats(session) == %{requests: 3}
+  end
+
   defmodule BlockingRuntime do
     def load(_opts), do: {:ok, :runtime}
 

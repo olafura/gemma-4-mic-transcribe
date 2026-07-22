@@ -82,6 +82,10 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     GenServer.call(session, :flush, :infinity)
   end
 
+  def runtime_stats(session) do
+    GenServer.call(session, :runtime_stats)
+  end
+
   @doc "Subscribes a process to speech-end events emitted before final transcription starts."
   def subscribe_speech_end(session, subscriber \\ self()) when is_pid(subscriber) do
     GenServer.call(session, {:subscribe_speech_end, subscriber})
@@ -161,6 +165,16 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   @impl true
   def handle_call({:subscribe_speech_end, subscriber}, _from, state) do
     {:reply, :ok, %{state | speech_end_subscriber: subscriber}}
+  end
+
+  @impl true
+  def handle_call(:runtime_stats, _from, state) do
+    stats =
+      if state.runtime && function_exported?(state.runtime_module, :stats, 1),
+        do: state.runtime_module.stats(state.runtime),
+        else: %{}
+
+    {:reply, stats, state}
   end
 
   @impl true

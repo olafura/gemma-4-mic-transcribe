@@ -969,6 +969,11 @@ a hard-failure fallback rather than a learned confidence model. It deliberately
 does not expose incremental prefill yet; accepted requests use E4B's full path,
 while escalated requests use the already-loaded optimized 12B path.
 
+The cascade emits `[:gemma_4_mic_transcribe, :cascade, :route]` telemetry with
+the selected route, escalation reason, and per-model processing time. Streaming
+benchmark runs also print accepted/escalated counts and average model times, so
+router changes can be evaluated independently from model load and warmup.
+
 Prefill is the one place where packed int4 loses: it gives up rocBLAS matrix
 cores for a hand kernel (~1100 ms versus ~240 ms measured on the older
 `Axon.dense` path).

@@ -28,6 +28,10 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
     :ok
   end
 
+  def handle_route(event, measurements, metadata, test_pid) do
+    send(test_pid, {:route, event, measurements, metadata})
+  end
+
   test "accepts a usable fast transcript without calling the accurate model" do
     cascade = load_cascade(fast_text: "fast transcript")
 
@@ -35,6 +39,9 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
              CascadeRuntime.generate(cascade, %{samples: List.duplicate(0.1, 16_000)})
 
     refute_received :accurate_called
+
+    assert %{requests: 1, accepted: 1, escalated: 0, fast_errors: 0} =
+             CascadeRuntime.stats(cascade)
   end
 
   test "uses compatibility-only ROCm preflight for the second model load" do
@@ -51,6 +58,29 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
              CascadeRuntime.generate(cascade, %{samples: List.duplicate(0.1, 16_000)})
 
     assert_received :accurate_called
+    assert %{requests: 1, accepted: 0, escalated: 1} = CascadeRuntime.stats(cascade)
+  end
+
+  test "emits route telemetry with model timings" do
+    test_pid = self()
+    handler_id = "cascade-route-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:gemma_4_mic_transcribe, :cascade, :route],
+        &__MODULE__.handle_route/4,
+        test_pid
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    cascade = load_cascade(fast_text: "fast transcript")
+    assert {:ok, _text} = CascadeRuntime.generate(cascade, %{samples: []})
+
+    assert_received {:route, [:gemma_4_mic_transcribe, :cascade, :route],
+                     %{fast_ms: fast_ms, accurate_ms: 0}, %{route: :fast, reason: nil}}
+
+    assert is_integer(fast_ms) and fast_ms >= 0
   end
 
   test "optionally escalates transcripts with implausibly low character density" do

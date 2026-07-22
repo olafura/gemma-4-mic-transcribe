@@ -372,6 +372,7 @@ defmodule Gemma4MicTranscribe.CLI do
           )
 
         print_lag_summary(config, counts)
+        print_runtime_stats(config, session)
 
         cond do
           counts.errors > 0 -> 1
@@ -470,6 +471,28 @@ defmodule Gemma4MicTranscribe.CLI do
   end
 
   defp print_lag_summary(_config, _counts), do: :ok
+
+  defp print_runtime_stats(%RunConfig{e4b_cascade: true}, session) do
+    case StreamingSession.runtime_stats(session) do
+      %{requests: requests} = stats when requests > 0 ->
+        fast_avg = round(stats.fast_ms / requests)
+
+        accurate_avg =
+          if stats.escalated > 0, do: round(stats.accurate_ms / stats.escalated), else: 0
+
+        IO.puts(
+          :stderr,
+          "bench: cascade requests=#{requests} accepted=#{stats.accepted} " <>
+            "escalated=#{stats.escalated} fast_errors=#{stats.fast_errors} " <>
+            "fast_ms_avg=#{fast_avg} accurate_ms_avg=#{accurate_avg}"
+        )
+
+      _stats ->
+        :ok
+    end
+  end
+
+  defp print_runtime_stats(_config, _session), do: :ok
 
   defp print_latency_breakdown(%{latency_breakdowns: breakdowns}, type) do
     case Map.get(breakdowns, type, []) do
