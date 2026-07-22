@@ -119,10 +119,17 @@ defmodule Gemma4MicTranscribe.CLITest do
 
   test "parses E4B cascade controls" do
     assert {:ok, %RunConfig{} = config} =
-             CLI.parse(["--e4b-cascade", "--cascade-min-chars-per-second", "1.5"])
+             CLI.parse([
+               "--e4b-cascade",
+               "--cascade-min-chars-per-second",
+               "1.5",
+               "--cascade-min-logit-margin",
+               "0.125"
+             ])
 
     assert config.e4b_cascade
     assert config.cascade_min_chars_per_second == 1.5
+    assert config.cascade_min_logit_margin == 0.125
   end
 
   test "rejects incremental prefill with the initial E4B cascade" do

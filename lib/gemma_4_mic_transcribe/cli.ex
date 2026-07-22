@@ -37,6 +37,7 @@ defmodule Gemma4MicTranscribe.CLI do
               fused_ffn: false,
               e4b_cascade: false,
               cascade_min_chars_per_second: 0.0,
+              cascade_min_logit_margin: 0.0,
               incremental_prefill: false,
               warmup: true,
               speech_gate: Config.speech_gate?(),
@@ -85,6 +86,7 @@ defmodule Gemma4MicTranscribe.CLI do
     fused_ffn: :boolean,
     e4b_cascade: :boolean,
     cascade_min_chars_per_second: :float,
+    cascade_min_logit_margin: :float,
     incremental_prefill: :boolean,
     warmup: :boolean,
     speech_gate: :boolean,
@@ -219,6 +221,7 @@ defmodule Gemma4MicTranscribe.CLI do
       fused_ffn: Keyword.get(opts, :fused_ffn, false),
       e4b_cascade: Keyword.get(opts, :e4b_cascade, false),
       cascade_min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
+      cascade_min_logit_margin: Keyword.get(opts, :cascade_min_logit_margin, 0.0),
       incremental_prefill: Keyword.get(opts, :incremental_prefill, false),
       warmup: Keyword.get(opts, :warmup, true),
       speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
@@ -281,6 +284,11 @@ defmodule Gemma4MicTranscribe.CLI do
            validate_non_negative_float(
              config.cascade_min_chars_per_second,
              "--cascade-min-chars-per-second"
+           ),
+         :ok <-
+           validate_non_negative_float(
+             config.cascade_min_logit_margin,
+             "--cascade-min-logit-margin"
            ),
          :ok <- validate_output(config.output),
          {:ok, system_message, system_message_source} <-
@@ -528,6 +536,7 @@ defmodule Gemma4MicTranscribe.CLI do
       hybrid_weights: config.weights == "hybrid",
       fused_ffn: config.fused_ffn,
       cascade_min_chars_per_second: config.cascade_min_chars_per_second,
+      cascade_min_logit_margin: config.cascade_min_logit_margin,
       incremental_prefill: config.incremental_prefill,
       warmup: config.warmup,
       # Lag numbers are only meaningful against a loaded, warmed model, so
@@ -841,6 +850,7 @@ defmodule Gemma4MicTranscribe.CLI do
       --fused-ffn                        Fuse packed 12B FFN gate/up projections during decode
       --e4b-cascade                       Use E4B first and escalate suspicious transcripts to 12B
       --cascade-min-chars-per-second N   Escalate sparse E4B transcripts; 0 disables (default)
+      --cascade-min-logit-margin N       Escalate low-confidence E4B output; 0 disables (default)
       --incremental-prefill              Prefill audio during speech instead of after end-of-speech
       --no-warmup                        Skip startup generation warmup (JIT compiles on first utterance instead)
       --no-speech-gate                  Disable cheap local speech gating before model generation

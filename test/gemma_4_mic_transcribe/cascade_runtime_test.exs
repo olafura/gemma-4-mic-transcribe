@@ -23,6 +23,18 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
     def warmup(_runtime, _opts), do: :ok
   end
 
+  defmodule ConfidenceFastRuntime do
+    def load(opts), do: {:ok, Keyword.fetch!(opts, :fast_margin)}
+
+    def generate_with_confidence(margin, _input, _opts) do
+      {:ok,
+       %{
+         text: "fast transcript",
+         confidence: %{min_logit_margin: margin, mean_logit_margin: margin, token_count: 1}
+       }}
+    end
+  end
+
   setup do
     Process.register(self(), :cascade_runtime_test)
     :ok
@@ -81,6 +93,30 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
                      %{fast_ms: fast_ms, accurate_ms: 0}, %{route: :fast, reason: nil}}
 
     assert is_integer(fast_ms) and fast_ms >= 0
+  end
+
+  test "escalates E4B output below the configured logit margin" do
+    cascade =
+      load_cascade(
+        fast_runtime_module: ConfidenceFastRuntime,
+        fast_margin: 0.0,
+        cascade_min_logit_margin: 0.125
+      )
+
+    assert {:ok, "accurate transcript"} = CascadeRuntime.generate(cascade, %{samples: []})
+    assert_received :accurate_called
+  end
+
+  test "accepts E4B output at the configured logit margin" do
+    cascade =
+      load_cascade(
+        fast_runtime_module: ConfidenceFastRuntime,
+        fast_margin: 0.125,
+        cascade_min_logit_margin: 0.125
+      )
+
+    assert {:ok, "fast transcript"} = CascadeRuntime.generate(cascade, %{samples: []})
+    refute_received :accurate_called
   end
 
   test "optionally escalates transcripts with implausibly low character density" do

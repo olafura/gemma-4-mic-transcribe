@@ -981,7 +981,7 @@ sparse output:
 ./gemma_4_mic_transcribe --wav journal1.wav --stream-wav --realtime \
   --backend exla:rocm --model-name gemma4-12b-qat-w4a16-ct \
   --weights packed --fused-ffn --e4b-cascade \
-  --cascade-min-chars-per-second 1.5 --no-partials
+  --cascade-min-logit-margin 0.125 --no-partials
 ```
 
 The density threshold defaults to zero (disabled), because characters per
@@ -989,6 +989,14 @@ second is not language-independent confidence. This first cascade is therefore
 a hard-failure fallback rather than a learned confidence model. It deliberately
 does not expose incremental prefill yet; accepted requests use E4B's full path,
 while escalated requests use the already-loaded optimized 12B path.
+
+`--cascade-min-logit-margin` collects the top-two decoder-logit margin for each
+E4B output token and escalates when the minimum is below the threshold. It is
+also disabled by default. On the 33-language seed-42 gate, `0.125` escalated
+only the zero-margin Catalan error, raised the combined exact score from 8 to 9,
+and estimated 299 ms mean cascade processing versus 1,251 ms for 12B alone.
+The Polish `jeden`/`jedem` error remained confidently wrong, so this signal is
+useful but not sufficient and the threshold should be validated on more data.
 
 The cascade emits `[:gemma_4_mic_transcribe, :cascade, :route]` telemetry with
 the selected route, escalation reason, and per-model processing time. Streaming

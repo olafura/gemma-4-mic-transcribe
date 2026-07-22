@@ -12,6 +12,7 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
     :accurate_module,
     :accurate_runtime,
     :min_chars_per_second,
+    :min_logit_margin,
     :sample_rate,
     :counters
   ]
@@ -45,6 +46,7 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
          accurate_module: accurate_module,
          accurate_runtime: accurate_runtime,
          min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
+         min_logit_margin: Keyword.get(opts, :cascade_min_logit_margin, 0.0),
          sample_rate: Keyword.get(opts, :sample_rate, 16_000),
          counters: :atomics.new(5, [])
        }}
@@ -60,15 +62,21 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
 
   def generate(%__MODULE__{} = cascade, input, opts \\ []) do
     {fast_result, fast_ms} =
-      timed(fn -> cascade.fast_module.generate(cascade.fast_runtime, input, opts) end)
+      timed(fn -> generate_fast(cascade, input, opts) end)
 
     :atomics.add(cascade.counters, @fast_ms, fast_ms)
 
     case fast_result do
-      {:ok, text} ->
+      {:ok, text, confidence} ->
         input = Map.put_new(input, :sample_rate, cascade.sample_rate)
 
-        case escalation_reason(text, input, cascade.min_chars_per_second) do
+        case escalation_reason(
+               text,
+               input,
+               cascade.min_chars_per_second,
+               confidence,
+               cascade.min_logit_margin
+             ) do
           nil ->
             :atomics.add(cascade.counters, @accepted, 1)
             emit_route(:fast, nil, fast_ms, 0)
@@ -102,10 +110,10 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
 
   @doc false
   def escalate?(text, input, min_chars_per_second) when is_binary(text) do
-    escalation_reason(text, input, min_chars_per_second) != nil
+    escalation_reason(text, input, min_chars_per_second, nil, 0.0) != nil
   end
 
-  defp escalation_reason(text, input, min_chars_per_second) do
+  defp escalation_reason(text, input, min_chars_per_second, confidence, min_logit_margin) do
     normalized = String.trim(text)
 
     cond do
@@ -114,6 +122,7 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
       String.contains?(normalized, ["<|", "|>"]) -> :malformed_control_token
       String.contains?(normalized, "�") -> :replacement_character
       below_density?(normalized, input, min_chars_per_second) -> :low_character_density
+      low_logit_margin?(confidence, min_logit_margin) -> :low_logit_margin
       true -> nil
     end
   end
@@ -130,6 +139,32 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
 
   defp maybe_warmup(module, runtime, opts) do
     if function_exported?(module, :warmup, 2), do: module.warmup(runtime, opts), else: :ok
+  end
+
+  defp generate_fast(%{min_logit_margin: threshold} = cascade, input, opts)
+       when threshold > 0 do
+    if function_exported?(cascade.fast_module, :generate_with_confidence, 3) do
+      case cascade.fast_module.generate_with_confidence(cascade.fast_runtime, input, opts) do
+        {:ok, %{text: text, confidence: confidence}} -> {:ok, text, confidence}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :confidence_unavailable}
+    end
+  end
+
+  defp generate_fast(cascade, input, opts) do
+    case cascade.fast_module.generate(cascade.fast_runtime, input, opts) do
+      {:ok, text} -> {:ok, text, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp low_logit_margin?(_confidence, threshold) when threshold <= 0, do: false
+  defp low_logit_margin?(nil, _threshold), do: true
+
+  defp low_logit_margin?(confidence, threshold) do
+    Map.get(confidence, :min_logit_margin, 0.0) < threshold
   end
 
   defp run_accurate(cascade, input, opts, reason, fast_ms) do
