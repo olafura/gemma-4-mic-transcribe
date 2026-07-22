@@ -254,19 +254,29 @@ and the vocabulary head:
   )
 ```
 
-`generate_samples/3` uses one global KV cache: the prefix updates layers 0–44,
-the tail updates layers 45–47, and the tail advances the shared cache offset once
-per token. It applies the same channel-aware token suppression, EOS handling, and
-no-repeat n-gram rule as the full runtime.
+`generate_samples/3` uses one global KV cache and the already-built full-model
+predictor. The extracted prefix and tail remain independently runnable, while
+normal generation executes their recomposed matrix graph as one compiled unit.
+Pass `execution: :split` only when explicitly inspecting the boundary. Generation
+applies the same channel-aware token suppression, EOS handling, and no-repeat
+n-gram rule as the full runtime.
 
 On the real 12B bf16 checkpoint the prefix retains 11.220 billion parameter
 references (22.44 GB) and the tail 1.697 billion (3.39 GB). The split is therefore
 a swappable model boundary, not compression: every intervening decoder layer
-remains necessary. A forced two-token test on Torch CPU produced the same `"."`
-transcript as the full runtime, but took 259.7 seconds versus 3.8 seconds. The
-standalone split currently favors inspectability and replacement experiments;
-its separate compiled graphs repeatedly stream roughly 26 GB of weights and are
-not yet suitable as a low-latency inference path.
+remains necessary.
+
+Build and run the dedicated compiled benchmark with GPU XLA:
+
+```bash
+mix escript.build
+./decoder_pipeline_bench --backend exla:rocm --wav journal1.wav --runs 2
+```
+
+On the Radeon 8060S, a forced two-token 12B run produced `"."` with token ids
+`[106, 236761]`: the cold XLA compile plus generation took 12.08 seconds and the
+second, compiled run took 483 ms. The escript emits JSON records so later runs
+can be compared without editing inline Elixir commands.
 
 ## Usage
 
