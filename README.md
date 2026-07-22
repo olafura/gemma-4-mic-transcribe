@@ -397,6 +397,22 @@ mel extraction is pinned to libtorch because the launcher does not load Mix
 config and would otherwise run FFTs on `Nx.BinaryBackend`; and mel shapes
 follow the audio token buckets so streaming never compiles mid-utterance.
 
+**`--incremental-prefill` is worth turning on for E4B** (unlike the 12B,
+where it measured worse). Audio prefills into the KV cache during speech,
+so a final pays only the sub-chunk flush, the prompt suffix and decode:
+
+```text
+final lag           1.1-1.6 s   (E4B full path: 1.2-1.7 s)
+transcript latency  0.6-1.1 s   (E4B full path: 0.7-1.2 s)
+```
+
+The gap grows with utterance length, since the full path re-prefills the
+whole utterance while the incremental final's cost stays flat. Mel frames
+are extracted continuously across chunks (the utterance carries the
+unconsumed tail of the padded sample stream), so chunked extraction is
+bitwise-identical to whole-utterance extraction; only the encoder's
+attention remains chunked.
+
 ## Incremental prefill
 
 Without it, streaming re-transcribes the whole utterance for every partial, so
