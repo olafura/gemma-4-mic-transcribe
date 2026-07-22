@@ -8,7 +8,7 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
 
     def generate(:runtime, input, _opts) do
       assert input.prompt =~ "Transcribe."
-      assert input.audio.token_count in [1, 50]
+      assert input.audio.token_count in [1, 25, 50]
       {:ok, "hello world"}
     end
   end
@@ -120,7 +120,8 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
              send_to_llm: true,
              start_ms: 0,
              end_ms: 60,
-             endpoint_ms: 100
+             endpoint_ms: 100,
+             metrics: %{audio_tokens: 25}
            } = Enum.find(events, &(&1.type == "final"))
 
     assert %{end_ms: 60, endpoint_ms: 100} =

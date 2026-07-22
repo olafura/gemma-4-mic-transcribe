@@ -932,6 +932,15 @@ format (GPU FLAC decode, for example) cannot move the total meaningfully. The
 levers that matter are, in order: how many tokens a final generates, prefill,
 and the end-of-speech wait.
 
+Streaming prefill uses warmed audio-token buckets at 25-token intervals from
+25 through 200. This bounds masked padding to under one second instead of
+rounding directly from 100 to 200 tokens. On the two `journal1.wav` utterances,
+the selected buckets fell from 100/200 to 75/150 with verbatim-identical
+transcripts. Combined with `--fused-ffn`, average post-endpoint processing fell
+from 1709 to 1577 ms (7.7%), and total transcript latency fell from 2209 to
+2077 ms (6.0%). The additional shapes increase startup warmup only; they do not
+duplicate weights.
+
 Prefill is the one place where packed int4 loses: it gives up rocBLAS matrix
 cores for a hand kernel (~1100 ms versus ~240 ms measured on the older
 `Axon.dense` path).

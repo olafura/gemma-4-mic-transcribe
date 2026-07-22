@@ -20,7 +20,10 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   @default_partial_max_response_tokens 16
   @default_tts_echo_window_ms 12_000.0
   @default_tts_similarity_threshold 0.78
-  @default_audio_token_buckets [50, 100, 200]
+  # A 25-token grid bounds masked audio padding to under one second. The extra
+  # shapes cost startup compilation only; a long-running service avoids doing
+  # up to almost twice the useful prefill work for common utterance lengths.
+  @default_audio_token_buckets [25, 50, 75, 100, 125, 150, 175, 200]
 
   defstruct [
     :runtime_module,
