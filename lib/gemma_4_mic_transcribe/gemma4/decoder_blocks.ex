@@ -48,6 +48,25 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
     defstruct @enforce_keys
   end
 
+  defmodule Tail do
+    @moduledoc "A final decoder-block chain with its output norm and vocabulary head."
+
+    @enforce_keys [
+      :id,
+      :layer_indices,
+      :layer_types,
+      :input_size,
+      :vocab_size,
+      :parameter_count,
+      :model,
+      :params,
+      :predict_fun,
+      :backend,
+      :tokenizer
+    ]
+    defstruct @enforce_keys
+  end
+
   @doc "Extracts one decoder block from an already-loaded unified runtime."
   @spec extract(map(), non_neg_integer()) :: {:ok, Extracted.t()} | {:error, term()}
   def extract(runtime, layer_index) do
@@ -126,8 +145,52 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
     end
   end
 
-  @doc "Runs an extracted block or chain over a complete hidden-state sequence."
-  @spec run(Extracted.t(), Nx.Tensor.t(), keyword()) :: {:ok, Nx.Tensor.t()} | {:error, term()}
+  @doc "Extracts a final decoder-block chain plus the standalone vocabulary head."
+  @spec extract_tail(map(), Enumerable.t()) :: {:ok, Tail.t()} | {:error, term()}
+  def extract_tail(runtime, layer_indices) do
+    layer_indices = Enum.to_list(layer_indices)
+
+    with {:ok, model_info} <- fetch(runtime, :model_info),
+         {:ok, spec} <- fetch(model_info, :spec),
+         :ok <- validate_spec(spec),
+         :ok <- validate_chain(layer_indices, spec.num_blocks),
+         :ok <- validate_final_layer(layer_indices, spec.num_blocks),
+         {:ok, source_params} <- fetch(model_info, :params),
+         {:ok, params} <- extract_tail_params(source_params, layer_indices) do
+      model = Model.decoder_tail_model(spec, layer_indices)
+      backend = Map.get(runtime, :backend)
+      {_init_fun, predict_fun} = Axon.build(model, build_opts(backend))
+
+      {:ok,
+       %Tail{
+         id: "language_model.tail.#{hd(layer_indices)}-#{List.last(layer_indices)}",
+         layer_indices: layer_indices,
+         layer_types: Enum.map(layer_indices, &layer_type(spec, &1)),
+         input_size: spec.hidden_size,
+         vocab_size: spec.vocab_size,
+         parameter_count: parameter_count(params.data),
+         model: model,
+         params: params,
+         predict_fun: predict_fun,
+         backend: backend,
+         tokenizer: Map.get(runtime, :tokenizer)
+       }}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  @doc "Like `extract_tail/2`, but raises when extraction fails."
+  def extract_tail!(runtime, layer_indices) do
+    case extract_tail(runtime, layer_indices) do
+      {:ok, tail} -> tail
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
+  @doc "Runs an extracted block, chain, or vocabulary tail over a hidden-state sequence."
+  @spec run(Extracted.t() | Chain.t() | Tail.t(), Nx.Tensor.t(), keyword()) ::
+          {:ok, Nx.Tensor.t()} | {:error, term()}
   def run(component, hidden_state, opts \\ [])
 
   def run(%Extracted{} = block, %Nx.Tensor{} = hidden_state, opts) do
@@ -136,6 +199,10 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
 
   def run(%Chain{} = chain, %Nx.Tensor{} = hidden_state, opts) do
     run_model(chain, hidden_state, opts)
+  end
+
+  def run(%Tail{} = tail, %Nx.Tensor{} = hidden_state, opts) do
+    run_model(tail, hidden_state, opts)
   end
 
   defp run_model(component, hidden_state, opts) do
@@ -162,6 +229,47 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
   def run!(%Chain{} = chain, %Nx.Tensor{} = hidden_state, opts) do
     case run(chain, hidden_state, opts) do
       {:ok, output} -> output
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
+  def run!(%Tail{} = tail, %Nx.Tensor{} = hidden_state, opts) do
+    case run(tail, hidden_state, opts) do
+      {:ok, output} -> output
+      {:error, reason} -> raise ArgumentError, reason
+    end
+  end
+
+  @doc "Returns the highest-scoring next-token candidates from an extracted tail."
+  def top_k(%Tail{} = tail, %Nx.Tensor{} = hidden_state, k, opts \\ []) do
+    cond do
+      not (is_integer(k) and k > 0 and k <= tail.vocab_size) ->
+        {:error, "top-k must be an integer in 1..#{tail.vocab_size}, got: #{inspect(k)}"}
+
+      Nx.axis_size(hidden_state, 0) != 1 ->
+        {:error, "top-k token decoding currently supports batch size 1"}
+
+      true ->
+        with {:ok, logits} <- run(tail, hidden_state, opts) do
+          {scores, token_ids} = Nx.top_k(logits, k: k)
+          scores = scores |> Nx.backend_transfer(Nx.BinaryBackend) |> Nx.to_flat_list()
+          token_ids = token_ids |> Nx.backend_transfer(Nx.BinaryBackend) |> Nx.to_flat_list()
+
+          {:ok,
+           Enum.zip(token_ids, scores)
+           |> Enum.map(fn {token_id, score} ->
+             %{token_id: token_id, token: token_label(tail.tokenizer, token_id), score: score}
+           end)}
+        end
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  @doc "Like `top_k/4`, but raises when standalone decoding fails."
+  def top_k!(%Tail{} = tail, %Nx.Tensor{} = hidden_state, k, opts \\ []) do
+    case top_k(tail, hidden_state, k, opts) do
+      {:ok, candidates} -> candidates
       {:error, reason} -> raise ArgumentError, reason
     end
   end
@@ -268,6 +376,37 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
   defp extract_chain_params(other, _layer_indices),
     do: {:error, "expected Axon model parameters, got: #{inspect(other)}"}
 
+  defp extract_tail_params(%Axon.ModelState{data: data} = source_params, layer_indices) do
+    with {:ok, block_params} <- extract_chain_params(source_params, layer_indices),
+         {:ok, output_norm} <- required_params(data, "output_norm"),
+         {:ok, head} <- output_head_params(data) do
+      tail_data =
+        block_params.data
+        |> Map.put("output_norm", output_norm)
+        |> Map.put("language_modeling_head.output", head)
+
+      {:ok, Axon.ModelState.new(tail_data)}
+    end
+  end
+
+  defp extract_tail_params(other, _layer_indices),
+    do: {:error, "expected Axon model parameters, got: #{inspect(other)}"}
+
+  defp required_params(data, name) do
+    case Map.fetch(data, name) do
+      {:ok, params} -> {:ok, params}
+      :error -> {:error, "runtime contains no parameters for #{name}"}
+    end
+  end
+
+  defp output_head_params(data) do
+    case Map.get(data, "language_modeling_head.output") ||
+           Map.get(data, "embedder.token_embedding") do
+      nil -> {:error, "runtime contains no vocabulary-head parameters"}
+      params -> {:ok, params}
+    end
+  end
+
   defp parameter_count(data) do
     Enum.reduce(data, 0, fn {_name, parameters}, count ->
       count + Enum.reduce(parameters, 0, fn {_name, tensor}, sum -> sum + Nx.size(tensor) end)
@@ -312,6 +451,14 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
     end
   end
 
+  defp validate_final_layer(layer_indices, count) do
+    if List.last(layer_indices) == count - 1 do
+      :ok
+    else
+      {:error, "decoder tail must end at final layer #{count - 1}"}
+    end
+  end
+
   defp layer_type(spec, layer_index) do
     spec.layer_types
     |> Kernel.||(default_layer_types(spec.num_blocks))
@@ -322,6 +469,13 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocks do
     Enum.map(0..(count - 1), fn index ->
       if rem(index + 1, 6) == 0, do: :full_attention, else: :sliding_attention
     end)
+  end
+
+  defp token_label(nil, token_id), do: Integer.to_string(token_id)
+
+  defp token_label(tokenizer, token_id) do
+    Bumblebee.Tokenizer.id_to_token(tokenizer, token_id) ||
+      Bumblebee.Tokenizer.decode(tokenizer, [token_id])
   end
 
   defp fetch(map, key) when is_map(map) do

@@ -97,6 +97,54 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocksTest do
     assert message =~ "contiguous ascending"
   end
 
+  test "extracts a final chain with its vocabulary head" do
+    {runtime, inputs} = runtime()
+
+    assert {:ok, report} =
+             LayerProbe.run(runtime, inputs,
+               layers: [0],
+               positions: :all,
+               capture: [:block_input],
+               include_activations: true
+             )
+
+    tail = DecoderBlocks.extract_tail!(runtime, 0..1)
+    block_input = report.activations["0:block_input"]
+
+    assert tail.id == "language_model.tail.0-1"
+    assert tail.vocab_size == 32
+    assert Map.has_key?(tail.params.data, "output_norm")
+    assert Map.has_key?(tail.params.data, "language_modeling_head.output")
+    refute Map.has_key?(tail.params.data, "embedder.token_embedding")
+
+    logits =
+      DecoderBlocks.run!(tail, block_input,
+        position_ids: inputs["position_ids"],
+        attention_mask: inputs["attention_mask"]
+      )
+
+    expected = runtime.predict_fun.(runtime.model_info.params, inputs).logits[0][-1]
+
+    assert Nx.all_close(logits[0], expected, atol: 1.0e-5, rtol: 1.0e-5)
+           |> Nx.to_number() == 1
+
+    candidates =
+      DecoderBlocks.top_k!(tail, block_input, 3,
+        position_ids: inputs["position_ids"],
+        attention_mask: inputs["attention_mask"]
+      )
+
+    {_scores, expected_ids} = Nx.top_k(expected, k: 3)
+    assert Enum.map(candidates, & &1.token_id) == Nx.to_flat_list(expected_ids)
+  end
+
+  test "requires decoder tails to reach the final layer" do
+    {runtime, _inputs} = runtime()
+
+    assert {:error, message} = DecoderBlocks.extract_tail(runtime, [0])
+    assert message =~ "final layer 1"
+  end
+
   defp runtime do
     spec =
       Bumblebee.configure(Model,

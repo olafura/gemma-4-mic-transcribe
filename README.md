@@ -207,6 +207,27 @@ Chains must use contiguous ascending layers. Skipping from layer 6 directly to
 layer 29 is not compositionally valid because layers 7 through 28 produce the
 representation expected by layer 29.
 
+To produce vocabulary scores without retaining the full model, extract a chain
+that ends at the final decoder layer together with its final norm and tied
+output head:
+
+```elixir
+{:ok, tail} = Gemma4MicTranscribe.Gemma4.extract_decoder_tail(runtime, 45..47)
+
+candidates =
+  Gemma4MicTranscribe.Gemma4.DecoderBlocks.top_k!(
+    tail,
+    report.activations["45:block_input"],
+    5
+  )
+```
+
+The tail projects only the final sequence position. For 12B, layers 45–47 plus
+the vocabulary head contain about 1.697 billion parameters (3.39 GB in bf16);
+the tied 262k-token vocabulary matrix accounts for roughly 2 GB of that total.
+The returned tail retains only its 43 parameter nodes, compiled graph, backend,
+and tokenizer, so the original runtime can be released afterward.
+
 ## Usage
 
 List known model variants and their required runtimes:

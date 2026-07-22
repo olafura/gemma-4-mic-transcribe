@@ -18,4 +18,9 @@ defmodule Gemma4MicTranscribe.Gemma4 do
   defdelegate extract_decoder_chain(runtime, layer_indices),
     to: DecoderBlocks,
     as: :extract_chain
+
+  @doc "Extracts a final decoder chain with its vocabulary output head."
+  defdelegate extract_decoder_tail(runtime, layer_indices),
+    to: DecoderBlocks,
+    as: :extract_tail
 end

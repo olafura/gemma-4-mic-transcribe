@@ -201,6 +201,37 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
     end)
   end
 
+  @doc false
+  def decoder_tail_model(%__MODULE__{} = spec, layer_indices) do
+    logits =
+      spec
+      |> decoder_block_chain_model(layer_indices)
+      |> Axon.nx(
+        fn hidden_state ->
+          hidden_state
+          |> Nx.slice_along_axis(Nx.axis_size(hidden_state, 1) - 1, 1, axis: 1)
+          |> Nx.squeeze(axes: [1])
+        end,
+        name: "decoder_tail.last_hidden_state"
+      )
+      |> rms_norm(spec.hidden_size,
+        name: "output_norm",
+        epsilon: spec.layer_norm_epsilon
+      )
+      |> language_modeling_head(spec, name: "language_modeling_head")
+
+    if spec.final_logit_softcapping do
+      Axon.nx(logits, fn logits ->
+        logits
+        |> Nx.divide(spec.final_logit_softcapping)
+        |> Nx.tanh()
+        |> Nx.multiply(spec.final_logit_softcapping)
+      end)
+    else
+      logits
+    end
+  end
+
   defp inputs(spec) do
     Bumblebee.Utils.Model.inputs_to_map([
       Axon.input("input_ids", shape: {nil, nil}),
