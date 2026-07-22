@@ -304,8 +304,31 @@ was `all` (id 712, score 20.06), exactly matching the full model's first output
 token. The 3.39 GB tail loaded in 2.34 seconds, compiled and ran cold in 3.82
 seconds, and ran warm in 146 ms. Prefix capture is a one-time boundary export;
 the tail process does not load the other 11.22 billion parameters. Continuing
-past the first token requires serializing the per-layer KV cache as well as the
-hidden state.
+past the first token requires handing the per-layer KV cache across the same
+boundary as the hidden state.
+
+For full cache-aware generation, `run-split` keeps the prefix and external tail
+in one orchestrating process while passing the KV cache across their graph
+boundary on every token:
+
+```bash
+./decoder_block run-split \
+  --pipeline-artifact artifacts/gemma4-12b-baseline \
+  --artifact artifacts/gemma4-12b-tail-45-47 \
+  --wav journal1.wav \
+  --seconds 5 \
+  --backend exla:rocm \
+  --max-new-tokens 32 \
+  --runs 2
+```
+
+The runner drops the baseline artifact's tail parameter references before
+loading the independent tail, avoiding duplicate GPU residency. It reproduced
+the complete reference text and all nine token ids exactly through the split
+cache path: `"all cavalry today feelingly fresh the morning light"`. Cold split
+compilation plus generation took 18.3 seconds and the warm run took 7.30
+seconds. The remaining packaging step is to persist the 0–44 prefix directly,
+so the runner never needs to transiently read and discard the baseline tail.
 
 ## Splitting raw-audio inference
 

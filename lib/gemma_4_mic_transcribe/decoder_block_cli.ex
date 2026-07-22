@@ -19,6 +19,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     seconds: :float,
     tail_start: :integer,
     top_k: :integer,
+    max_new_tokens: :integer,
     layer: :integer,
     backend: :string,
     model_name: :string,
@@ -38,13 +39,21 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       {:ok, :extract_tail, opts} -> extract_tail!(opts)
       {:ok, :run_tail, opts} -> run_tail!(opts)
       {:ok, :capture_prefix, opts} -> capture_prefix!(opts)
+      {:ok, :run_split, opts} -> run_split!(opts)
       {:help, usage} -> IO.puts(usage)
       {:error, message} -> abort(message)
     end
   end
 
   def parse([command | argv])
-      when command in ["extract", "run", "extract-tail", "run-tail", "capture-prefix"] do
+      when command in [
+             "extract",
+             "run",
+             "extract-tail",
+             "run-tail",
+             "capture-prefix",
+             "run-split"
+           ] do
     mode = command |> String.replace("-", "_") |> String.to_existing_atom()
 
     case OptionParser.parse(argv, strict: @switches, aliases: [h: :help]) do
@@ -82,6 +91,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       seconds: Keyword.get(opts, :seconds, 5.0),
       tail_start: Keyword.get(opts, :tail_start, 45),
       top_k: Keyword.get(opts, :top_k, 10),
+      max_new_tokens: Keyword.get(opts, :max_new_tokens, 32),
       layer: Keyword.get(opts, :layer, 45),
       backend: Keyword.get(opts, :backend, defaults[:backend]),
       model_name: Keyword.get(opts, :model_name, "google/gemma-4-12B-it"),
@@ -94,6 +104,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     with :ok <- required_paths(mode, values),
          :ok <- positive_number(values.seconds, "--seconds"),
          :ok <- positive(values.top_k, "--top-k"),
+         :ok <- positive(values.max_new_tokens, "--max-new-tokens"),
          :ok <- positive(values.sequence_length, "--sequence-length"),
          :ok <- positive(values.runs, "--runs"),
          :ok <- valid_layer(values.layer),
@@ -231,6 +242,91 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     end)
   end
 
+  defp run_split!(opts) do
+    {:ok, backend} = Runtime.resolve_backend(opts.backend)
+
+    pipeline =
+      timed!("pipeline_artifact_load", fn ->
+        {:ok, load_prefix_pipeline!(opts.pipeline_artifact, backend)}
+      end)
+
+    :erlang.garbage_collect(self())
+
+    tail =
+      timed!("tail_artifact_load", fn ->
+        {:ok, DecoderBlockArtifact.load_tail!(opts.artifact, backend)}
+      end)
+
+    if tail.layer_indices != pipeline.tail.layer_indices do
+      abort(
+        "tail artifact layers #{inspect(tail.layer_indices)} do not match pipeline tail " <>
+          inspect(pipeline.tail.layer_indices)
+      )
+    end
+
+    pipeline = %{pipeline | tail: tail}
+
+    samples =
+      opts.wav
+      |> Audio.read_wav_samples!(16_000)
+      |> Enum.take(round(16_000 * opts.seconds))
+
+    input = Input.build(samples, prompt: Config.default_prompt())
+
+    IO.puts(
+      Jason.encode!(%{
+        event: "split_ready",
+        pipeline_artifact: Path.expand(opts.pipeline_artifact),
+        tail_artifact: Path.expand(opts.artifact),
+        tail_layers: tail.layer_indices,
+        backend: opts.backend,
+        samples: length(samples),
+        runs: opts.runs
+      })
+    )
+
+    Enum.each(1..opts.runs, fn run ->
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          DecoderPipeline.generate(pipeline, input,
+            max_new_tokens: opts.max_new_tokens,
+            execution: :split
+          )
+        end)
+
+      case result do
+        {:ok, output} ->
+          IO.puts(
+            Jason.encode!(%{
+              event: "split_generation",
+              run: run,
+              cold: run == 1,
+              elapsed_ms: div(elapsed_us, 1_000),
+              text: output.text,
+              token_ids: output.token_ids
+            })
+          )
+
+        {:error, reason} ->
+          abort("split generation failed: #{reason}")
+      end
+    end)
+  end
+
+  defp load_prefix_pipeline!(path, backend) do
+    source = DecoderPipelineArtifact.load!(path, backend)
+    pipeline = DecoderPipelineArtifact.build_pipeline!(source, backend)
+    empty_params = Axon.ModelState.new(%{})
+
+    %{
+      pipeline
+      | tail: %{pipeline.tail | params: empty_params},
+        generation_model: nil,
+        generation_params: empty_params,
+        generation_predict_fun: nil
+    }
+  end
+
   defp extract!(opts) do
     runtime =
       timed!("model_load", fn ->
@@ -346,6 +442,13 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
     end
   end
 
+  defp required_paths(:run_split, values) do
+    with :ok <- required(values.pipeline_artifact, "--pipeline-artifact PATH is required"),
+         :ok <- required(values.artifact, "--artifact PATH is required") do
+      :ok
+    end
+  end
+
   defp required_paths(_mode, values), do: required(values.artifact, "--artifact PATH is required")
 
   defp positive(value, _name) when is_integer(value) and value > 0, do: :ok
@@ -377,6 +480,22 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
   end
 
   defp valid_run_paths(:run_tail, opts), do: valid_run_paths(:run, %{opts | output: nil})
+
+  defp valid_run_paths(:run_split, opts) do
+    cond do
+      not File.dir?(opts.pipeline_artifact) ->
+        {:error, "pipeline artifact directory does not exist: #{opts.pipeline_artifact}"}
+
+      not File.dir?(opts.artifact) ->
+        {:error, "tail artifact directory does not exist: #{opts.artifact}"}
+
+      not File.regular?(opts.wav) ->
+        {:error, "WAV input does not exist: #{opts.wav}"}
+
+      true ->
+        :ok
+    end
+  end
 
   defp valid_run_paths(:run, opts) do
     cond do
@@ -422,6 +541,7 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       decoder_block extract-tail --artifact PATH [options]
       decoder_block run-tail --artifact PATH --input PATH [options]
       decoder_block capture-prefix --pipeline-artifact PATH --output PATH [options]
+      decoder_block run-split --pipeline-artifact PATH --artifact TAIL [options]
 
     extract loads the source checkpoint and writes only one decoder block.
       --layer INDEX              layer to extract, default 45
@@ -446,6 +566,10 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLI do
       --pipeline-artifact PATH   complete pipeline artifact used only for capture
       --wav PATH                 PCM WAV input, default journal1.wav
       --seconds SECONDS          leading audio duration, default 5.0
+
+    run-split performs cache-aware generation with the prefix from a complete
+    pipeline artifact and parameters loaded from an independent tail artifact.
+      --max-new-tokens COUNT     generated-token limit, default 32
     """
   end
 end

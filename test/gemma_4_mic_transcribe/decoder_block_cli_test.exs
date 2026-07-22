@@ -75,4 +75,29 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLITest do
     assert capture.output == output
     assert capture.seconds == 5.0
   end
+
+  test "parses cache-aware split generation with an independent tail" do
+    root = Path.join(System.tmp_dir!(), "split-cli-#{System.unique_integer([:positive])}")
+    pipeline = Path.join(root, "pipeline")
+    tail = Path.join(root, "tail")
+    File.mkdir_p!(pipeline)
+    File.mkdir_p!(tail)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    assert {:ok, :run_split, opts} =
+             DecoderBlockCLI.parse([
+               "run-split",
+               "--pipeline-artifact",
+               pipeline,
+               "--artifact",
+               tail,
+               "--wav",
+               "journal1.wav",
+               "--max-new-tokens",
+               "16"
+             ])
+
+    assert opts.max_new_tokens == 16
+    assert opts.backend == "exla:rocm"
+  end
 end
