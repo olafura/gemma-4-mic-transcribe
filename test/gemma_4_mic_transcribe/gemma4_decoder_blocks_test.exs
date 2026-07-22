@@ -184,6 +184,28 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlocksTest do
     assert Nx.all_close(next_input.hidden_state, result.output) |> Nx.to_number() == 1
   end
 
+  test "persists a final decoder tail with its vocabulary head" do
+    {runtime, _inputs} = runtime()
+    tail = DecoderBlocks.extract_tail!(runtime, 0..1)
+
+    path =
+      Path.join(System.tmp_dir!(), "gemma-decoder-tail-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf(path) end)
+    DecoderBlockArtifact.save_tail!(tail, path, verification_sequence_length: 3)
+
+    backend = {Torchx.Backend, device: :cpu}
+    standalone = DecoderBlockArtifact.load_tail!(path, backend)
+    input = DecoderBlockArtifact.load_verification!(path, backend)
+    result = DecoderBlockArtifact.verify!(standalone, input, atol: 1.0e-5, rtol: 1.0e-5)
+
+    assert standalone.layer_indices == [0, 1]
+    assert standalone.vocab_size == 32
+    assert result.verified
+    assert result.max_abs_error == 0.0
+    assert Nx.shape(result.output) == {1, 32}
+  end
+
   defp runtime do
     spec =
       Bumblebee.configure(Model,

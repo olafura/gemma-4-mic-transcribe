@@ -9,12 +9,15 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
 
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks
   alias Gemma4MicTranscribe.Gemma4.DecoderBlocks.Extracted
+  alias Gemma4MicTranscribe.Gemma4.DecoderBlocks.Tail
   alias Gemma4MicTranscribe.Gemma4Unified.Model
+  alias Bumblebee.HuggingFace.Hub
 
   @version 1
   @manifest "manifest.etf"
   @parameters "parameters.safetensors"
   @verification "verification.safetensors"
+  @tokenizer_files ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]
 
   def save!(%Extracted{} = block, path, opts \\ []) do
     path = Path.expand(path)
@@ -62,6 +65,11 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
   def load!(path, backend) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
+
+    if manifest.kind != :decoder_block do
+      raise ArgumentError, "artifact is not a decoder block"
+    end
+
     tensors = Safetensors.read!(Path.join(path, @parameters), lazy: true)
 
     params =
@@ -87,6 +95,97 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
       params: params,
       predict_fun: predict_fun,
       backend: backend
+    }
+  end
+
+  def save_tail!(%Tail{} = tail, path, opts \\ []) do
+    path = Path.expand(path)
+
+    if File.exists?(path) do
+      raise ArgumentError, "artifact path already exists: #{path}"
+    end
+
+    File.mkdir_p!(Path.dirname(path))
+    temporary = path <> ".tmp-#{System.unique_integer([:positive])}"
+    File.mkdir_p!(temporary)
+
+    try do
+      {tensors, parameter_paths} = flatten_parameters(tail.params.data)
+      Safetensors.write!(Path.join(temporary, @parameters), tensors)
+
+      sequence_length = Keyword.get(opts, :verification_sequence_length, 8)
+      verification = build_verification(tail, sequence_length)
+      Safetensors.write!(Path.join(temporary, @verification), verification)
+      maybe_copy_tokenizer!(temporary, Keyword.get(opts, :tokenizer_repository))
+
+      manifest = %{
+        version: @version,
+        kind: :decoder_tail,
+        id: tail.id,
+        layer_indices: tail.layer_indices,
+        layer_types: tail.layer_types,
+        input_size: tail.input_size,
+        vocab_size: tail.vocab_size,
+        parameter_count: tail.parameter_count,
+        spec: tail.spec,
+        parameter_paths: parameter_paths,
+        verification: @verification,
+        verification_sequence_length: sequence_length
+      }
+
+      File.write!(Path.join(temporary, @manifest), :erlang.term_to_binary(manifest))
+      File.rename!(temporary, path)
+      path
+    rescue
+      exception ->
+        File.rm_rf(temporary)
+        reraise exception, __STACKTRACE__
+    end
+  end
+
+  def load_tail!(path, backend) do
+    path = Path.expand(path)
+    manifest = read_manifest!(path)
+
+    if manifest.kind != :decoder_tail do
+      raise ArgumentError, "artifact is not a decoder tail"
+    end
+
+    tensors = Safetensors.read!(Path.join(path, @parameters), lazy: true)
+
+    params =
+      manifest.parameter_paths
+      |> Enum.map(fn {tensor_name, [node_name, parameter_name]} ->
+        {node_name, parameter_name, load_tensor!(tensors, tensor_name, backend)}
+      end)
+      |> Enum.group_by(&elem(&1, 0), &{elem(&1, 1), elem(&1, 2)})
+      |> Map.new(fn {node_name, parameters} -> {node_name, Map.new(parameters)} end)
+      |> Axon.ModelState.new()
+
+    model = Model.decoder_tail_model(manifest.spec, manifest.layer_indices)
+    {_init_fun, predict_fun} = Axon.build(model, build_opts(backend))
+
+    tokenizer =
+      if File.dir?(Path.join(path, "tokenizer")) do
+        {:ok, tokenizer} =
+          Bumblebee.load_tokenizer({:local, Path.join(path, "tokenizer")}, type: :gemma)
+
+        tokenizer
+      end
+
+    %Tail{
+      id: manifest.id,
+      layer_indices: manifest.layer_indices,
+      layer_types: manifest.layer_types,
+      input_size: manifest.input_size,
+      vocab_size: manifest.vocab_size,
+      parameter_count: manifest.parameter_count,
+      spec: manifest.spec,
+      model: model,
+      params: params,
+      predict_fun: predict_fun,
+      backend: backend,
+      tokenizer: tokenizer
     }
   end
 
@@ -163,9 +262,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     end
   end
 
-  def verify!(%Extracted{} = block, input, opts \\ []) do
+  def verify!(component, input, opts \\ []) do
     output =
-      DecoderBlocks.run!(block, input.hidden_state,
+      DecoderBlocks.run!(component, input.hidden_state,
         position_ids: input.position_ids,
         attention_mask: input.attention_mask
       )
@@ -203,22 +302,22 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
         raise ArgumentError,
               "unsupported decoder block artifact version #{inspect(manifest.version)}"
 
-      manifest.kind != :decoder_block ->
-        raise ArgumentError, "artifact is not a decoder block"
+      manifest.kind not in [:decoder_block, :decoder_tail] ->
+        raise ArgumentError, "artifact is not a decoder block or tail"
 
       true ->
         manifest
     end
   end
 
-  defp build_verification(block, sequence_length)
+  defp build_verification(component, sequence_length)
        when is_integer(sequence_length) and sequence_length > 0 do
-    backend = block.backend || Nx.BinaryBackend
-    element_count = sequence_length * block.input_size
+    backend = component.backend || Nx.BinaryBackend
+    element_count = sequence_length * component.input_size
 
     hidden_state =
       Nx.with_default_backend(backend, fn ->
-        {1, sequence_length, block.input_size}
+        {1, sequence_length, component.input_size}
         |> Nx.iota(type: :f32)
         |> Nx.divide(element_count)
         |> Nx.as_type(:bf16)
@@ -234,7 +333,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
       Nx.broadcast(Nx.tensor(1, type: :s64, backend: backend), {1, sequence_length})
 
     expected_output =
-      DecoderBlocks.run!(block, hidden_state,
+      DecoderBlocks.run!(component, hidden_state,
         position_ids: position_ids,
         attention_mask: attention_mask
       )
@@ -295,6 +394,24 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
   defp copy_to_binary(tensor), do: Nx.backend_copy(tensor, Nx.BinaryBackend)
 
   defp tensor_backend(%Nx.Tensor{data: data}), do: data.__struct__
+
+  defp maybe_copy_tokenizer!(_path, nil), do: :ok
+
+  defp maybe_copy_tokenizer!(path, repository_id) do
+    tokenizer_dir = Path.join(path, "tokenizer")
+    File.mkdir_p!(tokenizer_dir)
+    cache_scope = repository_id |> String.replace("/", "--") |> String.replace(~r/[^\w-]/, "")
+
+    Enum.each(@tokenizer_files, fn filename ->
+      url = Hub.file_url(repository_id, filename, nil)
+
+      case Hub.cached_download(url, cache_scope: cache_scope, offline: true) do
+        {:ok, source} -> File.cp!(source, Path.join(tokenizer_dir, filename))
+        {:error, _reason} when filename != "tokenizer.json" -> :ok
+        {:error, reason} -> raise "could not copy tokenizer into artifact: #{reason}"
+      end
+    end)
+  end
 
   defp build_opts(EXLA.Backend), do: [compiler: EXLA]
 

@@ -276,6 +276,37 @@ the tied 262k-token vocabulary matrix accounts for roughly 2 GB of that total.
 The returned tail retains only its 43 parameter nodes, compiled graph, backend,
 and tokenizer, so the original runtime can be released afterward.
 
+The tail can also be persisted and run against a real prefix boundary in a
+different process:
+
+```bash
+./decoder_block extract-tail \
+  --artifact artifacts/gemma4-12b-tail-45-47 \
+  --tail-start 45 \
+  --backend torchx:cpu
+
+./decoder_block capture-prefix \
+  --pipeline-artifact artifacts/gemma4-12b-baseline \
+  --output artifacts/journal1-layer-45-input.safetensors \
+  --wav journal1.wav \
+  --seconds 5 \
+  --backend exla:rocm
+
+./decoder_block run-tail \
+  --artifact artifacts/gemma4-12b-tail-45-47 \
+  --input artifacts/journal1-layer-45-input.safetensors \
+  --backend exla:rocm \
+  --top-k 10
+```
+
+For the five-second reference, the independent tail's highest-scoring token
+was `all` (id 712, score 20.06), exactly matching the full model's first output
+token. The 3.39 GB tail loaded in 2.34 seconds, compiled and ran cold in 3.82
+seconds, and ran warm in 146 ms. Prefix capture is a one-time boundary export;
+the tail process does not load the other 11.22 billion parameters. Continuing
+past the first token requires serializing the per-layer KV cache as well as the
+hidden state.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text

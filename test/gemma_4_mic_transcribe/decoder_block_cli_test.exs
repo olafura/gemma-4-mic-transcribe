@@ -42,4 +42,37 @@ defmodule Gemma4MicTranscribe.DecoderBlockCLITest do
   test "requires an artifact path" do
     assert {:error, "--artifact PATH is required"} = DecoderBlockCLI.parse(["extract"])
   end
+
+  test "parses tail extraction and real prefix capture" do
+    assert {:ok, :extract_tail, tail} =
+             DecoderBlockCLI.parse([
+               "extract-tail",
+               "--artifact",
+               "artifacts/tail-45-47",
+               "--tail-start",
+               "45"
+             ])
+
+    assert tail.backend == "torchx:cpu"
+    assert tail.tail_start == 45
+
+    pipeline = Path.join(System.tmp_dir!(), "pipeline-cli-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(pipeline)
+    output = Path.join(pipeline, "prefix.safetensors")
+    on_exit(fn -> File.rm_rf(pipeline) end)
+
+    assert {:ok, :capture_prefix, capture} =
+             DecoderBlockCLI.parse([
+               "capture-prefix",
+               "--pipeline-artifact",
+               pipeline,
+               "--output",
+               output,
+               "--wav",
+               "journal1.wav"
+             ])
+
+    assert capture.output == output
+    assert capture.seconds == 5.0
+  end
 end
