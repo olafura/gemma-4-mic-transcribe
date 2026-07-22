@@ -119,8 +119,12 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
              stable: true,
              send_to_llm: true,
              start_ms: 0,
-             end_ms: 60
+             end_ms: 60,
+             endpoint_ms: 100
            } = Enum.find(events, &(&1.type == "final"))
+
+    assert %{end_ms: 60, endpoint_ms: 100} =
+             Enum.find(events, &(&1.type == "speech_end"))
   end
 
   test "partial events are unstable and not marked for LLM delivery" do

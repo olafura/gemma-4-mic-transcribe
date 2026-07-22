@@ -330,21 +330,23 @@ defmodule Gemma4MicTranscribe.CLI do
         # continue it rather than restarting; resetting only the wall clock
         # would make lag negative.
         {counts, _offset} =
-          Enum.reduce(1..config.repeat, {%{finals: 0, errors: 0, lags: %{}}, 0.0}, fn pass,
-                                                                                      {counts,
-                                                                                       offset} ->
-            counts =
-              counts
-              |> emit_stream_events(maybe_push_tts(session, config), event_sink)
-              |> push_streaming_wav(session, config, event_sink, clock_start_ms, offset)
-              |> emit_stream_events(flush_streaming_wav(session), event_sink)
+          Enum.reduce(
+            1..config.repeat,
+            {%{finals: 0, errors: 0, lags: %{}, latency_breakdowns: %{}}, 0.0},
+            fn pass, {counts, offset} ->
+              counts =
+                counts
+                |> emit_stream_events(maybe_push_tts(session, config), event_sink)
+                |> push_streaming_wav(session, config, event_sink, clock_start_ms, offset)
+                |> emit_stream_events(flush_streaming_wav(session), event_sink)
 
-            if config.repeat > 1 do
-              IO.puts(:stderr, "bench: pass #{pass}/#{config.repeat} complete")
+              if config.repeat > 1 do
+                IO.puts(:stderr, "bench: pass #{pass}/#{config.repeat} complete")
+              end
+
+              {counts, offset + wav_duration_ms(config)}
             end
-
-            {counts, offset + wav_duration_ms(config)}
-          end)
+          )
 
         print_lag_summary(config, counts)
 
@@ -366,8 +368,13 @@ defmodule Gemma4MicTranscribe.CLI do
   defp annotate_lag(event, %RunConfig{realtime: true}, clock_start_ms) do
     case event do
       %{end_ms: end_ms} ->
-        lag_ms = System.monotonic_time(:millisecond) - clock_start_ms - round(end_ms)
-        Map.put(event, :lag_ms, lag_ms)
+        audio_cursor_ms = System.monotonic_time(:millisecond) - clock_start_ms
+        transcript_ms = max(audio_cursor_ms - round(end_ms), 0)
+
+        event
+        |> Map.put(:lag_ms, transcript_ms)
+        |> Map.put(:transcript_latency_ms, transcript_ms)
+        |> maybe_annotate_endpoint_latency(audio_cursor_ms)
 
       _event ->
         event
@@ -376,13 +383,42 @@ defmodule Gemma4MicTranscribe.CLI do
 
   defp annotate_lag(event, _config, _clock_start_ms), do: event
 
-  defp record_lag(counts, %{lag_ms: lag_ms, type: type}) do
-    update_in(counts.lags[type], &[lag_ms | &1 || []])
+  defp maybe_annotate_endpoint_latency(%{endpoint_ms: endpoint_ms} = event, audio_cursor_ms) do
+    endpoint_detection_ms = max(round(endpoint_ms) - round(event.end_ms), 0)
+    post_endpoint_ms = max(audio_cursor_ms - round(endpoint_ms), 0)
+
+    event
+    |> Map.put(:endpoint_detection_ms, endpoint_detection_ms)
+    |> Map.put(:post_endpoint_ms, post_endpoint_ms)
   end
+
+  defp maybe_annotate_endpoint_latency(event, _audio_cursor_ms), do: event
+
+  defp record_lag(
+         %{latency_breakdowns: _} = counts,
+         %{
+           lag_ms: lag_ms,
+           type: type,
+           endpoint_detection_ms: endpoint_detection_ms,
+           post_endpoint_ms: post_endpoint_ms
+         }
+       ) do
+    breakdown = %{
+      endpoint_detection_ms: endpoint_detection_ms,
+      post_endpoint_ms: post_endpoint_ms
+    }
+
+    counts
+    |> update_in([:lags, type], &[lag_ms | &1 || []])
+    |> update_in([:latency_breakdowns, type], &[breakdown | &1 || []])
+  end
+
+  defp record_lag(counts, %{lag_ms: lag_ms, type: type}),
+    do: update_in(counts.lags[type], &[lag_ms | &1 || []])
 
   defp record_lag(counts, _event), do: counts
 
-  defp print_lag_summary(%RunConfig{realtime: true} = config, %{lags: lags})
+  defp print_lag_summary(%RunConfig{realtime: true}, %{lags: lags} = counts)
        when map_size(lags) > 0 do
     Enum.each(Enum.sort(lags), fn {type, lag_list} ->
       lag_list = Enum.sort(lag_list)
@@ -395,25 +431,44 @@ defmodule Gemma4MicTranscribe.CLI do
           "avg=#{avg} max=#{List.last(lag_list)}"
       )
 
-      # A final is held until the endpointer has seen enough silence, so its lag
-      # mixes two independent costs. Reporting them apart keeps transcription
-      # speed comparable across endpointing settings, and matches how streaming
-      # ASR services report latency.
       if type == "final" do
-        eot = round(config.speech_end_silence_ms)
-        transcript = Enum.map(lag_list, &max(&1 - eot, 0))
-        transcript_avg = round(Enum.sum(transcript) / count)
-
         IO.puts(
           :stderr,
-          "bench: #{type} eot_ms=#{eot} transcript_ms min=#{List.first(transcript)} " <>
-            "avg=#{transcript_avg} max=#{List.last(transcript)}"
+          "bench: #{type} transcript_ms min=#{List.first(lag_list)} " <>
+            "avg=#{avg} max=#{List.last(lag_list)} " <>
+            "(speech end to delivered transcript)"
         )
+
+        print_latency_breakdown(counts, type)
       end
     end)
   end
 
   defp print_lag_summary(_config, _counts), do: :ok
+
+  defp print_latency_breakdown(%{latency_breakdowns: breakdowns}, type) do
+    case Map.get(breakdowns, type, []) do
+      [] ->
+        :ok
+
+      values ->
+        endpoint = values |> Enum.map(& &1.endpoint_detection_ms) |> Enum.sort()
+        post_endpoint = values |> Enum.map(& &1.post_endpoint_ms) |> Enum.sort()
+
+        IO.puts(
+          :stderr,
+          "bench: #{type} endpoint_detection_ms #{format_latency_stats(endpoint)} " <>
+            "post_endpoint_ms #{format_latency_stats(post_endpoint)}"
+        )
+    end
+  end
+
+  defp print_latency_breakdown(_counts, _type), do: :ok
+
+  defp format_latency_stats(values) do
+    avg = round(Enum.sum(values) / length(values))
+    "min=#{List.first(values)} avg=#{avg} max=#{List.last(values)}"
+  end
 
   defp streaming_session_opts(config, runtime_module) do
     [

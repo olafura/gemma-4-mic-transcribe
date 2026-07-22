@@ -881,14 +881,18 @@ when profiling - observability, not speed.
 Streaming ASR services report two separate numbers, and mixing them hides which
 one is slow:
 
-- **EOT latency** — speaker stops to end-of-turn event. Ours is
-  `--speech-end-silence-ms`, default 500 ms.
-- **Transcript latency** — audio available to transcript emitted, excluding the
-  endpoint wait. This is transcription speed.
+- **EOT event latency** — speaker stops to the delivered end-of-turn event.
+- **Transcript latency** — the wall-clock audio cursor when a transcript is
+  delivered minus the transcript's audio cursor.
 
-`--realtime` reports both for finals (`bench: final ... eot_ms=... transcript_ms
-...`). Measured on `journal1.wav` with `--no-partials`: EOT 500 ms, transcript
-1.5-3.0 s, total 2.0-3.5 s.
+`--realtime` reports both event lags and splits final transcript latency into
+`endpoint_detection_ms` (audio consumed after the final active speech frame)
+and `post_endpoint_ms` (input build, prefill, and decode). The split is measured
+from event timestamps; it no longer subtracts the configured silence threshold
+and calls the remainder transcript latency. In the current synchronous API the
+`speech_end` and `final` events are returned together after generation, so their
+delivered latencies are almost identical even though endpoint detection itself
+normally takes the configured 500 ms.
 
 For reference, Deepgram publishes 100-500 ms EOT and 150-300 ms transcript
 latency for their purpose-built streaming models. Our endpointing is in that
@@ -902,7 +906,7 @@ Measured per final transcript on `journal1.wav` with `--realtime --no-partials`
 costs):
 
 ```text
-end-of-speech silence   500 ms   --speech-end-silence-ms
+endpoint detection      500 ms   --speech-end-silence-ms
 prefill               ~1100 ms   one pass over the utterance audio
 decode                  90 ms    per generated token
 audio -> tensor         7-25 ms  all WAV reading, resampling and framing

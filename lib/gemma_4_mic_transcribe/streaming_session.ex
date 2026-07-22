@@ -395,6 +395,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
   defp finalize_utterance(state, reason, events) do
     start_ms = state.utterance_start_ms
     end_ms = state.utterance_last_active_end_ms || state.next_frame_start_ms || start_ms
+    endpoint_ms = state.next_frame_start_ms || end_ms
     duration_ms = end_ms - start_ms
 
     speech_end_event = %{
@@ -402,6 +403,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       utterance_id: state.utterance_id,
       start_ms: round(start_ms),
       end_ms: round(end_ms),
+      endpoint_ms: round(endpoint_ms),
       reason: Atom.to_string(reason),
       stable: true,
       send_to_llm: false
@@ -410,31 +412,33 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     {event, state} =
       cond do
         duration_ms < state.min_utterance_ms ->
-          {suppressed_event(state, :too_short, start_ms, end_ms), state}
+          {suppressed_event(state, :too_short, start_ms, end_ms, endpoint_ms), state}
 
         not utterance_speech?(state) ->
-          {suppressed_event(state, :not_speech, start_ms, end_ms), state}
+          {suppressed_event(state, :not_speech, start_ms, end_ms, endpoint_ms), state}
 
         true ->
-          final_transcript_event(state, start_ms, end_ms)
+          final_transcript_event(state, start_ms, end_ms, endpoint_ms)
       end
 
     state = reset_utterance(state)
     {state, [event, speech_end_event | events]}
   end
 
-  defp final_transcript_event(state, start_ms, end_ms) do
+  defp final_transcript_event(state, start_ms, end_ms, endpoint_ms) do
     case transcribe(state, utterance_samples(state)) do
       {:ok, text, metrics, state} ->
         cond do
           normalize_text(text) == "" ->
-            {suppressed_event(state, :empty_transcript, start_ms, end_ms), state}
+            {suppressed_event(state, :empty_transcript, start_ms, end_ms, endpoint_ms), state}
 
           tts_echo?(state, text, end_ms) ->
-            {suppressed_event(state, :tts_echo, start_ms, end_ms, text, metrics), state}
+            {suppressed_event(state, :tts_echo, start_ms, end_ms, endpoint_ms, text, metrics),
+             state}
 
           refusal?(text) ->
-            {suppressed_event(state, :refusal, start_ms, end_ms, text, metrics), state}
+            {suppressed_event(state, :refusal, start_ms, end_ms, endpoint_ms, text, metrics),
+             state}
 
           true ->
             {%{
@@ -443,6 +447,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
                text: text,
                start_ms: round(start_ms),
                end_ms: round(end_ms),
+               endpoint_ms: round(endpoint_ms),
                stable: true,
                send_to_llm: true,
                metrics: metrics
@@ -675,7 +680,15 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     analysis.speech?
   end
 
-  defp suppressed_event(state, reason, start_ms, end_ms, text \\ nil, metrics \\ %{}) do
+  defp suppressed_event(
+         state,
+         reason,
+         start_ms,
+         end_ms,
+         endpoint_ms,
+         text \\ nil,
+         metrics \\ %{}
+       ) do
     %{
       type: "suppressed",
       utterance_id: state.utterance_id,
@@ -683,6 +696,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       text: text,
       start_ms: round(start_ms),
       end_ms: round(end_ms),
+      endpoint_ms: round(endpoint_ms),
       stable: true,
       send_to_llm: false,
       metrics: metrics
