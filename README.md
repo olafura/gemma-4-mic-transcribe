@@ -798,6 +798,12 @@ events have `send_to_llm: true`. `Gemma4MicTranscribe.WebRTC.TestHarness`
 contains the Elixir WebRTC-facing adapter used for browser/WebRTC testing; see
 https://elixir-webrtc.org/ for the WebRTC project.
 
+Call `StreamingSession.subscribe_speech_end/2` to receive
+`{StreamingSession, :speech_end, session, event, monotonic_ms}` as soon as the
+endpointer commits an utterance. The notification is sent before input building,
+prefill, or decode begins, so a voice pipeline can react to end-of-turn without
+waiting for the final transcript call to return.
+
 ## Tracing
 
 Two tracing paths are available for performance investigation:
@@ -900,14 +906,15 @@ one is slow:
 - **Transcript latency** — the wall-clock audio cursor when a transcript is
   delivered minus the transcript's audio cursor.
 
-`--realtime` reports both event lags and splits final transcript latency into
+`--realtime` subscribes to the immediate speech-end notification, reports both
+event lags, and splits final transcript latency into
 `endpoint_detection_ms` (audio consumed after the final active speech frame)
 and `post_endpoint_ms` (input build, prefill, and decode). The split is measured
 from event timestamps; it no longer subtracts the configured silence threshold
-and calls the remainder transcript latency. In the current synchronous API the
-`speech_end` and `final` events are returned together after generation, so their
-delivered latencies are almost identical even though endpoint detection itself
-normally takes the configured 500 ms.
+and calls the remainder transcript latency. The regular `push_audio/3` return
+still contains both events for compatibility, while subscribers receive
+`speech_end` before generation. Consequently the benchmark's speech-end lag is
+normally the configured 500 ms and final lag includes model processing.
 
 For reference, Deepgram publishes 100-500 ms EOT and 150-300 ms transcript
 latency for their purpose-built streaming models. Our endpointing is in that

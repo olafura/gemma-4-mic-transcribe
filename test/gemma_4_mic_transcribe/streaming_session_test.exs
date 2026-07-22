@@ -28,6 +28,18 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
     def generate(:runtime, _input, _opts), do: {:ok, "hello world"}
   end
 
+  defmodule BlockingRuntime do
+    def load(_opts), do: {:ok, :runtime}
+
+    def generate(:runtime, _input, _opts) do
+      send(:streaming_blocking_test, {:generation_started, self()})
+
+      receive do
+        :finish_generation -> {:ok, "hello world"}
+      end
+    end
+  end
+
   defmodule IncrementalRuntime do
     defstruct appended: []
 
@@ -126,6 +138,30 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
 
     assert %{end_ms: 60, endpoint_ms: 100} =
              Enum.find(events, &(&1.type == "speech_end"))
+  end
+
+  test "speech-end subscribers are notified before final generation completes" do
+    Process.register(self(), :streaming_blocking_test)
+
+    {:ok, session} =
+      start_test_session(
+        runtime_module: BlockingRuntime,
+        partials: false
+      )
+
+    assert :ok = StreamingSession.subscribe_speech_end(session)
+    samples = List.duplicate(0.2, 60) ++ List.duplicate(0.0, 60)
+
+    task = Task.async(fn -> StreamingSession.push_audio(session, samples, 0.0) end)
+
+    assert_receive {StreamingSession, :speech_end, ^session, %{end_ms: 60}, observed_at_ms}
+    assert is_integer(observed_at_ms)
+    assert_receive {:generation_started, runtime_process}, 1_000
+    assert Task.yield(task, 0) == nil
+
+    send(runtime_process, :finish_generation)
+    assert {:ok, events} = Task.await(task)
+    assert Enum.any?(events, &(&1.type == "final"))
   end
 
   test "partial events are unstable and not marked for LLM delivery" do

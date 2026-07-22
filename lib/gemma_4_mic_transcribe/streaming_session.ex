@@ -62,6 +62,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     :utterance_last_active_end_ms,
     :trailing_silence_ms,
     :last_partial_ms,
+    :speech_end_subscriber,
     :tts_history
   ]
 
@@ -79,6 +80,11 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
   def flush(session) do
     GenServer.call(session, :flush, :infinity)
+  end
+
+  @doc "Subscribes a process to speech-end events emitted before final transcription starts."
+  def subscribe_speech_end(session, subscriber \\ self()) when is_pid(subscriber) do
+    GenServer.call(session, {:subscribe_speech_end, subscriber})
   end
 
   def json_event!(event), do: Jason.encode!(event)
@@ -138,6 +144,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       utterance_last_active_end_ms: nil,
       trailing_silence_ms: 0.0,
       last_partial_ms: nil,
+      speech_end_subscriber: Keyword.get(opts, :speech_end_subscriber),
       tts_history: []
     }
 
@@ -149,6 +156,11 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     else
       {:ok, state}
     end
+  end
+
+  @impl true
+  def handle_call({:subscribe_speech_end, subscriber}, _from, state) do
+    {:reply, :ok, %{state | speech_end_subscriber: subscriber}}
   end
 
   @impl true
@@ -413,6 +425,8 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       send_to_llm: false
     }
 
+    notify_speech_end(state, speech_end_event)
+
     {event, state} =
       cond do
         duration_ms < state.min_utterance_ms ->
@@ -427,6 +441,17 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
     state = reset_utterance(state)
     {state, [event, speech_end_event | events]}
+  end
+
+  defp notify_speech_end(%__MODULE__{speech_end_subscriber: nil}, _event), do: :ok
+
+  defp notify_speech_end(%__MODULE__{speech_end_subscriber: subscriber}, event) do
+    send(
+      subscriber,
+      {__MODULE__, :speech_end, self(), event, System.monotonic_time(:millisecond)}
+    )
+
+    :ok
   end
 
   defp final_transcript_event(state, start_ms, end_ms, endpoint_ms) do

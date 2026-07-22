@@ -324,6 +324,10 @@ defmodule Gemma4MicTranscribe.CLI do
       # which is how far each event trails the live audio.
       clock_start_ms = System.monotonic_time(:millisecond)
 
+      if config.realtime do
+        :ok = StreamingSession.subscribe_speech_end(session)
+      end
+
       event_sink = fn event ->
         event = annotate_lag(event, config, clock_start_ms)
         base_sink.(event)
@@ -373,7 +377,9 @@ defmodule Gemma4MicTranscribe.CLI do
   defp annotate_lag(event, %RunConfig{realtime: true}, clock_start_ms) do
     case event do
       %{end_ms: end_ms} ->
-        audio_cursor_ms = System.monotonic_time(:millisecond) - clock_start_ms
+        {observed_at_ms, event} = Map.pop(event, :observed_at_monotonic_ms)
+        observed_at_ms = observed_at_ms || System.monotonic_time(:millisecond)
+        audio_cursor_ms = observed_at_ms - clock_start_ms
         transcript_ms = max(audio_cursor_ms - round(end_ms), 0)
 
         event
@@ -527,7 +533,9 @@ defmodule Gemma4MicTranscribe.CLI do
       maybe_pace(config, clock_start_ms, timestamp_ms)
 
       case StreamingSession.push_audio(session, samples, timestamp_ms) do
-        {:ok, events} -> emit_stream_events(counts, events, event_sink)
+        {:ok, events} ->
+          events = attach_speech_end_timestamps(events, session)
+          emit_stream_events(counts, events, event_sink)
       end
     end)
   rescue
@@ -545,7 +553,34 @@ defmodule Gemma4MicTranscribe.CLI do
 
   defp flush_streaming_wav(session) do
     case StreamingSession.flush(session) do
-      {:ok, events} -> events
+      {:ok, events} -> attach_speech_end_timestamps(events, session)
+    end
+  end
+
+  defp attach_speech_end_timestamps(events, session) do
+    timestamps = drain_speech_end_timestamps(session, %{})
+
+    Enum.map(events, fn
+      %{type: "speech_end", utterance_id: utterance_id} = event ->
+        case Map.fetch(timestamps, utterance_id) do
+          {:ok, observed_at_ms} -> Map.put(event, :observed_at_monotonic_ms, observed_at_ms)
+          :error -> event
+        end
+
+      event ->
+        event
+    end)
+  end
+
+  defp drain_speech_end_timestamps(session, timestamps) do
+    receive do
+      {StreamingSession, :speech_end, ^session, event, observed_at_ms} ->
+        drain_speech_end_timestamps(
+          session,
+          Map.put(timestamps, event.utterance_id, observed_at_ms)
+        )
+    after
+      0 -> timestamps
     end
   end
 
