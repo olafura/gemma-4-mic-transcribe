@@ -57,14 +57,47 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
     second = runtime.predict_fun.(runtime.model_info.params, decode_inputs)
     second_id = second.logits[0][-1] |> Nx.argmax() |> Nx.to_number()
 
-    assert {:ok, [^first_id, ^second_id]} =
+    for execution <- [:composed, :split] do
+      assert {:ok, [^first_id, ^second_id]} =
+               DecoderPipeline.generate_prepared(pipeline, inputs,
+                 max_new_tokens: 2,
+                 min_new_tokens: 3,
+                 execution: execution
+               )
+    end
+  end
+
+  test "rejects unknown generation execution modes" do
+    {runtime, inputs} = runtime()
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+
+    assert {:error, ":execution must be :composed or :split"} =
+             DecoderPipeline.generate_prepared(pipeline, inputs, execution: :unknown)
+  end
+
+  test "compiles the composed generation graph with XLA" do
+    assert {:ok, _started} = Application.ensure_all_started(:exla)
+    {runtime, inputs} = runtime({EXLA.Backend, client: :host})
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+
+    assert {:ok, token_ids} =
              DecoderPipeline.generate_prepared(pipeline, inputs,
                max_new_tokens: 2,
                min_new_tokens: 3
              )
+
+    assert length(token_ids) == 2
   end
 
-  defp runtime do
+  defp runtime(backend \\ nil)
+
+  defp runtime(nil), do: build_runtime(nil)
+
+  defp runtime(backend) do
+    Nx.with_default_backend(backend, fn -> build_runtime(backend) end)
+  end
+
+  defp build_runtime(backend) do
     spec =
       Bumblebee.configure(Model,
         vocab_size: 32,
@@ -95,12 +128,13 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
     }
 
     model = Bumblebee.build_model(spec)
-    {init_fun, predict_fun} = Axon.build(model)
+    build_opts = if backend, do: [compiler: EXLA, client: :host], else: []
+    {init_fun, predict_fun} = Axon.build(model, build_opts)
     params = init_fun.(inputs, Axon.ModelState.empty())
 
     {%{
        model_name: "tiny-gemma4",
-       backend: nil,
+       backend: backend,
        tokenizer: nil,
        suppression_mask: Nx.broadcast(0, {32}) |> Nx.as_type(:u8),
        inside_channel_suppression_mask: Nx.broadcast(0, {32}) |> Nx.as_type(:u8),

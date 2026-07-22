@@ -17,6 +17,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.Gemma4Unified.Transcript
 
+  @cache_length_step 256
+
   defmodule Prefix do
     @moduledoc "The embeddings, audio projection, and leading decoder blocks."
 
@@ -40,6 +42,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     :cached_prefix_predict_fun,
     :cached_tail_model,
     :cached_tail_predict_fun,
+    :generation_model,
+    :generation_params,
+    :generation_predict_fun,
     :parameter_count
   ]
   defstruct @enforce_keys
@@ -53,7 +58,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          {:ok, model_info} <- fetch(runtime, :model_info),
          {:ok, spec} <- fetch(model_info, :spec),
          :ok <- validate_spec(spec),
+         {:ok, generation_model} <- fetch(model_info, :model),
          {:ok, source_params} <- fetch(model_info, :params),
+         {:ok, generation_predict_fun} <- fetch(runtime, :predict_fun),
          prefix_end = hd(tail_layers) - 1,
          {:ok, prefix_params} <- extract_prefix_params(source_params, prefix_end) do
       backend = Map.get(runtime, :backend)
@@ -103,6 +110,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          cached_prefix_predict_fun: cached_prefix_predict_fun,
          cached_tail_model: cached_tail_model,
          cached_tail_predict_fun: cached_tail_predict_fun,
+         generation_model: generation_model,
+         generation_params: source_params,
+         generation_predict_fun: generation_predict_fun,
          parameter_count: prefix.parameter_count + tail.parameter_count
        }}
     end
@@ -165,6 +175,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
   def generate_prepared(%__MODULE__{} = pipeline, prepared, opts \\ []) do
     max_new_tokens = Keyword.get(opts, :max_new_tokens, 32)
     min_new_tokens = Keyword.get(opts, :min_new_tokens, 0)
+    execution = Keyword.get(opts, :execution, :composed)
 
     cond do
       not (is_integer(max_new_tokens) and max_new_tokens >= 0) ->
@@ -173,11 +184,14 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       not (is_integer(min_new_tokens) and min_new_tokens >= 0) ->
         {:error, ":min_new_tokens must be a non-negative integer"}
 
+      execution not in [:composed, :split] ->
+        {:error, ":execution must be :composed or :split"}
+
       max_new_tokens == 0 ->
         {:ok, []}
 
       true ->
-        generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens)
+        generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens, execution)
     end
   rescue
     exception -> {:error, Exception.message(exception)}
@@ -200,9 +214,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     exception -> {:error, Exception.message(exception)}
   end
 
-  defp generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens) do
+  defp generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens, execution) do
     sequence_length = Nx.axis_size(prepared["input_ids"], 1)
-    max_cache_length = sequence_length + max_new_tokens
+    max_cache_length = cache_length(sequence_length, max_new_tokens)
     backend = pipeline.prefix.backend || Nx.BinaryBackend
 
     cache =
@@ -210,20 +224,11 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         Model.init_cache(pipeline.generation.spec, 1, max_cache_length, %{})
       end)
 
-    prefix_inputs = Map.put(prepared, "cache", cache)
-    prefix_outputs = pipeline.cached_prefix_predict_fun.(pipeline.prefix.params, prefix_inputs)
-
-    tail_outputs =
-      pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{
-        "hidden_state" => prefix_outputs.hidden_state,
-        "position_ids" => prepared["position_ids"],
-        "attention_mask" => prefix_outputs.attention_mask,
-        "cache" => prefix_outputs.cache
-      })
+    outputs = predict_cached(pipeline, Map.put(prepared, "cache", cache), execution)
 
     channel_state = ChannelState.content()
     suppression_mask = suppression_mask(pipeline, channel_state)
-    token_id = TokenSelection.next_token_id_from_sequence(tail_outputs.logits, suppression_mask)
+    token_id = TokenSelection.next_token_id_from_sequence(outputs.logits, suppression_mask)
 
     if stop_token?(pipeline, token_id) and min_new_tokens <= 1 do
       {:ok, []}
@@ -232,14 +237,15 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
 
       decode_cached(
         pipeline,
-        tail_outputs.cache,
+        outputs.cache,
         token_id,
         content_length,
         [token_id],
         1,
         max_new_tokens,
         min_new_tokens,
-        channel_state
+        channel_state,
+        execution
       )
     end
   end
@@ -253,7 +259,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          generated_count,
          max_new_tokens,
          _min_new_tokens,
-         _channel_state
+         _channel_state,
+         _execution
        )
        when generated_count >= max_new_tokens,
        do: {:ok, Enum.reverse(generated)}
@@ -267,7 +274,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          generated_count,
          max_new_tokens,
          min_new_tokens,
-         channel_state
+         channel_state,
+         execution
        ) do
     backend = pipeline.prefix.backend || Nx.BinaryBackend
     position_id = prompt_length + generated_count - 1
@@ -284,15 +292,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         }
       end)
 
-    prefix_outputs = pipeline.cached_prefix_predict_fun.(pipeline.prefix.params, prefix_inputs)
-
-    tail_outputs =
-      pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{
-        "hidden_state" => prefix_outputs.hidden_state,
-        "position_ids" => prefix_inputs["position_ids"],
-        "attention_mask" => prefix_outputs.attention_mask,
-        "cache" => prefix_outputs.cache
-      })
+    outputs = predict_cached(pipeline, prefix_inputs, execution)
 
     suppression_mask = suppression_mask(pipeline, channel_state)
 
@@ -301,7 +301,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
 
     token_id =
       TokenSelection.next_allowed_token_id_from_sequence(
-        tail_outputs.logits,
+        outputs.logits,
         suppression_mask,
         banned_ids
       )
@@ -313,16 +313,32 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     else
       decode_cached(
         pipeline,
-        tail_outputs.cache,
+        outputs.cache,
         token_id,
         prompt_length,
         [token_id | generated],
         generated_count + 1,
         max_new_tokens,
         min_new_tokens,
-        ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids)
+        ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
+        execution
       )
     end
+  end
+
+  defp predict_cached(pipeline, inputs, :composed) do
+    pipeline.generation_predict_fun.(pipeline.generation_params, inputs)
+  end
+
+  defp predict_cached(pipeline, inputs, :split) do
+    prefix_outputs = pipeline.cached_prefix_predict_fun.(pipeline.prefix.params, inputs)
+
+    pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{
+      "hidden_state" => prefix_outputs.hidden_state,
+      "position_ids" => inputs["position_ids"],
+      "attention_mask" => prefix_outputs.attention_mask,
+      "cache" => prefix_outputs.cache
+    })
   end
 
   defp suppression_mask(pipeline, :before_content),
@@ -344,6 +360,11 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       nil -> List.wrap(spec.eos_token_id)
       ids -> List.wrap(ids)
     end
+  end
+
+  defp cache_length(prompt_length, max_new_tokens) do
+    needed = prompt_length + max_new_tokens
+    div(needed + @cache_length_step - 1, @cache_length_step) * @cache_length_step
   end
 
   defp extract_prefix_params(%Axon.ModelState{data: data}, last_layer) do
