@@ -394,18 +394,51 @@ came from `Axon.dense`, which XLA fuses; the plain `Nx.dot` in the hybrid layer
 does not reach the same path. Recovering it would mean matching that lowering,
 not just holding a dequantized copy.
 
-### Gemma 4 E4B (`--model-name gemma4-e4b`)
+### Gemma 4 E4B versus 12B (`--model-name gemma4-e4b`)
 
-E4B halves the latency of the 12B on the same hardware. Measured on
-`journal1.wav` with `--backend exla:rocm --stream-wav --realtime
---no-partials` (bf16 weights, ~16 GB resident, load + transfer ~18 s):
+Both models measured back-to-back on the same day, same harness
+(`--backend exla:rocm --stream-wav --realtime --no-partials --debug`,
+`journal1.wav`), E4B in its best configuration (exact incremental
+prefill, bf16) against the 12B in its best (packed int4):
 
 ```text
-final lag           1.2-1.7 s   (12B packed: 2.0-3.5 s)
-transcript latency  0.7-1.2 s   (12B: 1.5-3.0 s)
-prefill             110-133 ms  (12B bf16: ~240 ms, packed: ~1100 ms)
-decode              72-80 ms    per token (12B packed: 90 ms, bf16: 140 ms)
+                        E4B              12B packed
+final lag               1.24-1.78 s      2.20-3.77 s
+transcript latency      0.74-1.28 s      1.70-3.27 s
+prefill (warm, live)    128-133 ms       1146-1689 ms
+decode per token (p50)  72 ms            104 ms
+decode per token (p90)  77 ms            110 ms
+resident weights        16 GB bf16       ~7 GB packed
+load + transfer         ~18 s            ~203 s
 ```
+
+E4B's advantage compounds: ~10x faster prefill, ~1.4x faster decode, and
+finals that are both shorter and less variable. The 12B wins only on
+resident memory.
+
+Quality on the same two utterances, against the HF reference
+implementation's transcript of the same audio:
+
+```text
+reference (E4B, HF): "Okay, Bali today, feeling refreshed. The morning
+                      light" / "Tomorrow I write a <garbled> and I
+                      enjoyed a nice cup of coffee."
+ours (E4B):          "How are you today? Feeling refreshed?" /
+                     "Morning lights, biripo and i enjoy the nice cup
+                      of coffee."
+ours (12B):          "I'm feeling fresh." /
+                     "The morning light is beautiful, and I enjoy a
+                      nice cup of coffee."
+```
+
+The patterns are characteristic: E4B transcribes more literally and
+garbles the hard word (so does the HF reference E4B - it is the model,
+not this port), while the 12B produces the most fluent English but
+compresses or paraphrases ("Okay, Bali today, feeling refreshed" became
+"I'm feeling fresh."). For feeding a downstream LLM, E4B's
+literal-but-occasionally-garbled output at half the latency is the
+better trade; the 12B reads better to a human but silently drops
+content, which a transcription pipeline cannot detect after the fact.
 
 Transcript quality on this clip matches the HF reference implementation
 run on the same audio (one mishear each). Caveats found on the way, all
