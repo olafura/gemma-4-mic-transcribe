@@ -183,6 +183,7 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
                "3",
                "--head-artifact",
                "output-head",
+               "--chat",
                "--expert-scale",
                "0.0",
                "--text",
@@ -209,6 +210,10 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
 
     assert prefix.expert_scale == 0.0
     assert prefix.head_artifact == "output-head"
+
+    assert prefix.input_text ==
+             "<|turn>user\nProve the theorem.<turn|>\n" <>
+               "<|turn>model\n<|channel>thought\n<channel|>"
   end
 
   test "validates caller command paths and text" do

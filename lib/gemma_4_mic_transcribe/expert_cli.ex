@@ -33,6 +33,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     input_value: :float,
     expert_scale: :float,
     text: :string,
+    chat: :boolean,
     help: :boolean
   ]
 
@@ -241,7 +242,9 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
           )
 
         {embedding_data, first_device} =
-          ExpertCaller.call_layer_device!(layer_0, opts.text, expert_scale: opts.expert_scale)
+          ExpertCaller.call_layer_device!(layer_0, opts.input_text,
+            expert_scale: opts.expert_scale
+          )
 
         first_layer_index = layer_0.manifest.layer_index
         expert_index = layer_0.expert.manifest.expert_index
@@ -594,6 +597,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
            head_artifact: opts[:head_artifact],
            layers: layers,
            text: opts[:text],
+           input_text: if(opts[:chat], do: chat_prompt(opts[:text]), else: opts[:text]),
            expert_scale: opts[:expert_scale] || 1.0,
            backend: opts[:backend] || "exla:rocm"
          }}
@@ -627,6 +631,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                }
              end),
            text: opts[:text],
+           input_text: if(opts[:chat], do: chat_prompt(opts[:text]), else: opts[:text]),
            expert_scale: opts[:expert_scale] || 1.0,
            backend: opts[:backend] || "exla:rocm"
          }}
@@ -807,6 +812,11 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
   defp layer_artifact(prefix, layer, kind), do: "#{prefix}-layer#{layer}-#{kind}"
 
+  defp chat_prompt(text) do
+    "<|turn>user\n#{String.trim(text)}<turn|>\n" <>
+      "<|turn>model\n<|channel>thought\n<channel|>"
+  end
+
   defp percentile(sorted_values, quantile) do
     index = ceil((length(sorted_values) - 1) * quantile)
     Enum.at(sorted_values, index)
@@ -873,7 +883,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                              --text TEXT [options]
       expert_tool call-prefix --artifact-prefix PATH --expert-artifact PATH
                               --text TEXT [--last-layer INDEX]
-                              [--head-artifact PATH] [options]
+                              [--head-artifact PATH] [--chat] [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -920,6 +930,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     extract-head saves the final norm and tied vocabulary projection separately.
     Pass it as --head-artifact on call-prefix to report the top next-token
     predictions for both the modified and unchanged paths.
+    --chat wraps --text in Gemma 4's canonical one-turn, thinking-disabled
+    template. Without it, text is tokenized directly for activation probes.
 
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0

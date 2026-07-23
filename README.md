@@ -260,7 +260,7 @@ mix gemma.expert call-prefix \
   --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
   --head-artifact artifacts/gemma4-26b-output-head \
   --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
-  --expert-scale 0.0 --backend exla:rocm
+  --chat --expert-scale 0.0 --backend exla:rocm
 ```
 
 The caller loads only the router and routed-input norm from the MoE artifact.
@@ -328,6 +328,8 @@ startup, loading six MoE artifacts, and first-time XLA compilation. Use
 The separately extracted output head contains the final RMS norm and tied token
 embedding projection. When supplied to a complete 30-layer prefix, it reports
 the top next-token logits for both the expert-modified and baseline paths.
+`--chat` wraps the text in the canonical one-turn Gemma 4 template with thinking
+disabled; omit it when raw token activation probes are intentional.
 
 Dense models expose their always-active feed-forward networks separately:
 
