@@ -16,21 +16,30 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
   @default_eos_token_ids [1, 106]
   @default_expert_cache_bytes 16 * 1024 * 1024 * 1024
 
-  @doc "Greedily generates tokens from a complete set of extracted artifacts."
-  def generate!(opts) do
+  defstruct [
+    :artifact_prefix,
+    :expert_artifact,
+    :head_artifact,
+    :backend,
+    :head,
+    :first_layer,
+    :expert_cache,
+    sparse_layers: %{}
+  ]
+
+  @doc """
+  Loads the reusable extracted-model resources.
+
+  The returned handle owns its output head, complete first layer, lazily loaded
+  sparse decoder shells, and routed-expert cache. Call `release/1` when the
+  long-running owner terminates.
+  """
+  def load!(opts) do
     prefix = Keyword.fetch!(opts, :artifact_prefix)
     expert_artifact = Keyword.fetch!(opts, :expert_artifact)
     head_artifact = Keyword.fetch!(opts, :head_artifact)
-    input_text = Keyword.fetch!(opts, :input_text)
     backend = Keyword.fetch!(opts, :backend)
-    max_new_tokens = Keyword.get(opts, :max_new_tokens, 1)
-    expert_scale = Keyword.get(opts, :expert_scale, 1.0)
-    eos_token_ids = Keyword.get(opts, :eos_token_ids, @default_eos_token_ids)
     expert_cache_bytes = Keyword.get(opts, :expert_cache_bytes, @default_expert_cache_bytes)
-
-    unless is_integer(max_new_tokens) and max_new_tokens > 0 do
-      raise ArgumentError, "max_new_tokens must be a positive integer"
-    end
 
     unless is_integer(expert_cache_bytes) and expert_cache_bytes >= 0 do
       raise ArgumentError, "expert_cache_bytes must be a non-negative integer"
@@ -47,59 +56,90 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
           backend
         )
 
-      embedding_data = ExpertCaller.prepare_embeddings!(first_layer, input_text)
-
-      prompt_embeddings =
-        embedding_data.input
-        |> Nx.as_type(:bf16)
-        |> transfer(backend)
-
-      prompt_length = Nx.axis_size(prompt_embeddings, 0)
-      started_at = System.monotonic_time(:microsecond)
-
-      state = %{
-        input: prompt_embeddings,
-        offset: 0,
-        cache_length: prompt_length + max_new_tokens,
-        caches: %{},
-        sparse_layers: %{},
-        expert_cache: RoutedExpertCache.new(expert_cache_bytes),
-        generated_ids: [],
-        steps: [],
-        override_route_count: 0,
-        first_layer: first_layer
+      %__MODULE__{
+        artifact_prefix: prefix,
+        expert_artifact: expert_artifact,
+        head_artifact: head_artifact,
+        backend: backend,
+        head: head,
+        first_layer: first_layer,
+        expert_cache: RoutedExpertCache.new(expert_cache_bytes)
       }
+    rescue
+      exception ->
+        Nx.backend_deallocate(head.params)
+        reraise exception, __STACKTRACE__
+    end
+  end
 
-      state =
-        Enum.reduce_while(1..max_new_tokens, state, fn step, state ->
-          {token, state} =
-            decode_one!(
-              state,
-              prefix,
-              expert_artifact,
-              head,
-              embedding_data.tokenizer,
-              backend,
-              expert_scale,
-              step
-            )
+  @doc """
+  Greedily generates tokens while retaining reusable model resources.
 
-          if token.id in eos_token_ids do
-            {:halt, state}
-          else
-            {:cont, state}
-          end
-        end)
+  Returns `{result, updated_model}` because sparse shells and routed experts
+  discovered by this request become part of the reusable model handle. KV
+  caches and token state are always fresh and are released before returning.
+  """
+  def generate!(%__MODULE__{} = model, opts) do
+    input_text = Keyword.fetch!(opts, :input_text)
+    max_new_tokens = Keyword.get(opts, :max_new_tokens, 1)
+    expert_scale = Keyword.get(opts, :expert_scale, 1.0)
+    eos_token_ids = Keyword.get(opts, :eos_token_ids, @default_eos_token_ids)
 
-      elapsed_us = System.monotonic_time(:microsecond) - started_at
-      generated_ids = Enum.reverse(state.generated_ids)
-      Nx.backend_deallocate(state.input)
-      Nx.backend_deallocate(state.caches)
-      unload_first_layer(state.first_layer)
-      Enum.each(state.sparse_layers, fn {_index, layer} -> unload_decoder_layer(layer) end)
-      expert_cache_stats = RoutedExpertCache.stats(state.expert_cache)
-      :ok = RoutedExpertCache.release(state.expert_cache)
+    unless is_integer(max_new_tokens) and max_new_tokens > 0 do
+      raise ArgumentError, "max_new_tokens must be a positive integer"
+    end
 
+    embedding_data = ExpertCaller.prepare_embeddings!(model.first_layer, input_text)
+
+    prompt_embeddings =
+      embedding_data.input
+      |> Nx.as_type(:bf16)
+      |> transfer(model.backend)
+
+    prompt_length = Nx.axis_size(prompt_embeddings, 0)
+    started_at = System.monotonic_time(:microsecond)
+
+    state = %{
+      input: prompt_embeddings,
+      offset: 0,
+      cache_length: prompt_length + max_new_tokens,
+      caches: %{},
+      sparse_layers: model.sparse_layers,
+      expert_cache: model.expert_cache,
+      generated_ids: [],
+      steps: [],
+      override_route_count: 0,
+      first_layer: model.first_layer
+    }
+
+    state =
+      Enum.reduce_while(1..max_new_tokens, state, fn step, state ->
+        {token, state} =
+          decode_one!(
+            state,
+            model.artifact_prefix,
+            model.expert_artifact,
+            model.head,
+            embedding_data.tokenizer,
+            model.backend,
+            expert_scale,
+            step
+          )
+
+        if token.id in eos_token_ids do
+          {:halt, state}
+        else
+          {:cont, state}
+        end
+      end)
+
+    elapsed_us = System.monotonic_time(:microsecond) - started_at
+    generated_ids = Enum.reverse(state.generated_ids)
+    Nx.backend_deallocate(state.input)
+    Nx.backend_deallocate(state.caches)
+    expert_cache_stats = RoutedExpertCache.stats(state.expert_cache)
+
+    result =
       %{
         input_tokens: embedding_data.tokens,
         generated_ids: generated_ids,
@@ -111,9 +151,50 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         expert_cache: expert_cache_stats,
         eos?: List.last(generated_ids) in eos_token_ids
       }
-    after
-      Nx.backend_deallocate(head.params)
+
+    updated_model = %{
+      model
+      | sparse_layers: state.sparse_layers,
+        expert_cache: state.expert_cache
+    }
+
+    {result, updated_model}
+  end
+
+  @doc """
+  One-shot compatibility wrapper.
+
+  Long-running callers should prefer `load!/1` plus `generate!/2`, or use
+  `ExtractedGeneratorServer`, so reusable XLA resources survive each request.
+  """
+  def generate!(opts) when is_list(opts) do
+    model = load!(opts)
+
+    try do
+      {result, model} = generate!(model, opts)
+      :ok = release(model)
+      result
+    rescue
+      exception ->
+        release(model)
+        reraise exception, __STACKTRACE__
     end
+  end
+
+  @doc "Returns measurements for resources retained between requests."
+  def stats(%__MODULE__{} = model) do
+    %{
+      sparse_layers: map_size(model.sparse_layers),
+      expert_cache: RoutedExpertCache.stats(model.expert_cache)
+    }
+  end
+
+  @doc "Explicitly releases all backend buffers owned by the reusable model."
+  def release(%__MODULE__{} = model) do
+    Nx.backend_deallocate(model.head.params)
+    unload_first_layer(model.first_layer)
+    Enum.each(model.sparse_layers, fn {_index, layer} -> unload_decoder_layer(layer) end)
+    RoutedExpertCache.release(model.expert_cache)
   end
 
   defp decode_one!(
