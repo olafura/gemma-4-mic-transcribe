@@ -226,6 +226,8 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
                "output-head",
                "--max-new-tokens",
                "3",
+               "--runs",
+               "2",
                "--expert-cache-gb",
                "8.5",
                "--chat",
@@ -236,6 +238,7 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
              ])
 
     assert generation.max_new_tokens == 3
+    assert generation.runs == 2
     assert generation.expert_cache_bytes == round(8.5 * 1024 * 1024 * 1024)
     assert generation.expert_scale == 0.0
     assert generation.head_artifact == "output-head"

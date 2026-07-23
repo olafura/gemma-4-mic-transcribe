@@ -6,7 +6,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   alias Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact
   alias Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedExpert
-  alias Gemma4MicTranscribe.Gemma4.ExtractedGenerator
+  alias Gemma4MicTranscribe.Gemma4.ExtractedGeneratorServer
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedOutputHead
   alias Gemma4MicTranscribe.Gemma4.MathExpertProfiler
@@ -309,37 +309,66 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       {:generate_prefix, opts} ->
         {:ok, backend} = Runtime.resolve_backend(opts.backend)
 
-        result =
-          ExtractedGenerator.generate!(
+        {:ok, server} =
+          ExtractedGeneratorServer.start_link(
             artifact_prefix: opts.artifact_prefix,
             expert_artifact: opts.expert_artifact,
             head_artifact: opts.head_artifact,
-            input_text: opts.input_text,
             backend: backend,
-            expert_scale: opts.expert_scale,
-            max_new_tokens: opts.max_new_tokens,
             expert_cache_bytes: opts.expert_cache_bytes
           )
 
-        IO.puts(
-          Jason.encode!(%{
-            event: "extracted_decoder_generated",
-            text: opts.text,
-            expert_scale: opts.expert_scale,
-            generated_ids: result.generated_ids,
-            generated_text: result.generated_text,
-            eos: result.eos?,
-            override_route_count: result.override_route_count,
-            input_tokens:
-              Enum.map(result.input_tokens, fn token ->
-                %{id: token.id, token: token.token}
-              end),
-            steps: result.steps,
-            elapsed_us: result.elapsed_us,
-            mean_token_us: result.mean_token_us,
-            expert_cache: result.expert_cache
-          })
-        )
+        try do
+          {requests, result} =
+            Enum.map_reduce(1..opts.runs, nil, fn run, _previous ->
+              started_at = System.monotonic_time(:microsecond)
+
+              result =
+                ExtractedGeneratorServer.generate(server,
+                  input_text: opts.input_text,
+                  expert_scale: opts.expert_scale,
+                  max_new_tokens: opts.max_new_tokens
+                )
+
+              wall_us = System.monotonic_time(:microsecond) - started_at
+
+              request = %{
+                run: run,
+                processing_us: result.elapsed_us,
+                wall_us: wall_us,
+                generated_text: result.generated_text,
+                expert_cache: result.expert_cache
+              }
+
+              {request, result}
+            end)
+
+          runtime_stats = ExtractedGeneratorServer.stats(server)
+
+          IO.puts(
+            Jason.encode!(%{
+              event: "extracted_decoder_generated",
+              text: opts.text,
+              expert_scale: opts.expert_scale,
+              generated_ids: result.generated_ids,
+              generated_text: result.generated_text,
+              eos: result.eos?,
+              override_route_count: result.override_route_count,
+              input_tokens:
+                Enum.map(result.input_tokens, fn token ->
+                  %{id: token.id, token: token.token}
+                end),
+              steps: result.steps,
+              elapsed_us: result.elapsed_us,
+              mean_token_us: result.mean_token_us,
+              expert_cache: result.expert_cache,
+              requests: requests,
+              runtime: runtime_stats
+            })
+          )
+        after
+          GenServer.stop(server)
+        end
 
         0
 
@@ -686,6 +715,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
          :ok <- require_string(opts, :head_artifact, "--head-artifact PATH"),
          :ok <- require_string(opts, :text, "--text TEXT"),
          :ok <- positive(opts[:max_new_tokens] || 1, "--max-new-tokens"),
+         :ok <- positive(opts[:runs] || 1, "--runs"),
          :ok <- non_negative_number(opts[:expert_cache_gb] || 16.0, "--expert-cache-gb") do
       if opts[:help] do
         {:help, usage()}
@@ -699,6 +729,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
            input_text: if(opts[:chat], do: chat_prompt(opts[:text]), else: opts[:text]),
            expert_scale: opts[:expert_scale] || 1.0,
            max_new_tokens: opts[:max_new_tokens] || 1,
+           runs: opts[:runs] || 1,
            expert_cache_bytes: round((opts[:expert_cache_gb] || 16.0) * 1024 * 1024 * 1024),
            backend: opts[:backend] || "exla:rocm"
          }}
@@ -956,7 +987,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                               [--head-artifact PATH] [--chat] [options]
       expert_tool generate-prefix --artifact-prefix PATH --expert-artifact PATH
                                   --head-artifact PATH --text TEXT
-                                  [--max-new-tokens N] [--chat] [options]
+                                  [--max-new-tokens N] [--runs N]
+                                  [--expert-cache-gb GiB] [--chat] [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
