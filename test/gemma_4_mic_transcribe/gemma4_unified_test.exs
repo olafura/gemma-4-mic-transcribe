@@ -73,7 +73,16 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
   end
 
   test "input builder combines prompt and audio features" do
-    input = Input.build(List.duplicate(0.0, 640), prompt: "Transcribe.")
+    input =
+      Input.build(List.duplicate(0.0, 640),
+        prompt: "Transcribe.",
+        system_message: "Keep the original language."
+      )
+
+    assert input.user_prompt == "Transcribe."
+    assert input.system_message == "Keep the original language."
+    assert input.prompt =~ "Keep the original language."
+    assert input.prompt =~ "Transcribe."
 
     assert input.audio.token_count == 1
     assert input.prompt =~ Prompt.audio_begin() <> Prompt.audio_token() <> Prompt.audio_end()
