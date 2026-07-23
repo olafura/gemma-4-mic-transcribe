@@ -32,6 +32,21 @@ streaming sessions warm these executables at startup by generating a couple of
 tokens over silence (disable with `--no-warmup`), so live audio never hits a
 compile stall.
 
+Generation now explicitly releases each consumed logits buffer, the final
+request-local K/V cache, and copied audio tensors after token selection has
+synchronized the XLA result. Intermediate caches are not manually released:
+XLA donates them forward into the next decode step, so only the final returned
+cache has unambiguous ownership.
+
+After a streaming utterance is reset, its long-running owner performs one minor
+BEAM collection. This releases any remaining unreachable NIF references without
+major-collecting the old-generation model runtime on every token. Final and
+suppressed events report the pause as `metrics.cleanup_gc_us`; programmatic
+sessions can disable it with `post_utterance_gc: false` for comparison. A real
+two-window packed-12B ROCm run completed after deterministic cleanup with the
+same transcripts as before, confirming that persistent parameters and compiled
+executables remain valid across requests.
+
 The CLI gates windows with a cheap local speech detector before loading or
 running the model. This is intentionally separate from the Gemma prompt: silent,
 too-short, or high-noise windows are skipped without generation, and empty
