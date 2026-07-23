@@ -1147,6 +1147,38 @@ LIBTORCH_TARGET=cu129 mix deps.clean torchx
 LIBTORCH_TARGET=cu129 mix deps.compile torchx
 ```
 
+The 12B bf16 checkpoint runs on Torchx CUDA after staging checkpoint loading on
+the host and transferring the completed parameter tree to the GPU:
+
+```bash
+./gemma_4_mic_transcribe \
+  --model-name gemma4-12b-unified \
+  --backend torchx:cuda \
+  --param-type bf16 \
+  --wav journal1.wav \
+  --max-windows 2 \
+  --max-response-tokens 32
+```
+
+Measured on an NVIDIA L40S, excluding model load and warmup, the two five-second
+windows took 3986 ms and 3199 ms (3593 ms mean). They produced
+`"all cavalry today feelingly fresh the morning light"` and
+`"feelingly fresh the morning light was beautiful and i"`. The optimized EXLA
+CUDA hybrid-q4 path takes 499 ms and 475 ms (487 ms mean) on the same input, so
+Torchx bf16 is 7.4 times slower:
+
+| L40S backend | Mean processing time | Relative to EXLA |
+| --- | ---: | ---: |
+| EXLA CUDA hybrid q4 | 487 ms | 1.0x |
+| Torchx CUDA bf16 | 3593 ms | 7.4x |
+
+Torchx executes the Axon graph eagerly, and its 12B decode steps take roughly
+260-360 ms each. It is therefore a useful correctness backend here, but not a
+latency replacement for the compiled EXLA path. The compressed w4a16 checkpoint
+is not currently viable through the generic Torchx graph on a 46 GB L40S:
+eager q4 dequantization filled 44.37 GiB and failed its next 114 MiB allocation.
+A native packed Torchx kernel would be required to compare q4 backends fairly.
+
 To try EXLA on ROCm, build/install XLA for ROCm and select the ROCm client:
 
 ```bash
