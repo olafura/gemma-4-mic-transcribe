@@ -776,13 +776,21 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       |> Nx.backend_copy(Nx.BinaryBackend)
       |> Nx.to_flat_list()
 
-    Enum.zip_with(ids, values, fn id, logit ->
+    raw_values =
+      result.raw_top_k_values
+      |> Nx.backend_copy(Nx.BinaryBackend)
+      |> Nx.to_flat_list()
+
+    ids
+    |> Enum.zip(values)
+    |> Enum.zip_with(raw_values, fn {id, logit}, raw_logit ->
       %{
         id: id,
         token:
           Bumblebee.Tokenizer.id_to_token(tokenizer, id) ||
             Bumblebee.Tokenizer.decode(tokenizer, [id]),
-        logit: logit
+        logit: logit,
+        raw_logit: raw_logit
       }
     end)
   end

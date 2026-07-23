@@ -80,16 +80,20 @@ defmodule Gemma4MicTranscribe.Gemma4.OutputHeadArtifactTest do
         type: :bf16
       )
 
-    expected = reference_logits(hidden, embedding, norm)
-    {expected_values, expected_indices} = Nx.top_k(expected, k: 3)
+    expected_raw = reference_raw_logits(hidden, embedding, norm)
+    expected = softcap(expected_raw)
+    {expected_raw_values, expected_indices} = Nx.top_k(expected_raw, k: 3)
+    expected_values = softcap(expected_raw_values)
     result = ExtractedOutputHead.run(head, hidden, top_k: 3)
 
     assert_all_close(result.logits, expected, 1.0e-4)
+    assert_all_close(result.raw_logits, expected_raw, 1.0e-4)
     assert_all_close(result.top_k_values, expected_values, 1.0e-4)
+    assert_all_close(result.raw_top_k_values, expected_raw_values, 1.0e-4)
     assert Nx.to_flat_list(result.top_k_indices) == Nx.to_flat_list(expected_indices)
   end
 
-  defp reference_logits(hidden, embedding, norm) do
+  defp reference_raw_logits(hidden, embedding, norm) do
     hidden = Nx.slice_along_axis(hidden, 1, 1, axis: 0)
     hidden_f32 = Nx.as_type(hidden, :f32)
 
@@ -103,14 +107,13 @@ defmodule Gemma4MicTranscribe.Gemma4.OutputHeadArtifactTest do
       |> Nx.multiply(Nx.as_type(norm, :f32))
       |> Nx.as_type(:bf16)
 
-    logits =
-      normalized
-      |> Nx.dot(Nx.transpose(embedding))
-      |> Nx.as_type(:f32)
-      |> Nx.squeeze(axes: [0])
-
-    Nx.multiply(Nx.tanh(Nx.divide(logits, @softcap)), @softcap)
+    normalized
+    |> Nx.dot(Nx.transpose(embedding))
+    |> Nx.as_type(:f32)
+    |> Nx.squeeze(axes: [0])
   end
+
+  defp softcap(logits), do: Nx.multiply(Nx.tanh(Nx.divide(logits, @softcap)), @softcap)
 
   defp assert_all_close(left, right, tolerance) do
     max_difference =

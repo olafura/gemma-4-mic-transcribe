@@ -13,11 +13,10 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedOutputHead do
   def load!(artifact, backend \\ Nx.BinaryBackend) do
     {manifest, params} = OutputHeadArtifact.load!(artifact, backend)
     eps = manifest.rms_norm_eps
-    softcap = manifest.final_logit_softcapping
 
     predict_fun =
       Nx.Defn.jit(
-        fn hidden, params -> forward(hidden, params, eps: eps, softcap: softcap) end,
+        fn hidden, params -> raw_logits(hidden, params, eps: eps) end,
         build_opts(backend)
       )
 
@@ -45,25 +44,28 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedOutputHead do
       raise ArgumentError, "top_k must be in 1..#{head.manifest.vocab_size}"
     end
 
-    logits =
+    raw_logits =
       hidden
       |> Nx.as_type(:bf16)
       |> transfer(head.backend)
       |> head.predict_fun.(head.params)
 
-    {top_k_values, top_k_indices} = Nx.top_k(logits, k: top_k)
+    logits = softcap(raw_logits, head.manifest.final_logit_softcapping)
+    {raw_top_k_values, top_k_indices} = Nx.top_k(raw_logits, k: top_k)
+    top_k_values = softcap(raw_top_k_values, head.manifest.final_logit_softcapping)
 
     %{
       logits: logits,
+      raw_logits: raw_logits,
       top_k_values: top_k_values,
+      raw_top_k_values: raw_top_k_values,
       top_k_indices: top_k_indices
     }
   end
 
   @doc false
-  defn forward(hidden, params, opts \\ []) do
+  defn raw_logits(hidden, params, opts \\ []) do
     eps = opts[:eps]
-    softcap = opts[:softcap]
     last = Nx.axis_size(hidden, 0) - 1
     hidden = Nx.slice_along_axis(hidden, last, 1, axis: 0)
     hidden_f32 = Nx.as_type(hidden, :f32)
@@ -78,14 +80,13 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedOutputHead do
       |> Nx.multiply(Nx.as_type(params.norm, :f32))
       |> Nx.as_type(:bf16)
 
-    logits =
-      normalized
-      |> Nx.dot(Nx.transpose(params.embedding))
-      |> Nx.as_type(:f32)
-      |> Nx.squeeze(axes: [0])
-
-    Nx.multiply(Nx.tanh(Nx.divide(logits, softcap)), softcap)
+    normalized
+    |> Nx.dot(Nx.transpose(params.embedding))
+    |> Nx.as_type(:f32)
+    |> Nx.squeeze(axes: [0])
   end
+
+  defp softcap(logits, value), do: Nx.multiply(Nx.tanh(Nx.divide(logits, value)), value)
 
   defp transfer(tensor, nil), do: tensor
   defp transfer(tensor, Nx.BinaryBackend), do: Nx.backend_copy(tensor, Nx.BinaryBackend)
