@@ -34,6 +34,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     limit: :integer,
     input_value: :float,
     expert_scale: :float,
+    expert_cache_gb: :float,
     text: :string,
     chat: :boolean,
     help: :boolean
@@ -316,7 +317,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
             input_text: opts.input_text,
             backend: backend,
             expert_scale: opts.expert_scale,
-            max_new_tokens: opts.max_new_tokens
+            max_new_tokens: opts.max_new_tokens,
+            expert_cache_bytes: opts.expert_cache_bytes
           )
 
         IO.puts(
@@ -334,7 +336,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
               end),
             steps: result.steps,
             elapsed_us: result.elapsed_us,
-            mean_token_us: result.mean_token_us
+            mean_token_us: result.mean_token_us,
+            expert_cache: result.expert_cache
           })
         )
 
@@ -682,7 +685,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
          :ok <- require_string(opts, :expert_artifact, "--expert-artifact PATH"),
          :ok <- require_string(opts, :head_artifact, "--head-artifact PATH"),
          :ok <- require_string(opts, :text, "--text TEXT"),
-         :ok <- positive(opts[:max_new_tokens] || 1, "--max-new-tokens") do
+         :ok <- positive(opts[:max_new_tokens] || 1, "--max-new-tokens"),
+         :ok <- non_negative_number(opts[:expert_cache_gb] || 16.0, "--expert-cache-gb") do
       if opts[:help] do
         {:help, usage()}
       else
@@ -695,6 +699,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
            input_text: if(opts[:chat], do: chat_prompt(opts[:text]), else: opts[:text]),
            expert_scale: opts[:expert_scale] || 1.0,
            max_new_tokens: opts[:max_new_tokens] || 1,
+           expert_cache_bytes: round((opts[:expert_cache_gb] || 16.0) * 1024 * 1024 * 1024),
            backend: opts[:backend] || "exla:rocm"
          }}
       end
@@ -867,6 +872,9 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   defp non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
   defp non_negative(_value, name), do: {:error, "#{name} must be non-negative"}
 
+  defp non_negative_number(value, _name) when is_number(value) and value >= 0, do: :ok
+  defp non_negative_number(_value, name), do: {:error, "#{name} must be non-negative"}
+
   defp decoder_layer_index(value, _name) when is_integer(value) and value in 1..29, do: :ok
 
   defp decoder_layer_index(_value, name),
@@ -1004,6 +1012,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0
       --max-new-tokens N    Greedy generation limit, default 1
+      --expert-cache-gb N   Routed-expert GPU LRU limit, default 16.0
       --tokens N            Input rows, default 1
       --runs N              Timed runs after warmup, default 3
       --limit N             Profile result count, default 10

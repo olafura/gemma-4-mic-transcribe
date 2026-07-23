@@ -11,8 +11,10 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
   alias Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedOutputHead
   alias Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer
+  alias Gemma4MicTranscribe.Gemma4.RoutedExpertCache
 
   @default_eos_token_ids [1, 106]
+  @default_expert_cache_bytes 16 * 1024 * 1024 * 1024
 
   @doc "Greedily generates tokens from a complete set of extracted artifacts."
   def generate!(opts) do
@@ -24,9 +26,14 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
     max_new_tokens = Keyword.get(opts, :max_new_tokens, 1)
     expert_scale = Keyword.get(opts, :expert_scale, 1.0)
     eos_token_ids = Keyword.get(opts, :eos_token_ids, @default_eos_token_ids)
+    expert_cache_bytes = Keyword.get(opts, :expert_cache_bytes, @default_expert_cache_bytes)
 
     unless is_integer(max_new_tokens) and max_new_tokens > 0 do
       raise ArgumentError, "max_new_tokens must be a positive integer"
+    end
+
+    unless is_integer(expert_cache_bytes) and expert_cache_bytes >= 0 do
+      raise ArgumentError, "expert_cache_bytes must be a non-negative integer"
     end
 
     head = ExtractedOutputHead.load!(head_artifact, backend)
@@ -56,6 +63,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         cache_length: prompt_length + max_new_tokens,
         caches: %{},
         sparse_layers: %{},
+        expert_cache: RoutedExpertCache.new(expert_cache_bytes),
         generated_ids: [],
         steps: [],
         override_route_count: 0,
@@ -89,6 +97,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
       Nx.backend_deallocate(state.caches)
       unload_first_layer(state.first_layer)
       Enum.each(state.sparse_layers, fn {_index, layer} -> unload_decoder_layer(layer) end)
+      expert_cache_stats = RoutedExpertCache.stats(state.expert_cache)
+      :ok = RoutedExpertCache.release(state.expert_cache)
 
       %{
         input_tokens: embedding_data.tokens,
@@ -98,6 +108,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         override_route_count: state.override_route_count,
         elapsed_us: elapsed_us,
         mean_token_us: elapsed_us / length(generated_ids),
+        expert_cache: expert_cache_stats,
         eos?: List.last(generated_ids) in eos_token_ids
       }
     after
@@ -142,12 +153,12 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
 
     caches = put_cache(state.caches, 0, first_cache, first)
 
-    {final_output, caches, sparse_layers} =
+    {final_output, caches, sparse_layers, expert_cache} =
       Enum.reduce(
         1..29,
-        {first.output, caches, state.sparse_layers},
-        fn layer_index, {input, caches, sparse_layers} ->
-          {layer, cache, result, retain?} =
+        {first.output, caches, state.sparse_layers, state.expert_cache},
+        fn layer_index, {input, caches, sparse_layers, expert_cache} ->
+          {layer, cache, result, retain?, expert_cache} =
             run_later_layer!(
               prefix,
               layer_index,
@@ -155,6 +166,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
               input,
               caches,
               sparse_layers,
+              expert_cache,
               state.offset,
               state.cache_length
             )
@@ -169,7 +181,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
           {
             result.output,
             put_cache(caches, layer_index, cache, result),
-            sparse_layers
+            sparse_layers,
+            expert_cache
           }
         end
       )
@@ -201,6 +214,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         cache_length: state.cache_length,
         caches: caches,
         sparse_layers: sparse_layers,
+        expert_cache: expert_cache,
         generated_ids: [token.id | state.generated_ids],
         steps: [Map.put(token, :candidates, candidates) | state.steps],
         override_route_count: state.override_route_count + route_count,
@@ -221,6 +235,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
          input,
          caches,
          _sparse_layers,
+         expert_cache,
          0,
          cache_length
        ) do
@@ -236,7 +251,13 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         ExtractedDecoderLayer.init_cache(layer, cache_length)
       end)
 
-    {layer, cache, ExtractedDecoderLayer.run_cached(layer, input, cache, 0), false}
+    {
+      layer,
+      cache,
+      ExtractedDecoderLayer.run_cached(layer, input, cache, 0),
+      false,
+      expert_cache
+    }
   end
 
   defp run_later_layer!(
@@ -246,6 +267,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
          input,
          caches,
          sparse_layers,
+         expert_cache,
          offset,
          cache_length
        ) do
@@ -264,7 +286,12 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         ExtractedSparseDecoderLayer.init_cache(layer, cache_length)
       end)
 
-    {layer, cache, ExtractedSparseDecoderLayer.run_cached(layer, input, cache, offset), true}
+    result =
+      ExtractedSparseDecoderLayer.run_cached(layer, input, cache, offset,
+        expert_cache: expert_cache
+      )
+
+    {layer, cache, result, true, result.expert_cache}
   end
 
   defp prediction_rows(result, tokenizer) do

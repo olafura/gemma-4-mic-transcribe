@@ -3,6 +3,7 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
 
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
   alias Gemma4MicTranscribe.Gemma4.MoeLayerArtifact
+  alias Gemma4MicTranscribe.Gemma4.RoutedExpertCache
 
   @hidden 4
   @shared 6
@@ -86,6 +87,44 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
     indices = Nx.tensor([3, 1], type: :s64)
     assert_all_close(routed_experts.experts_gate_up, Nx.take(params.experts_gate_up, indices))
     assert_all_close(routed_experts.experts_down, Nx.take(params.experts_down, indices))
+
+    expert_bytes =
+      Enum.reduce(["experts_gate_up", "experts_down"], 0, fn name, bytes ->
+        metadata = manifest.tensors[name]
+        bytes + div(metadata.byte_size, manifest.num_experts)
+      end)
+
+    cache = RoutedExpertCache.new(2 * expert_bytes)
+
+    {cached_experts, cache} =
+      RoutedExpertCache.checkout!(
+        cache,
+        artifact,
+        manifest,
+        [3, 1],
+        Nx.BinaryBackend
+      )
+
+    assert_all_close(cached_experts.experts_gate_up, Nx.take(params.experts_gate_up, indices))
+    Nx.backend_deallocate(cached_experts)
+
+    {cached_experts, cache} =
+      RoutedExpertCache.checkout!(
+        cache,
+        artifact,
+        manifest,
+        [1, 2],
+        Nx.BinaryBackend
+      )
+
+    stats = RoutedExpertCache.stats(cache)
+    assert stats.entries == 2
+    assert stats.hits == 1
+    assert stats.misses == 3
+    assert stats.evictions == 1
+    assert stats.bytes == 2 * expert_bytes
+    Nx.backend_deallocate(cached_experts)
+    :ok = RoutedExpertCache.release(cache)
 
     input =
       Nx.tensor(

@@ -10,6 +10,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
   alias Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
   alias Gemma4MicTranscribe.Gemma4.MoeLayerArtifact
+  alias Gemma4MicTranscribe.Gemma4.RoutedExpertCache
 
   defstruct [
     :manifest,
@@ -117,7 +118,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
   end
 
   @doc "Runs one cached token using only its selected routed experts."
-  def run_cached(%__MODULE__{} = layer, input, %{key: key, value: value}, offset)
+  def run_cached(%__MODULE__{} = layer, input, %{key: key, value: value}, offset, opts \\ [])
       when is_integer(offset) and offset >= 0 do
     input = prepare_input!(layer, input)
     token_count = Nx.axis_size(input, 0)
@@ -150,13 +151,28 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
       |> Nx.backend_copy(Nx.BinaryBackend)
       |> Nx.to_flat_list()
 
-    {_manifest, expert_params} =
-      MoeLayerArtifact.load_routed_experts!(
-        layer.moe_artifact,
-        expert_indices,
-        layer.backend,
-        verify_checksum: false
-      )
+    {expert_params, expert_cache} =
+      case Keyword.get(opts, :expert_cache) do
+        nil ->
+          {_manifest, expert_params} =
+            MoeLayerArtifact.load_routed_experts!(
+              layer.moe_artifact,
+              expert_indices,
+              layer.backend,
+              verify_checksum: false
+            )
+
+          {expert_params, nil}
+
+        %RoutedExpertCache{} = cache ->
+          RoutedExpertCache.checkout!(
+            cache,
+            layer.moe_artifact,
+            layer.moe_manifest,
+            expert_indices,
+            layer.backend
+          )
+      end
 
     output = layer.finish_fun.(prepared, layer.moe_params, expert_params)
     Nx.backend_deallocate(expert_params)
@@ -167,7 +183,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
       output: output,
       key_cache: prepared.key_cache,
       value_cache: prepared.value_cache,
-      selected_experts: expert_indices
+      selected_experts: expert_indices,
+      expert_cache: expert_cache
     }
   end
 
