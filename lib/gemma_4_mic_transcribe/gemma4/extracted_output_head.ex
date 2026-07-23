@@ -50,9 +50,10 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedOutputHead do
       |> transfer(head.backend)
       |> head.predict_fun.(head.params)
 
-    logits = softcap(raw_logits, head.manifest.final_logit_softcapping)
+    softcap = backend_scalar(head.manifest.final_logit_softcapping, head.backend)
+    logits = softcap(raw_logits, softcap)
     {raw_top_k_values, top_k_indices} = Nx.top_k(raw_logits, k: top_k)
-    top_k_values = softcap(raw_top_k_values, head.manifest.final_logit_softcapping)
+    top_k_values = softcap(raw_top_k_values, softcap)
 
     %{
       logits: logits,
@@ -87,6 +88,9 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedOutputHead do
   end
 
   defp softcap(logits, value), do: Nx.multiply(Nx.tanh(Nx.divide(logits, value)), value)
+
+  defp backend_scalar(value, nil), do: Nx.tensor(value, type: :f32)
+  defp backend_scalar(value, backend), do: Nx.tensor(value, type: :f32, backend: backend)
 
   defp transfer(tensor, nil), do: tensor
   defp transfer(tensor, Nx.BinaryBackend), do: Nx.backend_copy(tensor, Nx.BinaryBackend)
