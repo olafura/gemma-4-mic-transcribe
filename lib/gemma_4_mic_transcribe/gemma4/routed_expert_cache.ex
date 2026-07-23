@@ -60,8 +60,14 @@ defmodule Gemma4MicTranscribe.Gemma4.RoutedExpertCache do
           |> Enum.with_index()
           |> Enum.reduce(cache, fn {key, position}, cache ->
             entry = %{
-              experts_gate_up: Nx.slice_along_axis(loaded.experts_gate_up, position, 1, axis: 0),
-              experts_down: Nx.slice_along_axis(loaded.experts_down, position, 1, axis: 0),
+              experts_gate_up:
+                loaded.experts_gate_up
+                |> Nx.slice_along_axis(position, 1, axis: 0)
+                |> Nx.backend_copy(backend),
+              experts_down:
+                loaded.experts_down
+                |> Nx.slice_along_axis(position, 1, axis: 0)
+                |> Nx.backend_copy(backend),
               bytes: entry_bytes,
               last_used: clock
             }
@@ -152,8 +158,16 @@ defmodule Gemma4MicTranscribe.Gemma4.RoutedExpertCache do
     entries = Enum.map(keys, &Map.fetch!(cache.entries, &1))
 
     %{
-      experts_gate_up: Nx.concatenate(Enum.map(entries, & &1.experts_gate_up), axis: 0),
-      experts_down: Nx.concatenate(Enum.map(entries, & &1.experts_down), axis: 0)
+      experts_gate_up:
+        Nx.concatenate(
+          Enum.map(entries, &Nx.backend_copy(&1.experts_gate_up)),
+          axis: 0
+        ),
+      experts_down:
+        Nx.concatenate(
+          Enum.map(entries, &Nx.backend_copy(&1.experts_down)),
+          axis: 0
+        )
     }
   end
 

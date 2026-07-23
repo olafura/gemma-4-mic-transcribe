@@ -174,7 +174,16 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
           )
       end
 
-    output = layer.finish_fun.(prepared, layer.moe_params, expert_params)
+    finish_input =
+      Map.take(prepared, [
+        :residual,
+        :shared_output,
+        :routed_input,
+        :top_k_indices,
+        :top_k_weights
+      ])
+
+    output = layer.finish_fun.(finish_input, layer.moe_params, expert_params)
     Nx.backend_deallocate(expert_params)
 
     Nx.backend_deallocate(Map.drop(prepared, [:key_cache, :value_cache]))
