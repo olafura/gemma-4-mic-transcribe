@@ -14,6 +14,7 @@ defmodule Gemma4MicTranscribe.HandoffProbe.Artifact do
   @prefix "handoff_probe."
   @default_repo "Cactus-Compute/gemma-4-e2b-it-hybrid"
   @default_shard "model-00003-of-00003.safetensors"
+  @legacy_source_bytes :source_bytes
 
   @parameter_keys %{
     "handoff_probe.attn_query" => :attn_query,
@@ -63,7 +64,7 @@ defmodule Gemma4MicTranscribe.HandoffProbe.Artifact do
       )
 
     fetch_range = Keyword.get(opts, :fetch_range, &range_get!(url, &1, &2))
-    {tensors, downloaded_bytes, source_bytes} = extract_tensors!(fetch_range)
+    {tensors, downloaded_bytes, source_range_end} = extract_tensors!(fetch_range)
 
     File.mkdir_p!(Path.dirname(path))
     temporary = path <> ".tmp-#{System.unique_integer([:positive])}"
@@ -80,7 +81,7 @@ defmodule Gemma4MicTranscribe.HandoffProbe.Artifact do
         source_revision: revision,
         source_shard: shard,
         source_url: url,
-        source_bytes: source_bytes,
+        source_range_end: source_range_end,
         downloaded_bytes: downloaded_bytes,
         parameter_file: @parameters,
         parameter_count: tensors |> Map.values() |> Enum.map(&Nx.size/1) |> Enum.sum(),
@@ -136,11 +137,22 @@ defmodule Gemma4MicTranscribe.HandoffProbe.Artifact do
 
   @doc "Reads only the artifact metadata."
   def read_manifest!(path) do
-    path
-    |> Path.expand()
-    |> Path.join(@manifest)
-    |> File.read!()
-    |> :erlang.binary_to_term([:safe])
+    manifest =
+      path
+      |> Path.expand()
+      |> Path.join(@manifest)
+      |> File.read!()
+      |> :erlang.binary_to_term([:safe])
+
+    case manifest do
+      %{@legacy_source_bytes => byte_count} = legacy ->
+        legacy
+        |> Map.put_new(:source_range_end, byte_count - 1)
+        |> Map.delete(@legacy_source_bytes)
+
+      current ->
+        current
+    end
   end
 
   defp extract_tensors!(fetch_range) do
@@ -195,8 +207,8 @@ defmodule Gemma4MicTranscribe.HandoffProbe.Artifact do
       end)
 
     downloaded_bytes = 8 + header_length + byte_size(data)
-    source_bytes = absolute_end + 1
-    {tensors, downloaded_bytes, source_bytes}
+    source_range_end = absolute_end
+    {tensors, downloaded_bytes, source_range_end}
   end
 
   defp fetch_exact!(fetch_range, first, last) do

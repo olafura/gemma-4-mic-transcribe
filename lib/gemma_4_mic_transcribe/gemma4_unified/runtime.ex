@@ -251,13 +251,18 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     prompt = Keyword.get(opts, :prompt, Config.default_prompt())
     system_message = Keyword.get(opts, :system_message)
 
-    result = warmup_incremental(runtime, prompt, system_message)
-
-    if result != :ok do
-      result
-    else
-      warmup_buckets(runtime, token_counts, prompt, system_message)
+    with :ok <- warmup_incremental(runtime, prompt, system_message),
+         :ok <- warmup_buckets(runtime, token_counts, prompt, system_message) do
+      warmup_handoff_probe(runtime)
     end
+  end
+
+  defp warmup_handoff_probe(%__MODULE__{handoff_probe: nil}), do: :ok
+
+  defp warmup_handoff_probe(%__MODULE__{handoff_probe: probe} = runtime) do
+    timed_debug(runtime, "runtime: warmup fixed-shape handoff probe", fn ->
+      HandoffProbe.warmup(probe)
+    end)
   end
 
   # The incremental path has its own shapes (prompt prefix, fixed audio chunk,

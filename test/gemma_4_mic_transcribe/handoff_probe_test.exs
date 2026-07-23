@@ -27,6 +27,13 @@ defmodule Gemma4MicTranscribe.HandoffProbeTest do
     confidence = HandoffProbe.score(probe, [Nx.broadcast(3.0, {1, 1536})])
 
     assert_in_delta confidence, 0.5, 1.0e-6
+    assert :ok = HandoffProbe.warmup(probe)
+
+    assert_in_delta(
+      HandoffProbe.score(probe, [Nx.broadcast(3.0, {1, 1536}), Nx.broadcast(4.0, {1, 1536})]),
+      0.5,
+      1.0e-6
+    )
   end
 
   @tag :tmp_dir
@@ -46,6 +53,20 @@ defmodule Gemma4MicTranscribe.HandoffProbeTest do
   test "empty captures are not scoreable" do
     probe = %HandoffProbe{manifest: %{max_tokens: 1024}}
     assert HandoffProbe.score(probe, []) == nil
+  end
+
+  @tag :tmp_dir
+  test "migrates the original source byte-count manifest field", %{tmp_dir: tmp_dir} do
+    artifact_path = Path.join(tmp_dir, "probe")
+    File.mkdir_p!(artifact_path)
+
+    File.write!(
+      Path.join(artifact_path, "manifest.etf"),
+      :erlang.term_to_binary(%{source_bytes: 329_372})
+    )
+
+    assert %{source_range_end: 329_371} = Artifact.read_manifest!(artifact_path)
+    refute Map.has_key?(Artifact.read_manifest!(artifact_path), :source_bytes)
   end
 
   defp source_tensors do

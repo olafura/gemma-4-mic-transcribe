@@ -19,7 +19,7 @@ defmodule Gemma4MicTranscribe.HandoffProbe do
   def load!(path, backend) do
     {manifest, params} = Artifact.load!(path, backend)
 
-    predict_fun = Nx.Defn.jit(&confidence/2, build_opts(backend))
+    predict_fun = Nx.Defn.jit(&confidence/3, build_opts(backend))
 
     %__MODULE__{
       params: params,
@@ -31,27 +31,36 @@ defmodule Gemma4MicTranscribe.HandoffProbe do
 
   @doc "Scores captured `[1, hidden]` rows and returns confidence in `[0, 1]`."
   def score(%__MODULE__{} = probe, rows) when is_list(rows) do
-    rows = Enum.take(rows, Map.get(probe.manifest, :max_tokens, @max_tokens))
+    rows = Enum.take(rows, @max_tokens)
 
     case rows do
       [] ->
         nil
 
       rows ->
+        token_count = length(rows)
+
         hidden_states =
           rows
           |> Enum.map(&Nx.as_type(&1, :f32))
           |> Nx.concatenate(axis: 0)
+          |> Nx.pad(0.0, [{0, @max_tokens - token_count, 0}, {0, 0, 0}])
           |> transfer(probe.backend)
 
-        probe.predict_fun.(hidden_states, probe.params)
+        probe.predict_fun.(hidden_states, Nx.tensor(token_count), probe.params)
         |> Nx.backend_copy(Nx.BinaryBackend)
         |> Nx.to_number()
     end
   end
 
+  @doc "Compiles the fixed-shape scorer outside request processing."
+  def warmup(%__MODULE__{} = probe) do
+    _confidence = score(probe, [Nx.broadcast(0.0, {1, probe.manifest.feature_size})])
+    :ok
+  end
+
   @doc false
-  defn confidence(hidden_states, params) do
+  defn confidence(hidden_states, token_count, params) do
     x = Nx.as_type(hidden_states, :f32)
     mean = Nx.mean(x, axes: [-1], keep_axes: true)
     variance = Nx.mean(Nx.pow(x - mean, 2), axes: [-1], keep_axes: true)
@@ -66,6 +75,8 @@ defmodule Gemma4MicTranscribe.HandoffProbe do
       |> Nx.max(0.0)
 
     scores = Nx.dot(projected, params.attn_query) / Nx.sqrt(Nx.tensor(32.0, type: :f32))
+    valid_tokens = Nx.iota({@max_tokens}) < token_count
+    scores = Nx.select(valid_tokens, scores, Nx.tensor(-1.0e30, type: :f32))
     weights = Nx.exp(scores - Nx.reduce_max(scores))
     weights = weights / Nx.sum(weights)
     pooled = Nx.sum(projected * Nx.new_axis(weights, -1), axes: [0])

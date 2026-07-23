@@ -969,30 +969,68 @@ from 1709 to 1577 ms (7.7%), and total transcript latency fell from 2209 to
 2077 ms (6.0%). The additional shapes increase startup warmup only; they do not
 duplicate weights.
 
-### E4B-first cascade experiment
+### Learned E2B-to-12B cascade experiment
 
-`--e4b-cascade` keeps E4B and the selected accurate model loaded, runs E4B
-first, and accepts a usable E4B transcript without touching 12B. Empty output,
-refusals, malformed control tags, decoding replacement characters, and E4B
-runtime errors fall back to 12B. An optional density rule can catch unusually
-sparse output:
+The [Cactus Hybrid checkpoint](https://huggingface.co/Cactus-Compute/gemma-4-e2b-it-hybrid)
+adds a 64,833-parameter correctness probe to Gemma 4 E2B. It reads the output
+of decoder layer 28 for each generated token, then applies layer normalization,
+a 1536-to-32 projection, learned attention pooling, and a small binary
+classifier. The probe predicts whether the fast answer is wrong; this runtime
+reports `1 - p_wrong` as handoff confidence.
+
+The extractor downloads only the safetensors header and contiguous probe byte
+range from the Cactus shard (329,372 bytes for the current release), verifies
+the tensor names, shapes, dtype, and checksum, and writes a separate 255 KiB
+artifact. The E2B audio model remains the official audio-capable checkpoint:
+
+```bash
+GEMMA4_ESCRIPT=handoff_probe mix escript.build
+./handoff_probe extract --artifact artifacts/cactus-e2b-handoff-probe
+./handoff_probe inspect --artifact artifacts/cactus-e2b-handoff-probe
+```
+
+`--model-cascade` keeps the fast E2B model, probe, and selected accurate model
+loaded. It accepts sufficiently confident E2B output without running 12B and
+escalates low confidence, empty output, refusals, malformed control tags,
+replacement characters, or fast-model errors:
 
 ```bash
 ./gemma_4_mic_transcribe --wav journal1.wav --stream-wav --realtime \
   --backend exla:rocm --model-name gemma4-12b-qat-w4a16-ct \
-  --weights packed --fused-ffn --e4b-cascade \
-  --cascade-min-logit-margin 0.125 --no-partials
+  --weights packed --fused-ffn --model-cascade \
+  --handoff-probe-artifact artifacts/cactus-e2b-handoff-probe \
+  --cascade-min-handoff-confidence 0.9 --no-partials
 ```
 
-The density threshold defaults to zero (disabled), because characters per
-second is not language-independent confidence. This first cascade is therefore
-a hard-failure fallback rather than a learned confidence model. It deliberately
-does not expose incremental prefill yet; accepted requests use E4B's full path,
-while escalated requests use the already-loaded optimized 12B path.
+The probe scorer uses a fixed 1,024-row masked input. XLA therefore compiles it
+once during startup warmup instead of compiling a new executable for every
+generated-token count. Model loading, device transfer, and probe compilation
+remain outside measured request processing in a long-running service.
+
+An initial `journal1.wav` run proved the learned route works: the second
+utterance fell below `0.9`, escalated, and 12B returned `"The morning light was
+beautiful, and I enjoyed a nice cup of coffee."` The first utterance was
+incorrect but scored above `0.9` and was accepted. This is useful machinery,
+not yet a production threshold: Cactus reports zero audio examples in the
+probe's training mix, so its confidence must be calibrated on our multilingual
+audio regression corpus.
+
+With the file replayed twice in one loaded process and startup warmup disabled,
+the first pass compiled the required shapes and the identical second pass
+measured 385 ms for the accepted E2B route. The escalated utterance took 2,849
+ms total because it necessarily paid for both E2B and 12B. Its learned scores
+were stable across passes: 0.9200 for the incorrect accepted transcript and
+0.8506 for the correctly escalated one. Load, device transfer, and first-shape
+compilation are excluded from those second-pass numbers.
+
+The density threshold also defaults to zero (disabled), because characters per
+second is not language-independent confidence. The cascade deliberately does
+not expose incremental prefill yet; accepted requests use the fast model's full
+path, while escalated requests use the already-loaded optimized 12B path.
 
 `--cascade-min-logit-margin` collects the top-two decoder-logit margin for each
-E4B output token and escalates when the minimum is below the threshold. It is
-also disabled by default. On the 33-language seed-42 gate, `0.125` escalated
+fast-model output token and escalates when the minimum is below the threshold.
+It is also disabled by default. On the 33-language seed-42 gate, `0.125` escalated
 only the zero-margin Catalan error, raised the combined exact score from 8 to 9,
 and estimated 299 ms mean cascade processing versus 1,251 ms for 12B alone.
 The Polish `jeden`/`jedem` error remained confidently wrong, so this signal is
@@ -1012,9 +1050,11 @@ incorrect word `purple`; it improved lexical plausibility without recovering
 `is beautiful`, so review is not enabled as a quality policy.
 
 The cascade emits `[:gemma_4_mic_transcribe, :cascade, :route]` telemetry with
-the selected route, escalation reason, and per-model processing time. Streaming
-benchmark runs also print accepted/escalated counts and average model times, so
-router changes can be evaluated independently from model load and warmup.
+the selected route, escalation reason, confidence values, and per-model
+processing time. Streaming benchmark runs also print accepted/escalated counts
+and average model times, so router changes can be evaluated independently from
+model load and warmup. `--e4b-cascade` remains an alias for the original
+E4B-first configuration; `--cascade-fast-model` can select another fast model.
 
 Prefill is the one place where packed int4 loses: it gives up rocBLAS matrix
 cores for a hand kernel (~1100 ms versus ~240 ms measured on the older
