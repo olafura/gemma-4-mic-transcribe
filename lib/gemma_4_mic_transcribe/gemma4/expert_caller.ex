@@ -31,25 +31,32 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
   ]
 
   @doc "Loads the extracted attention prefix, MoE caller tensors, and expert."
-  def load!(caller_artifact, moe_artifact, expert_artifact, backend) do
-    load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, :caller)
+  def load!(caller_artifact, moe_artifact, expert_artifact, backend, opts \\ []) do
+    load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, :caller, opts)
   end
 
   @doc "Loads the attention prefix, complete MoE shell, and standalone expert override."
-  def load_layer!(caller_artifact, moe_artifact, expert_artifact, backend) do
-    load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, :complete_layer)
+  def load_layer!(caller_artifact, moe_artifact, expert_artifact, backend, opts \\ []) do
+    load_with_mode!(
+      caller_artifact,
+      moe_artifact,
+      expert_artifact,
+      backend,
+      :complete_layer,
+      opts
+    )
   end
 
-  defp load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, mode) do
-    {manifest, attention_params} = ExpertCallerArtifact.load!(caller_artifact, backend)
+  defp load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, mode, opts) do
+    {manifest, attention_params} = ExpertCallerArtifact.load!(caller_artifact, backend, opts)
 
     {moe_manifest, moe_params} =
       case mode do
-        :caller -> MoeLayerArtifact.load_caller!(moe_artifact, backend)
-        :complete_layer -> MoeLayerArtifact.load!(moe_artifact, backend)
+        :caller -> MoeLayerArtifact.load_caller!(moe_artifact, backend, opts)
+        :complete_layer -> MoeLayerArtifact.load!(moe_artifact, backend, opts)
       end
 
-    expert = ExtractedExpert.load!(expert_artifact, backend)
+    expert = ExtractedExpert.load!(expert_artifact, backend, opts)
 
     unless manifest.layer_index == moe_manifest.layer_index and
              expert.manifest.layer_index == manifest.layer_index do

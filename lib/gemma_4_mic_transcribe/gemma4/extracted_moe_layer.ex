@@ -16,8 +16,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
   defstruct [:manifest, :params, :predict_fun, :backend]
 
   @doc "Loads the extracted shell and builds a backend-specific predictor."
-  def load!(path, backend \\ @default_backend) do
-    {manifest, params} = MoeLayerArtifact.load!(path, backend)
+  def load!(path, backend \\ @default_backend, opts \\ []) do
+    {manifest, params} = MoeLayerArtifact.load!(path, backend, opts)
     top_k = manifest.top_k_experts
     eps = manifest.rms_norm_eps
     router_scalar = manifest.hidden_size ** -0.5

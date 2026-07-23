@@ -101,6 +101,25 @@ defmodule Gemma4MicTranscribe.Gemma4.OutputHeadArtifactTest do
     assert_raise ArgumentError, ~r/token ID must be in/, fn ->
       ExtractedOutputHead.embedding(head, @vocab)
     end
+
+    manifest_path = Path.join(artifact, "manifest.etf")
+
+    corrupted_manifest =
+      manifest_path
+      |> File.read!()
+      |> :erlang.binary_to_term()
+      |> Map.put(:parameter_sha256, :crypto.strong_rand_bytes(32))
+
+    File.write!(manifest_path, :erlang.term_to_binary(corrupted_manifest))
+
+    assert_raise ArgumentError, "output-head parameter checksum mismatch", fn ->
+      OutputHeadArtifact.load!(artifact)
+    end
+
+    assert {_manifest, unchecked_params} =
+             OutputHeadArtifact.load!(artifact, Nx.BinaryBackend, verify_checksum: false)
+
+    assert Nx.shape(unchecked_params.embedding) == {@vocab, @hidden}
   end
 
   defp reference_raw_logits(hidden, embedding, norm) do

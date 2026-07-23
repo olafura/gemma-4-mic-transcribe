@@ -10,8 +10,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedOutputHead do
   defstruct [:manifest, :params, :predict_fun, :backend]
 
   @doc "Loads and compiles an extracted output head."
-  def load!(artifact, backend \\ Nx.BinaryBackend) do
-    {manifest, params} = OutputHeadArtifact.load!(artifact, backend)
+  def load!(artifact, backend \\ Nx.BinaryBackend, opts \\ []) do
+    {manifest, params} = OutputHeadArtifact.load!(artifact, backend, opts)
     eps = manifest.rms_norm_eps
 
     predict_fun =

@@ -171,8 +171,8 @@ defmodule Gemma4MicTranscribe.Gemma4.OutputHeadArtifact do
     end
   end
 
-  @doc "Loads the output-head matrices onto an Nx backend."
-  def load!(path, backend \\ Nx.BinaryBackend) do
+  @doc "Loads the output-head matrices, validating them by default."
+  def load!(path, backend \\ Nx.BinaryBackend, opts \\ []) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
 
@@ -182,7 +182,8 @@ defmodule Gemma4MicTranscribe.Gemma4.OutputHeadArtifact do
 
     parameters_path = Path.join(path, manifest.parameter_file)
 
-    unless sha256_file(parameters_path) == manifest.parameter_sha256 do
+    if Keyword.get(opts, :verify_checksum, true) and
+         sha256_file(parameters_path) != manifest.parameter_sha256 do
       raise ArgumentError, "output-head parameter checksum mismatch"
     end
 

@@ -26,9 +26,9 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
   ]
 
   @doc "Loads matching attention and MoE artifacts onto an Nx backend."
-  def load!(caller_artifact, moe_artifact, backend \\ Nx.BinaryBackend) do
-    {manifest, attention_params} = ExpertCallerArtifact.load!(caller_artifact, backend)
-    {moe_manifest, moe_params} = MoeLayerArtifact.load!(moe_artifact, backend)
+  def load!(caller_artifact, moe_artifact, backend \\ Nx.BinaryBackend, opts \\ []) do
+    {manifest, attention_params} = ExpertCallerArtifact.load!(caller_artifact, backend, opts)
+    {moe_manifest, moe_params} = MoeLayerArtifact.load!(moe_artifact, backend, opts)
 
     unless manifest.layer_index == moe_manifest.layer_index do
       raise ArgumentError, "attention and MoE artifacts must use the same decoder layer"

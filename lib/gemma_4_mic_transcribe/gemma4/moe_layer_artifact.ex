@@ -186,30 +186,40 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
   end
 
   @doc "Loads the complete MoE shell onto the requested Nx backend."
-  def load!(path, backend \\ Nx.BinaryBackend) do
-    load_parameters!(path, backend, :all)
+  def load!(path, backend \\ Nx.BinaryBackend, opts \\ []) do
+    load_parameters!(path, backend, :all, opts)
   end
 
   @doc "Loads only the three router tensors onto the requested Nx backend."
-  def load_router!(path, backend \\ Nx.BinaryBackend) do
-    load_parameters!(path, backend, [
-      "router_proj",
-      "router_scale",
-      "router_per_expert_scale"
-    ])
+  def load_router!(path, backend \\ Nx.BinaryBackend, opts \\ []) do
+    load_parameters!(
+      path,
+      backend,
+      [
+        "router_proj",
+        "router_scale",
+        "router_per_expert_scale"
+      ],
+      opts
+    )
   end
 
   @doc "Loads the router and routed-expert input norm for an expert caller."
-  def load_caller!(path, backend \\ Nx.BinaryBackend) do
-    load_parameters!(path, backend, [
-      "router_proj",
-      "router_scale",
-      "router_per_expert_scale",
-      "norm_pre_experts"
-    ])
+  def load_caller!(path, backend \\ Nx.BinaryBackend, opts \\ []) do
+    load_parameters!(
+      path,
+      backend,
+      [
+        "router_proj",
+        "router_scale",
+        "router_per_expert_scale",
+        "norm_pre_experts"
+      ],
+      opts
+    )
   end
 
-  defp load_parameters!(path, backend, names) do
+  defp load_parameters!(path, backend, names, opts) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
 
@@ -219,7 +229,8 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
 
     parameters_path = Path.join(path, manifest.parameter_file)
 
-    unless sha256_file(parameters_path) == manifest.parameter_sha256 do
+    if Keyword.get(opts, :verify_checksum, true) and
+         sha256_file(parameters_path) != manifest.parameter_sha256 do
       raise ArgumentError, "MoE layer parameter checksum mismatch"
     end
 

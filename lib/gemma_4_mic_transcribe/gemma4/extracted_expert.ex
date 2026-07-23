@@ -14,8 +14,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedExpert do
   defstruct [:manifest, :params, :predict_fun, :backend]
 
   @doc "Loads an expert artifact and builds its backend-specific predictor."
-  def load!(path, backend \\ Nx.BinaryBackend) do
-    {manifest, params} = ExpertArtifact.load!(path, backend)
+  def load!(path, backend \\ Nx.BinaryBackend, opts \\ []) do
+    {manifest, params} = ExpertArtifact.load!(path, backend, opts)
 
     %__MODULE__{
       manifest: manifest,

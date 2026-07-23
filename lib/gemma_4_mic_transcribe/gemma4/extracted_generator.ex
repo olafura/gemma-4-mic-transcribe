@@ -36,7 +36,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
           layer_artifact(prefix, 0, "caller"),
           layer_artifact(prefix, 0, "moe"),
           expert_artifact,
-          backend
+          backend,
+          verify_checksum: false
         )
 
       embedding_data = ExpertCaller.prepare_embeddings!(first_layer, input_text)
@@ -152,7 +153,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
           ExtractedDecoderLayer.load!(
             layer_artifact(prefix, layer_index, "caller"),
             layer_artifact(prefix, layer_index, "moe"),
-            backend
+            backend,
+            verify_checksum: state.offset == 0
           )
 
         cache =

@@ -128,8 +128,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
     end
   end
 
-  @doc "Loads an extracted attention prefix onto an Nx backend."
-  def load!(path, backend \\ Nx.BinaryBackend) do
+  @doc "Loads an extracted attention prefix, validating it by default."
+  def load!(path, backend \\ Nx.BinaryBackend, opts \\ []) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
     parameters_path = Path.join(path, manifest.parameter_file)
@@ -138,7 +138,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
       raise ArgumentError, "unsupported expert caller artifact"
     end
 
-    unless sha256_file(parameters_path) == manifest.parameter_sha256 do
+    if Keyword.get(opts, :verify_checksum, true) and
+         sha256_file(parameters_path) != manifest.parameter_sha256 do
       raise ArgumentError, "expert caller parameter checksum mismatch"
     end
 
