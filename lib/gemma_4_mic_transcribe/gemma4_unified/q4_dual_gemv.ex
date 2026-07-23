@@ -42,8 +42,9 @@ defimpl EXLA.CustomCall, for: Gemma4MicTranscribe.Gemma4Unified.Q4DualGemv do
         %{group_size: group_size},
         _out,
         [x, packed_a, scales_a, packed_b, scales_b],
-        %{platform: :rocm}
-      ) do
+        %{platform: platform}
+      )
+      when platform in [:rocm, :cuda] do
     with 1 <- Nx.rank(x),
          {:bf, 16} <- Nx.type(x),
          {:s, 32} <- Nx.type(packed_a),

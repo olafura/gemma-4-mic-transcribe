@@ -90,8 +90,9 @@ $(info EXLA_CPU_ONLY is not set, checking for nvcc availability)
 	ifeq ($(NVCC_TEST),nvcc)
 $(info CUDA is available.)
 		NVCC = nvcc -ccbin $(CXX)
-		NVCCFLAGS = -Xcompiler "$(CFLAGS)" -DCUDA_ENABLED
+		NVCCFLAGS = -w -Xcompiler "$(CFLAGS)" -DCUDA_ENABLED
 		CFLAGS += -DCUDA_ENABLED -I$(dir $(NVCC_RESULT))../include
+		EXLA_CUDA_AVAILABLE = 1
 	else
 $(info CUDA is not available.)
 	endif
@@ -145,6 +146,13 @@ SOURCES += $(wildcard $(EXLA_DIR)/custom_calls/*.cc)
 HEADERS = $(EXLA_DIR)/exla_mlir.h $(EXLA_DIR)/custom_calls/runtime_callback_bridge.h $(EXLA_DIR)/exla_client.h $(EXLA_DIR)/exla_nif_util.h $(EXLA_DIR)/exla_log_sink.h $(EXLA_DIR)/ipc.h
 OBJECTS = $(patsubst $(EXLA_DIR)/%.cc,$(EXLA_CACHE_OBJ_DIR)/%.o,$(SOURCES)) $(EXLA_CACHE_OBJ_DIR)/exla_cuda.o
 
+# Hand-written CUDA kernels are built only when nvcc is present.
+CUDA_SOURCES = $(wildcard $(EXLA_DIR)/custom_calls/*.cu)
+CUDA_OBJECTS = $(patsubst $(EXLA_DIR)/%.cu,$(EXLA_CACHE_OBJ_DIR)/%.cu.o,$(CUDA_SOURCES))
+ifeq ($(EXLA_CUDA_AVAILABLE),1)
+OBJECTS += $(CUDA_OBJECTS)
+endif
+
 # Hand-written HIP kernels (int4 GEMV) are compiled with hipcc and linked into
 # libexla.so when building against a ROCm XLA extension. XLA's generic codegen
 # dequantizes int4 weights before the GEMM; these kernels read packed nibbles.
@@ -163,6 +171,10 @@ endif
 $(EXLA_CACHE_OBJ_DIR)/%.hip.o: $(EXLA_DIR)/%.hip $(HEADERS)
 	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)/custom_calls
 	$(HIPCC) $(CFLAGS) --offload-arch=$(EXLA_HIP_ARCH) -fPIC -c $< -o $@
+
+$(EXLA_CACHE_OBJ_DIR)/%.cu.o: $(EXLA_DIR)/%.cu $(HEADERS)
+	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)/custom_calls
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 $(EXLA_CACHE_OBJ_DIR)/exla_cuda.o: $(EXLA_DIR)/exla_cuda.cc $(EXLA_DIR)/exla_cuda.h
 	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)

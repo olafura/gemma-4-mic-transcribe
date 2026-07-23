@@ -5,7 +5,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
   #
   # XLA's generic codegen dequantizes packed int4 weights to bf16 before the
   # GEMM, so decode reads the dequantized size instead of the packed size. On
-  # ROCm this block lowers to the hand-written HIP kernel registered in
+  # GPU this block lowers to the hand-written HIP or CUDA kernel registered in
   # libexla.so, which reads packed nibbles directly. Everywhere else the
   # default implementation below runs, which is also the correctness oracle
   # the kernel is tested against.
@@ -131,7 +131,10 @@ end
 defimpl EXLA.CustomCall, for: Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
   require Logger
 
-  def call(%{group_size: group_size}, _out, [x, packed, scales], %{platform: :rocm}) do
+  def call(%{group_size: group_size}, _out, [x, packed, scales], %{
+        platform: platform
+      })
+      when platform in [:rocm, :cuda] do
     with {:bf, 16} <- Nx.type(x),
          {:s, 32} <- Nx.type(packed),
          {:bf, 16} <- Nx.type(scales) do
