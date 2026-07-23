@@ -22,4 +22,5 @@ __pycache__/
 /decoder_pipeline_bench
 /decoder_block
 /single_word_bench
+/handoff_probe
 /artifacts/

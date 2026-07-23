@@ -44,7 +44,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
     state = %{
       hidden_state: hidden_state,
       cache: cache,
-      shared: %{}
+      shared: %{},
+      captured_hidden: nil
     }
 
     outputs =
@@ -59,7 +60,11 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
 
     cache = Layers.Decoder.update_cache_offset(outputs.cache, outputs.hidden_state)
 
-    %{hidden_state: outputs.hidden_state, cache: cache}
+    %{
+      hidden_state: outputs.hidden_state,
+      cache: cache,
+      captured_hidden: outputs.captured_hidden
+    }
   end
 
   defp block(
@@ -120,9 +125,17 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
       # every block carries a learned scalar on its output
       |> layer_scalar(name: join(name, "layer_scalar"))
 
+    captured_hidden =
+      if index == spec.capture_layer do
+        Axon.nx(hidden_state, fn state -> state[[.., -1, ..]] end)
+      else
+        state.captured_hidden
+      end
+
     %{
       hidden_state: hidden_state,
       cache: Layers.Decoder.put_block_cache(state.cache, index, block_cache),
+      captured_hidden: captured_hidden,
       shared:
         if(shared?,
           do: state.shared,

@@ -57,6 +57,35 @@ defmodule Gemma4MicTranscribe.Gemma4E4BDecoderTest do
     assert outputs.hidden_state |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
   end
 
+  test "captures only the last position of the configured decoder layer" do
+    spec = tiny_spec(capture_layer: 2)
+
+    hidden_state = Axon.input("hidden_state", shape: {nil, nil, spec.hidden_size})
+    per_layer = Axon.input("per_layer_inputs", shape: {nil, nil, nil, nil})
+    position_ids = Axon.input("position_ids", shape: {nil, nil})
+    attention_mask = Axon.input("attention_mask", shape: {nil, nil})
+    cache = Axon.input("cache", optional: true)
+
+    outputs =
+      Decoder.decode(hidden_state, per_layer, position_ids, attention_mask, cache, spec)
+
+    model = Axon.container(%{captured_hidden: outputs.captured_hidden})
+    {init_fun, predict_fun} = Axon.build(model)
+
+    inputs = %{
+      "hidden_state" => Nx.broadcast(0.1, {1, 5, spec.hidden_size}),
+      "per_layer_inputs" =>
+        Nx.broadcast(0.05, {1, 5, spec.num_blocks, spec.hidden_size_per_layer_input}),
+      "position_ids" => Nx.iota({1, 5}, axis: 1, type: :s64),
+      "attention_mask" => Nx.broadcast(1, {1, 5})
+    }
+
+    params = init_fun.(inputs, Axon.ModelState.empty())
+    result = predict_fun.(params, inputs)
+
+    assert Nx.shape(result.captured_hidden) == {1, spec.hidden_size}
+  end
+
   test "shared blocks reuse cached key values instead of projecting their own" do
     spec = tiny_spec()
     {_outputs, params} = build(spec, 4)

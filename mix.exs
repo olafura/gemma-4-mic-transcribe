@@ -21,6 +21,9 @@ defmodule Gemma4MicTranscribe.MixProject do
         "single_word_bench" ->
           {Gemma4MicTranscribe.SingleWordBenchmark.Escript, "single_word_bench"}
 
+        "handoff_probe" ->
+          {Gemma4MicTranscribe.HandoffProbeCLI.Escript, "handoff_probe"}
+
         _other ->
           {Gemma4MicTranscribe.DecoderPipelineBenchmark.Escript, "decoder_pipeline_bench"}
       end

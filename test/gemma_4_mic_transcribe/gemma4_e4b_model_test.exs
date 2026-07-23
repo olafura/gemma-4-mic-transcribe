@@ -56,6 +56,25 @@ defmodule Gemma4MicTranscribe.Gemma4E4BModelTest do
     assert outputs.logits |> Nx.is_nan() |> Nx.any() |> Nx.to_number() == 0
   end
 
+  test "instrumented model returns one captured decoder row" do
+    model_spec = %{tiny_model() | capture_layer: 2}
+    graph = Model.model(model_spec)
+    {init_fun, predict_fun} = Axon.build(graph)
+
+    inputs = %{
+      "input_ids" => Nx.tensor([[2, 7, 7, 3]], type: :s64),
+      "attention_mask" => Nx.tensor([[1, 1, 1, 1]], type: :s64),
+      "position_ids" => Nx.tensor([[0, 1, 2, 3]], type: :s64),
+      "input_features" => Nx.broadcast(0.1, {1, 8, 8})
+    }
+
+    params = init_fun.(inputs, Axon.ModelState.empty())
+    outputs = predict_fun.(params, inputs)
+
+    assert Nx.shape(outputs.captured_hidden) == {1, model_spec.hidden_size}
+    assert Nx.shape(outputs.logits) == {1, 4, model_spec.vocab_size}
+  end
+
   test "audio changes only the placeholder positions" do
     model_spec = tiny_model()
     graph = Model.model(model_spec)

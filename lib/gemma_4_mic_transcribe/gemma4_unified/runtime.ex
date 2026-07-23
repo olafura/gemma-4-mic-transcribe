@@ -12,6 +12,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   alias Gemma4MicTranscribe.Gemma4Unified.Prompt
   alias Gemma4MicTranscribe.Gemma4Unified.TokenSelection
   alias Gemma4MicTranscribe.Gemma4Unified.Transcript
+  alias Gemma4MicTranscribe.HandoffProbe
+  alias Gemma4MicTranscribe.HandoffProbe.Artifact, as: HandoffProbeArtifact
   alias Gemma4MicTranscribe.ModelCatalog
   alias Gemma4MicTranscribe.RocmPreflight
 
@@ -48,6 +50,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     :e4b?,
     :predict_fun,
     :decode_predict_fun,
+    :handoff_probe,
     :debug,
     :debug_top_k
   ]
@@ -62,6 +65,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          {:ok, param_type} <- param_type(Keyword.get(opts, :param_type)) do
       repo_id = ModelCatalog.resolve(model_name)
       repo = {:hf, repo_id}
+      handoff_probe_artifact = Keyword.get(opts, :handoff_probe_artifact)
+
+      handoff_probe_manifest =
+        if handoff_probe_artifact,
+          do: HandoffProbeArtifact.read_manifest!(handoff_probe_artifact),
+          else: nil
 
       # E4B is a different architecture: conformer audio encoder, per-layer
       # input embeddings, KV sharing. It gets its own spec module.
@@ -85,7 +94,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
              timed_debug(debug?, "runtime: Bumblebee.load_spec #{repo_id}", fn ->
                Bumblebee.load_spec(repo, spec_opts)
              end),
-           spec <- configure_spec(spec, param_type, opts),
+           spec <-
+             configure_spec(
+               spec,
+               param_type,
+               maybe_capture_probe_layer(opts, handoff_probe_manifest)
+             ),
+           :ok <- validate_handoff_probe_spec(spec, repo_id, handoff_probe_manifest),
            {:ok, model_info} <-
              timed_debug(
                debug?,
@@ -129,6 +144,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             Keyword.get(opts, :fused_ffn, false),
             debug?
           )
+
+        handoff_probe =
+          if handoff_probe_artifact do
+            timed_debug(debug?, "runtime: load handoff probe artifact", fn ->
+              HandoffProbe.load!(
+                handoff_probe_artifact,
+                runtime_backend_from_backend(backend)
+              )
+            end)
+          end
 
         generation_config =
           Bumblebee.configure(generation_config,
@@ -195,6 +220,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
            e4b?: spec_module == Gemma4MicTranscribe.Gemma4E4B.Model,
            predict_fun: predict_fun,
            decode_predict_fun: decode_predict_fun,
+           handoff_probe: handoff_probe,
            debug: debug?,
            debug_top_k: Keyword.get(opts, :debug_top_k, 0)
          }}
@@ -749,7 +775,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
       limits = generate_limits(runtime, opts)
 
-      {token_ids, margins} =
+      {token_ids, margins, captured_rows} =
         if confidence? do
           cached_greedy_generate_with_confidence(
             runtime,
@@ -767,7 +793,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
              input_features_mask,
              masks,
              limits
-           ), []}
+           ), [], []}
         end
 
       log_debug(runtime, fn ->
@@ -782,22 +808,32 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
        %{
          text: transcript,
          token_ids: token_ids,
-         confidence: confidence_summary(margins)
+         confidence: confidence_summary(margins, runtime.handoff_probe, captured_rows)
        }}
     end
   rescue
     exception -> {:error, Exception.message(exception)}
   end
 
-  defp confidence_summary([]),
-    do: %{token_count: 0, min_logit_margin: 0.0, mean_logit_margin: 0.0}
+  defp confidence_summary(margins, handoff_probe, captured_rows) do
+    summary =
+      case margins do
+        [] ->
+          %{token_count: 0, min_logit_margin: 0.0, mean_logit_margin: 0.0}
 
-  defp confidence_summary(margins) do
-    %{
-      token_count: length(margins),
-      min_logit_margin: Enum.min(margins),
-      mean_logit_margin: Enum.sum(margins) / length(margins)
-    }
+        margins ->
+          %{
+            token_count: length(margins),
+            min_logit_margin: Enum.min(margins),
+            mean_logit_margin: Enum.sum(margins) / length(margins)
+          }
+      end
+
+    if handoff_probe do
+      Map.put(summary, :handoff_confidence, HandoffProbe.score(handoff_probe, captured_rows))
+    else
+      summary
+    end
   end
 
   @doc """
@@ -935,7 +971,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          %{max_new_tokens: max_new_tokens}
        )
        when max_new_tokens <= 0,
-       do: {[], []}
+       do: {[], [], []}
 
   defp cached_greedy_generate_with_confidence(
          runtime,
@@ -949,7 +985,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     max_cache_length = cache_length(prompt_length, runtime.max_response_tokens)
     cache = init_generation_cache(runtime, max_cache_length)
 
-    {logits, cache} =
+    {logits, cache, captured_hidden} =
       predict_prefill_next_logits(
         runtime,
         input_ids,
@@ -969,7 +1005,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     pad? = token_id == runtime.model_info.spec.pad_token_id
 
     if stop?(eos?, pad?, 1, limits) do
-      {[], []}
+      {[], [], []}
     else
       greedy_decode_with_confidence(
         runtime,
@@ -978,6 +1014,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         masks.content_length,
         [token_id],
         [margin],
+        maybe_capture([], captured_hidden),
         1,
         limits,
         channel_state
@@ -992,12 +1029,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          _prompt_length,
          generated,
          margins,
+         captured_rows,
          generated_count,
          %{max_new_tokens: max_new_tokens},
          _channel_state
        )
        when generated_count >= max_new_tokens,
-       do: {Enum.reverse(generated), Enum.reverse(margins)}
+       do: {Enum.reverse(generated), Enum.reverse(margins), Enum.reverse(captured_rows)}
 
   defp greedy_decode_with_confidence(
          runtime,
@@ -1006,13 +1044,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          prompt_length,
          generated,
          margins,
+         captured_rows,
          generated_count,
          limits,
          channel_state
        ) do
     previous_token_position = prompt_length + generated_count - 1
 
-    {logits, cache} =
+    {logits, cache, captured_hidden} =
       predict_decode_next_logits(runtime, previous_token_id, previous_token_position, cache)
 
     suppression_mask = suppression_mask_for_state(runtime, channel_state)
@@ -1026,7 +1065,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     pad? = token_id == runtime.model_info.spec.pad_token_id
 
     if stop?(eos?, pad?, step, limits) do
-      {Enum.reverse(generated), Enum.reverse(margins)}
+      {Enum.reverse(generated), Enum.reverse(margins), Enum.reverse(captured_rows)}
     else
       greedy_decode_with_confidence(
         runtime,
@@ -1035,6 +1074,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         prompt_length,
         [token_id | generated],
         [margin | margins],
+        maybe_capture(captured_rows, captured_hidden),
         step,
         limits,
         ChannelState.advance(channel_state, token_id, runtime.channel_token_ids)
@@ -1064,7 +1104,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     started_at = System.monotonic_time(:millisecond)
 
-    {logits, cache} =
+    {logits, cache, _captured_hidden} =
       predict_prefill_next_logits(
         runtime,
         input_ids,
@@ -1133,7 +1173,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
       started_at = System.monotonic_time(:millisecond)
 
-      {logits, cache} =
+      {logits, cache, _captured_hidden} =
         predict_decode_next_logits(runtime, previous_token_id, previous_token_position, cache)
 
       suppression_mask = suppression_mask_for_state(runtime, channel_state)
@@ -1238,9 +1278,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         }
       end)
 
-    %{logits: logits, cache: cache} = runtime.predict_fun.(runtime.model_info.params, inputs)
+    output = runtime.predict_fun.(runtime.model_info.params, inputs)
 
-    {logits, cache}
+    {output.logits, output.cache, Map.get(output, :captured_hidden)}
   end
 
   defp predict_decode_next_logits(runtime, previous_token_id, position_id, cache) do
@@ -1259,10 +1299,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       end)
 
     predict_fun = runtime.decode_predict_fun || runtime.predict_fun
-    %{logits: logits, cache: cache} = predict_fun.(runtime.model_info.params, inputs)
+    output = predict_fun.(runtime.model_info.params, inputs)
 
-    {logits, cache}
+    {output.logits, output.cache, Map.get(output, :captured_hidden)}
   end
+
+  defp maybe_capture(rows, nil), do: rows
+  defp maybe_capture(rows, captured_hidden), do: [captured_hidden | rows]
 
   defp prepare_audio_tensors(runtime, input_features, input_features_mask) do
     backend = runtime_backend(runtime)
@@ -1519,8 +1562,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp maybe_put_param_type(opts, _spec, type), do: Keyword.put(opts, :type, type)
 
-  # The E4B spec has none of the 12B's quantisation or logit options.
-  defp configure_spec(%Gemma4MicTranscribe.Gemma4E4B.Model{} = spec, _param_type, _opts), do: spec
+  # Efficient models have none of the 12B quantisation options, but may expose
+  # one decoder row for the learned E2B handoff probe.
+  defp configure_spec(%Gemma4MicTranscribe.Gemma4E4B.Model{} = spec, _param_type, opts) do
+    case Keyword.get(opts, :capture_layer) do
+      layer when is_integer(layer) -> Bumblebee.configure(spec, capture_layer: layer)
+      _other -> spec
+    end
+  end
 
   defp configure_spec(spec, param_type, opts) do
     Bumblebee.configure(spec,
@@ -1529,6 +1578,32 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       packed_linear: Keyword.get(opts, :packed_weights, true),
       hybrid_linear: Keyword.get(opts, :hybrid_weights, false)
     )
+  end
+
+  defp maybe_capture_probe_layer(opts, nil), do: opts
+
+  defp maybe_capture_probe_layer(opts, manifest) do
+    Keyword.put(opts, :capture_layer, manifest.probe_layer)
+  end
+
+  defp validate_handoff_probe_spec(_spec, _repo_id, nil), do: :ok
+
+  defp validate_handoff_probe_spec(spec, repo_id, manifest) do
+    cond do
+      not Regex.match?(~r/e2b/i, repo_id) ->
+        {:error, "the released Cactus handoff probe requires a Gemma 4 E2B model"}
+
+      spec.hidden_size != manifest.feature_size ->
+        {:error,
+         "handoff probe feature size #{manifest.feature_size} does not match model width #{spec.hidden_size}"}
+
+      manifest.probe_layer < 0 or manifest.probe_layer >= spec.num_blocks ->
+        {:error,
+         "handoff probe layer #{manifest.probe_layer} is outside the #{spec.num_blocks}-layer model"}
+
+      true ->
+        :ok
+    end
   end
 
   defp maybe_build_fused_decode(model_info, _backend, false, _debug?),

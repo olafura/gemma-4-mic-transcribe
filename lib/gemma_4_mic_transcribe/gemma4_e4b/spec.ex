@@ -39,6 +39,10 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Spec do
             final_logit_softcapping: 30.0,
             tie_word_embeddings: true,
             layer_types: nil,
+            # Optional decoder layer whose last sequence position is returned
+            # alongside logits. Used by learned handoff probes without
+            # materializing every layer or every position.
+            capture_layer: nil,
 
             # audio encoder (model_type "gemma4_audio")
             audio_hidden_size: 1024,

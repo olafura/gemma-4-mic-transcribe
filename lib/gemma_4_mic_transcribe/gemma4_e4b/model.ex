@@ -124,9 +124,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
 
         state
         |> Nx.reshape({batch, sequence, spec.num_blocks, spec.hidden_size_per_layer_input})
-        |> Nx.multiply(
-          Nx.sqrt(Nx.tensor(spec.hidden_size_per_layer_input, type: Nx.type(state)))
-        )
+        |> Nx.multiply(Nx.sqrt(Nx.tensor(spec.hidden_size_per_layer_input, type: Nx.type(state))))
       end)
 
     audio_embeddings = AudioEncoder.encode(inputs["input_features"], spec)
@@ -180,7 +178,16 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Model do
         end
       end)
 
-    Layers.output(%{logits: logits, cache: outputs.cache})
+    output = %{logits: logits, cache: outputs.cache}
+
+    output =
+      if is_integer(spec.capture_layer) do
+        Map.put(output, :captured_hidden, outputs.captured_hidden)
+      else
+        output
+      end
+
+    Layers.output(output)
   end
 
   defp inputs(spec) do
