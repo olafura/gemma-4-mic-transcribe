@@ -46,6 +46,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
     :tts_similarity_threshold,
     :audio_token_buckets,
     :warmup?,
+    :post_utterance_gc?,
     :incremental?,
     :utterance_cache,
     :utterance_cached_samples,
@@ -129,6 +130,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         Keyword.get(opts, :tts_similarity_threshold, @default_tts_similarity_threshold),
       audio_token_buckets: Keyword.get(opts, :audio_token_buckets, @default_audio_token_buckets),
       warmup?: Keyword.get(opts, :warmup, true),
+      post_utterance_gc?: Keyword.get(opts, :post_utterance_gc, true),
       # Off by default: measured worse than whole-utterance prefill even with
       # partials disabled and audio prefilled during speech (3.7s/4.6s vs
       # 2.0s/3.5s), and short utterances can come back as refusals. See README.
@@ -461,6 +463,8 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       end
 
     state = reset_utterance(state)
+    {state, cleanup_gc_us} = maybe_post_utterance_gc(state)
+    event = put_cleanup_metric(event, cleanup_gc_us)
     {state, [event, speech_end_event | events]}
   end
 
@@ -783,6 +787,24 @@ defmodule Gemma4MicTranscribe.StreamingSession do
         trailing_silence_ms: 0.0,
         last_partial_ms: nil
     }
+  end
+
+  defp maybe_post_utterance_gc(%__MODULE__{post_utterance_gc?: false} = state),
+    do: {state, 0}
+
+  defp maybe_post_utterance_gc(%__MODULE__{} = state) do
+    started_at = System.monotonic_time(:microsecond)
+    true = :erlang.garbage_collect(self(), [{:type, :minor}])
+    {state, System.monotonic_time(:microsecond) - started_at}
+  end
+
+  defp put_cleanup_metric(event, cleanup_gc_us) do
+    Map.update(
+      event,
+      :metrics,
+      %{cleanup_gc_us: cleanup_gc_us},
+      &Map.put(&1, :cleanup_gc_us, cleanup_gc_us)
+    )
   end
 
   # The model occasionally answers as an assistant instead of transcribing,

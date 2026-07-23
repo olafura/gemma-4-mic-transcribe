@@ -166,11 +166,22 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
              start_ms: 0,
              end_ms: 60,
              endpoint_ms: 100,
-             metrics: %{audio_tokens: 25}
+             metrics: %{audio_tokens: 25, cleanup_gc_us: cleanup_gc_us}
            } = Enum.find(events, &(&1.type == "final"))
+
+    assert is_integer(cleanup_gc_us) and cleanup_gc_us >= 0
 
     assert %{end_ms: 60, endpoint_ms: 100} =
              Enum.find(events, &(&1.type == "speech_end"))
+  end
+
+  test "post-utterance GC can be disabled while retaining its metric" do
+    {:ok, session} = start_test_session(partials: false, post_utterance_gc: false)
+
+    samples = List.duplicate(0.2, 60) ++ List.duplicate(0.0, 60)
+    assert {:ok, events} = StreamingSession.push_audio(session, samples, 0.0)
+
+    assert %{metrics: %{cleanup_gc_us: 0}} = Enum.find(events, &(&1.type == "final"))
   end
 
   test "speech-end subscribers are notified before final generation completes" do
