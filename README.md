@@ -1040,6 +1040,9 @@ After `scripts/setup.sh` or `mix compile`:
 ./gemma_4_mic_transcribe --wav journal1.wav --max-windows 1
 ```
 
+For gated Hugging Face checkpoints, set `HF_TOKEN` in the service environment.
+The runtime also accepts an `:auth_token` option when it is embedded directly.
+
 For LLM-bound events, use streaming WAV mode. It forms speech utterances first
 and only marks committed final transcripts as safe to send downstream.
 

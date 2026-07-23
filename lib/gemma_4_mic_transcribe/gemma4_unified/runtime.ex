@@ -64,7 +64,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          {:ok, backend} <- backend(Keyword.get(opts, :backend, Config.backend()), opts),
          {:ok, param_type} <- param_type(Keyword.get(opts, :param_type)) do
       repo_id = ModelCatalog.resolve(model_name)
-      repo = {:hf, repo_id}
+      repo = hf_repository(repo_id, Keyword.get(opts, :auth_token) || System.get_env("HF_TOKEN"))
       handoff_probe_artifact = Keyword.get(opts, :handoff_probe_artifact)
 
       handoff_probe_manifest =
@@ -229,6 +229,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   rescue
     exception -> {:error, Exception.message(exception)}
   end
+
+  defp hf_repository(repo_id, token) when token in [nil, ""], do: {:hf, repo_id}
+  defp hf_repository(repo_id, token), do: {:hf, repo_id, auth_token: token}
 
   @doc false
   def resolve_backend(value), do: backend(value, [])
