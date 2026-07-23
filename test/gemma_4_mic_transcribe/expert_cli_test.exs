@@ -77,6 +77,12 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
     assert run.tokens == 3
     assert run.runs == 5
 
+    assert {:extract_head, head} =
+             ExpertCLI.parse(["extract-head", "--artifact", "output-head"])
+
+    assert head.artifact == "output-head"
+    assert head.repo == "google/gemma-4-26B-A4B-it"
+
     assert {:profile_math, profile} =
              ExpertCLI.parse([
                "profile-math",
@@ -175,6 +181,8 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
                "expert-112",
                "--last-layer",
                "3",
+               "--head-artifact",
+               "output-head",
                "--expert-scale",
                "0.0",
                "--text",
@@ -200,6 +208,7 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
            ]
 
     assert prefix.expert_scale == 0.0
+    assert prefix.head_artifact == "output-head"
   end
 
   test "validates caller command paths and text" do

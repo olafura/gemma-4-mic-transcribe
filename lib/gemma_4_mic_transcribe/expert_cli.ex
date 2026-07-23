@@ -7,8 +7,10 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   alias Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedExpert
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
+  alias Gemma4MicTranscribe.Gemma4.ExtractedOutputHead
   alias Gemma4MicTranscribe.Gemma4.MathExpertProfiler
   alias Gemma4MicTranscribe.Gemma4.MoeLayerArtifact
+  alias Gemma4MicTranscribe.Gemma4.OutputHeadArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
 
   @switches [
@@ -16,6 +18,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     artifact_prefix: :string,
     caller_artifact: :string,
     expert_artifact: :string,
+    head_artifact: :string,
     next_artifact: :keep,
     next_caller_artifact: :keep,
     repo: :string,
@@ -71,6 +74,26 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
           "moe_layer_artifact",
           artifact,
           MoeLayerArtifact.read_manifest!(artifact)
+        )
+
+        0
+
+      {:extract_head, opts} ->
+        manifest =
+          OutputHeadArtifact.extract!(opts.artifact,
+            repo: opts.repo,
+            revision: opts.revision
+          )
+
+        IO.puts(
+          Jason.encode!(%{
+            event: "output_head_extracted",
+            artifact: Path.expand(opts.artifact),
+            parameter_count: manifest.parameter_count,
+            parameter_bytes: manifest.parameter_bytes,
+            vocab_size: manifest.vocab_size,
+            hidden_size: manifest.hidden_size
+          })
         )
 
         0
@@ -227,7 +250,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
             %{output: first_device.baseline_output}
           )
 
-        {final_output, layer_reports} =
+        {final_output, baseline_final_output, layer_reports} =
           run_decoder_chain!(
             opts.layers,
             backend,
@@ -235,6 +258,15 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
             first_device.output,
             first_device.baseline_output,
             [first_report]
+          )
+
+        {predictions, baseline_predictions} =
+          output_predictions(
+            opts[:head_artifact],
+            backend,
+            final_output,
+            baseline_final_output,
+            embedding_data.tokenizer
           )
 
         IO.puts(
@@ -255,7 +287,9 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                 %{position: position, id: token.id, token: token.token}
               end),
             layer_reports: layer_reports,
-            final_output_shape: Tuple.to_list(Nx.shape(final_output))
+            final_output_shape: Tuple.to_list(Nx.shape(final_output)),
+            predictions: predictions,
+            baseline_predictions: baseline_predictions
           })
         )
 
@@ -403,6 +437,22 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     end
   end
 
+  def parse(["extract-head" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts) do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:extract_head,
+         %{
+           artifact: opts[:artifact],
+           repo: opts[:repo] || "google/gemma-4-26B-A4B-it",
+           revision: opts[:revision] || "main"
+         }}
+      end
+    end
+  end
+
   def parse(["run" | argv]) do
     with {:ok, opts} <- parse_options(argv),
          :ok <- require_artifact(opts),
@@ -536,6 +586,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
            artifact: opts[:artifact],
            caller_artifact: opts[:caller_artifact],
            expert_artifact: opts[:expert_artifact],
+           head_artifact: opts[:head_artifact],
            layers: layers,
            text: opts[:text],
            expert_scale: opts[:expert_scale] || 1.0,
@@ -562,6 +613,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
            artifact: layer_artifact(prefix, 0, "moe"),
            caller_artifact: layer_artifact(prefix, 0, "caller"),
            expert_artifact: opts[:expert_artifact],
+           head_artifact: opts[:head_artifact],
            layers:
              Enum.map(1..last_layer, fn layer ->
                %{
@@ -625,10 +677,10 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
          _backend,
          _expected_layer,
          output,
-         _baseline_output,
+         baseline_output,
          reports
        ) do
-    {output, Enum.reverse(reports)}
+    {output, baseline_output, Enum.reverse(reports)}
   end
 
   defp run_decoder_chain!(
@@ -684,6 +736,38 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       selected_experts: result.top_k_indices |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_list(),
       selected_weights: result.top_k_weights |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_list()
     }
+  end
+
+  defp output_predictions(nil, _backend, _output, _baseline_output, _tokenizer),
+    do: {nil, nil}
+
+  defp output_predictions(artifact, backend, output, baseline_output, tokenizer) do
+    head = ExtractedOutputHead.load!(artifact, backend)
+    predictions = ExtractedOutputHead.run(head, output) |> prediction_rows(tokenizer)
+    baseline = ExtractedOutputHead.run(head, baseline_output) |> prediction_rows(tokenizer)
+    {predictions, baseline}
+  end
+
+  defp prediction_rows(result, tokenizer) do
+    ids =
+      result.top_k_indices
+      |> Nx.backend_copy(Nx.BinaryBackend)
+      |> Nx.to_flat_list()
+
+    values =
+      result.top_k_values
+      |> Nx.backend_copy(Nx.BinaryBackend)
+      |> Nx.to_flat_list()
+
+    Enum.zip_with(ids, values, fn id, logit ->
+      %{
+        id: id,
+        token:
+          Bumblebee.Tokenizer.id_to_token(tokenizer, id) ||
+            Bumblebee.Tokenizer.decode(tokenizer, [id]),
+        logit: logit
+      }
+    end)
   end
 
   defp positive(value, _name) when is_integer(value) and value > 0, do: :ok
@@ -749,6 +833,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       expert_tool run --artifact PATH [options]
       expert_tool extract-layer --artifact PATH [options]
       expert_tool inspect-layer --artifact PATH
+      expert_tool extract-head --artifact PATH [options]
       expert_tool run-layer --artifact PATH [options]
       expert_tool profile-math --artifact PATH [options]
       expert_tool extract-caller --artifact PATH [--layer INDEX]
@@ -762,7 +847,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                              [--next-artifact ... --next-caller-artifact ...]
                              --text TEXT [options]
       expert_tool call-prefix --artifact-prefix PATH --expert-artifact PATH
-                              --text TEXT [--last-layer INDEX] [options]
+                              --text TEXT [--last-layer INDEX]
+                              [--head-artifact PATH] [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -806,6 +892,9 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     call-prefix derives that ordered list from artifacts named
     PREFIX-layer0-moe, PREFIX-layer0-caller, and so on. It runs through layer
     29 by default; --last-layer can stop earlier for prefix experiments.
+    extract-head saves the final norm and tied vocabulary projection separately.
+    Pass it as --head-artifact on call-prefix to report the top next-token
+    predictions for both the modified and unchanged paths.
 
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0
