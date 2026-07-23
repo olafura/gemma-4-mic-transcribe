@@ -359,10 +359,23 @@ feeds only the preceding token through subsequent decode passes. On the same
 ablated prompt it generated `To solve a`. Prefill took 108.7 seconds, the first
 one-token decode took 66.8 seconds, and the next same-shape decode took 55.3
 seconds. Relative to the 108.7-second full-prefix second pass, those decode
-steps were 38.5% and 49.1% faster. The remaining cost is dominated by loading,
-verifying, and transferring roughly 49 GB of layer weights for every token;
-the caches remove repeated attention work and shape recompilation, but not
-weight streaming.
+steps were 38.5% and 49.1% faster.
+
+Artifact checksums are now verified once during prefill rather than rereading
+every file only to hash it for every token. Validation remains the default for
+all public artifact loaders; only already-validated artifacts use the explicit
+unchecked reload path. This reduced the two cached decode steps to 27.0 and
+14.0 seconds.
+
+One-token decoding now also loads only the eight experts selected by each
+router. Attention, shared FFN, router, and normalization shells for layers 1–29
+remain resident on the GPU, occupying 3,208,272,860 bytes. Per-token matrix
+streaming fell from 47,362,026,460 bytes for those complete layers to
+2,759,589,888 bytes of selected experts—a 94.2% reduction. A four-token run
+produced `To solve a quadratic`: prefill took 107.2 seconds, the shell-loading
+decode took 13.2 seconds, and subsequent steady-state tokens took 1.87 and 1.52
+seconds. The latter is 98.6% faster than the original 108.7-second
+full-prefix decode.
 
 Decoder parameters are explicitly released with `Nx.backend_deallocate/1`
 after each layer. Erlang's
