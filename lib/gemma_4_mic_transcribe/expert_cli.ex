@@ -243,18 +243,23 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
         {embedding_data, first_device} =
           ExpertCaller.call_layer_device!(layer_0, opts.text, expert_scale: opts.expert_scale)
 
+        first_layer_index = layer_0.manifest.layer_index
+        expert_index = layer_0.expert.manifest.expert_index
+
         first_report =
           decoder_layer_report(
-            layer_0.manifest.layer_index,
+            first_layer_index,
             first_device,
             %{output: first_device.baseline_output}
           )
+
+        unload_first_layer(layer_0)
 
         {final_output, baseline_final_output, layer_reports} =
           run_decoder_chain!(
             opts.layers,
             backend,
-            layer_0.manifest.layer_index + 1,
+            first_layer_index + 1,
             first_device.output,
             first_device.baseline_output,
             [first_report]
@@ -274,7 +279,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
             event: "decoder_layer_chain_called",
             layers: Enum.map(layer_reports, & &1.layer),
             text: opts.text,
-            expert_override: layer_0.expert.manifest.expert_index,
+            expert_override: expert_index,
             expert_scale: opts.expert_scale,
             override_route_count:
               first_device.override_route_count
@@ -706,6 +711,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     result = ExtractedDecoderLayer.run(layer, input)
     baseline_result = ExtractedDecoderLayer.run(layer, baseline_input)
     report = decoder_layer_report(expected_layer, result, baseline_result)
+    unload_decoder_layer(layer)
 
     run_decoder_chain!(
       rest,
@@ -715,6 +721,17 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       baseline_result.output,
       [report | reports]
     )
+  end
+
+  defp unload_first_layer(layer) do
+    Nx.backend_deallocate(layer.attention_params)
+    Nx.backend_deallocate(layer.moe_params)
+    Nx.backend_deallocate(layer.expert.params)
+  end
+
+  defp unload_decoder_layer(layer) do
+    Nx.backend_deallocate(layer.attention_params)
+    Nx.backend_deallocate(layer.moe_params)
   end
 
   defp decoder_layer_report(layer, result, baseline_result) do
