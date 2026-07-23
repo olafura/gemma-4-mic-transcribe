@@ -267,7 +267,8 @@ mix gemma.expert generate-prefix \
   --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
   --head-artifact artifacts/gemma4-26b-output-head \
   --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
-  --chat --expert-scale 0.0 --max-new-tokens 3 --backend exla:rocm
+  --chat --expert-scale 0.0 --max-new-tokens 8 \
+  --expert-cache-gb 16.0 --backend exla:rocm
 ```
 
 The caller loads only the router and routed-input norm from the MoE artifact.
@@ -376,6 +377,19 @@ produced `To solve a quadratic`: prefill took 107.2 seconds, the shell-loading
 decode took 13.2 seconds, and subsequent steady-state tokens took 1.87 and 1.52
 seconds. The latter is 98.6% faster than the original 108.7-second
 full-prefix decode.
+
+A bounded GPU LRU now retains exact BF16 routed experts across tokens. The
+default 16 GiB limit leaves headroom for the output head, resident decoder
+shells, transient route banks, and XLA. It is configurable with
+`--expert-cache-gb`; evicted entries are explicitly deallocated.
+
+An eight-token run produced `To solve a quadratic equation using a matrix`,
+preserving the uncached prefix exactly. The cache recorded 866 hits and 758
+misses—a 53.3% hit rate—using 9,016,246,272 bytes across 758 entries with no
+evictions. Populating the cache made the first sparse decode slower at 24.8
+seconds, but later tokens settled at 1.32–1.43 seconds instead of the uncached
+1.52–1.87 seconds. This is an exact long-running-service optimization rather
+than quantization, so it introduces no numerical approximation.
 
 Decoder parameters are explicitly released with `Nx.backend_deallocate/1`
 after each layer. Erlang's
