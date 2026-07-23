@@ -9,12 +9,14 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifactTest do
   @head_dim 2
 
   @tag :tmp_dir
-  test "range-extracts only the layer-0 attention caller", %{tmp_dir: tmp_dir} do
-    tensors = synthetic_tensors()
+  test "range-extracts a later decoder layer's attention caller", %{tmp_dir: tmp_dir} do
+    tensors = synthetic_tensors(1)
     source = tensors |> Safetensors.dump() |> IO.iodata_to_binary()
 
     config = %{
       "text_config" => %{
+        "num_hidden_layers" => 2,
+        "layer_types" => ["full_attention", "sliding_attention"],
         "hidden_size" => @hidden,
         "num_attention_heads" => @heads,
         "num_key_value_heads" => @kv_heads,
@@ -22,6 +24,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifactTest do
         "rms_norm_eps" => 1.0e-6,
         "sliding_window" => 8,
         "rope_parameters" => %{
+          "full_attention" => %{"rope_theta" => 1_000_000.0},
           "sliding_attention" => %{"rope_theta" => 10_000.0}
         }
       }
@@ -44,11 +47,14 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifactTest do
 
     manifest =
       ExpertCallerArtifact.extract!(artifact,
+        layer: 1,
         fetch_json: fetch_json,
         fetch_range: fetch_range
       )
 
     assert manifest.hidden_size == @hidden
+    assert manifest.layer_index == 1
+    assert manifest.attention_type == "sliding_attention"
     assert manifest.sliding_window == 8
     assert manifest.parameter_count == 60
 
@@ -72,8 +78,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifactTest do
     assert Nx.shape(params.key) == {@kv_heads * @head_dim, @hidden}
   end
 
-  defp synthetic_tensors do
-    prefix = "model.language_model.layers.0"
+  defp synthetic_tensors(layer) do
+    prefix = "model.language_model.layers.#{layer}"
 
     %{
       "#{prefix}.input_layernorm.weight" => ramp({@hidden}, 7),

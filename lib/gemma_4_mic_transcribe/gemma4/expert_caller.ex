@@ -57,7 +57,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
     top_k = moe_manifest.top_k_experts
     eps = manifest.rms_norm_eps
     router_scalar = manifest.hidden_size ** -0.5
-    embedding_scalar = manifest.hidden_size ** 0.5
+    embedding_scalar = if manifest.layer_index == 0, do: manifest.hidden_size ** 0.5, else: 1.0
 
     forward_opts = [
       top_k: top_k,
@@ -149,6 +149,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
         opts \\ []
       )
       when is_function(layer_predict_fun) do
+    require_text_input_layer!(caller)
     embedding_data = embedding_inputs!(caller, text, opts)
 
     embeddings =
@@ -206,6 +207,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
 
   @doc "Tokenizes text, captures real layer-0 expert inputs, and calls the selected expert."
   def call_text!(%__MODULE__{} = caller, text, opts \\ []) do
+    require_text_input_layer!(caller)
     embedding_data = embedding_inputs!(caller, text, opts)
 
     embeddings =
@@ -253,6 +255,12 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       |> Keyword.put_new(:prepend_bos, true)
       |> Keyword.put_new(:max_concurrency, 8)
     )
+  end
+
+  defp require_text_input_layer!(caller) do
+    unless caller.manifest.layer_index == 0 do
+      raise ArgumentError, "text input is valid only for decoder layer 0"
+    end
   end
 
   defp expert_inputs(caller, input, positions) do

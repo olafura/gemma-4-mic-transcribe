@@ -1,9 +1,10 @@
 defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
   @moduledoc """
-  Extracts the layer-0 attention prefix that produces routed-expert inputs.
+  Extracts a decoder layer's attention prefix that produces routed-expert inputs.
 
-  Token embeddings are fetched separately by row. The companion MoE artifact
-  supplies the router and `pre_feedforward_layernorm_2` weight.
+  Layer 0 consumes scaled token embeddings. Later layers consume the preceding
+  decoder layer's output. The companion MoE artifact supplies the feed-forward
+  shell.
   """
 
   @version 1
@@ -11,7 +12,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
   @parameters "parameters.safetensors"
   @default_repo "google/gemma-4-26B-A4B-it"
 
-  @doc "Extracts the layer-0 attention tensors needed by an expert caller."
+  @doc "Extracts one decoder layer's attention tensors."
   def extract!(path, opts \\ []) do
     path = Path.expand(path)
 
@@ -23,16 +24,14 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
     revision = Keyword.get(opts, :revision, "main")
     layer = Keyword.get(opts, :layer, 0)
 
-    unless layer == 0 do
-      raise ArgumentError, "expert caller extraction currently supports layer 0 only"
-    end
-
     fetch_json = Keyword.get(opts, :fetch_json, &fetch_json!/1)
     fetch_range = Keyword.get(opts, :fetch_range, &range_get!/3)
     base_url = "https://huggingface.co/#{repo}/resolve/#{revision}"
     config = fetch_json.("#{base_url}/config.json")
     index = fetch_json.("#{base_url}/model.safetensors.index.json")
     text_config = config["text_config"] || config
+    attention_type = attention_type!(text_config, layer)
+    rope_parameters = get_in(text_config, ["rope_parameters", attention_type]) || %{}
     specs = tensor_specs!(text_config, layer)
 
     shards =
@@ -42,7 +41,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
       |> Enum.uniq()
 
     unless match?([shard] when is_binary(shard), shards) do
-      raise ArgumentError, "layer-0 attention tensors must occupy one checkpoint shard"
+      raise ArgumentError, "layer #{layer} attention tensors must occupy one checkpoint shard"
     end
 
     [shard] = shards
@@ -92,16 +91,14 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
         source_shard: shard,
         source_checkpoint_bytes: get_in(index, ["metadata", "total_size"]),
         layer_index: layer,
+        attention_type: attention_type,
         hidden_size: positive_integer!(text_config, "hidden_size"),
         num_attention_heads: positive_integer!(text_config, "num_attention_heads"),
         num_key_value_heads: positive_integer!(text_config, "num_key_value_heads"),
         head_dim: positive_integer!(text_config, "head_dim"),
         rms_norm_eps: number!(text_config, "rms_norm_eps"),
-        sliding_window: positive_integer!(text_config, "sliding_window"),
-        rope_theta:
-          text_config
-          |> get_in(["rope_parameters", "sliding_attention", "rope_theta"])
-          |> number_value!("sliding-attention rope_theta"),
+        sliding_window: sliding_window(text_config, attention_type),
+        rope_theta: number_value!(rope_parameters["rope_theta"], "#{attention_type} rope_theta"),
         parameter_file: @parameters,
         parameter_bytes: File.stat!(parameters_path).size,
         parameter_count:
@@ -178,6 +175,27 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
       "key_norm" => spec("#{prefix}.self_attn.k_norm.weight", [head_dim])
     }
   end
+
+  defp attention_type!(config, layer) do
+    num_layers = positive_integer!(config, "num_hidden_layers")
+
+    unless is_integer(layer) and layer >= 0 and layer < num_layers do
+      raise ArgumentError, "expected layer in 0..#{num_layers - 1}, got: #{inspect(layer)}"
+    end
+
+    case Enum.at(config["layer_types"] || [], layer) do
+      type when type in ["sliding_attention", "full_attention"] ->
+        type
+
+      value ->
+        raise ArgumentError, "unsupported attention type at layer #{layer}: #{inspect(value)}"
+    end
+  end
+
+  defp sliding_window(config, "sliding_attention"),
+    do: positive_integer!(config, "sliding_window")
+
+  defp sliding_window(_config, "full_attention"), do: 2_147_483_647
 
   defp spec(source, shape), do: %{source: source, shape: shape}
 
