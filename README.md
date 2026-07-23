@@ -267,7 +267,7 @@ mix gemma.expert generate-prefix \
   --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
   --head-artifact artifacts/gemma4-26b-output-head \
   --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
-  --chat --expert-scale 0.0 --max-new-tokens 2 --backend exla:rocm
+  --chat --expert-scale 0.0 --max-new-tokens 3 --backend exla:rocm
 ```
 
 The caller loads only the router and routed-input norm from the MoE artifact.
@@ -350,10 +350,19 @@ it to the input, and runs the independently assembled model again. Generation
 uses output-only compiled layer entry points, so it does not execute the
 diagnostic baseline path or return every layer's routing tensors.
 
-The first generator intentionally recomputes the growing prefix. This establishes
-end-to-end generation correctness before attention KV caches change the layer
-contract. Consequently, its steady-state latency is not representative of the
-eventual service; fixed-shape per-layer KV caches are the next optimization.
+The first full-prefix generator produced `To solve` in two real decoder passes.
+Its steps took 97.8 and 108.7 seconds. A scale-1 run selected the same first
+token, `To`, confirming parity at the greedy decision boundary.
+
+Generation now prefills a fixed-size K/V cache for each extracted layer and
+feeds only the preceding token through subsequent decode passes. On the same
+ablated prompt it generated `To solve a`. Prefill took 108.7 seconds, the first
+one-token decode took 66.8 seconds, and the next same-shape decode took 55.3
+seconds. Relative to the 108.7-second full-prefix second pass, those decode
+steps were 38.5% and 49.1% faster. The remaining cost is dominated by loading,
+verifying, and transferring roughly 49 GB of layer weights for every token;
+the caches remove repeated attention work and shape recompilation, but not
+weight streaming.
 
 Decoder parameters are explicitly released with `Nx.backend_deallocate/1`
 after each layer. Erlang's

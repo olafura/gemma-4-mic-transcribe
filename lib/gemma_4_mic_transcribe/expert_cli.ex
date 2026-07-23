@@ -998,8 +998,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     --chat wraps --text in Gemma 4's canonical one-turn, thinking-disabled
     template. Without it, text is tokenized directly for activation probes.
     generate-prefix greedily decodes from the complete 30-layer extracted
-    prefix. It runs one output-only model path and recomputes the growing token
-    prefix for each new token; KV-cache execution is the next optimization.
+    prefix. It runs one output-only model path, prefills fixed-shape per-layer
+    attention caches, and processes one token per subsequent decode step.
 
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0
