@@ -391,8 +391,52 @@ seconds, but later tokens settled at 1.32–1.43 seconds instead of the uncached
 1.52–1.87 seconds. This is an exact long-running-service optimization rather
 than quantization, so it introduces no numerical approximation.
 
-Decoder parameters are explicitly released with `Nx.backend_deallocate/1`
-after each layer. Erlang's
+The extracted generator can now be loaded once and owned by a long-running
+process:
+
+```elixir
+{:ok, model} =
+  Gemma4MicTranscribe.Gemma4.ExtractedGeneratorServer.start_link(
+    artifact_prefix: "artifacts/gemma4-26b",
+    expert_artifact: "artifacts/gemma4-26b-layer0-expert112",
+    head_artifact: "artifacts/gemma4-26b-output-head",
+    backend: {EXLA.Backend, client: :rocm},
+    expert_cache_bytes: 16 * 1024 * 1024 * 1024
+  )
+
+result =
+  Gemma4MicTranscribe.Gemma4.ExtractedGeneratorServer.generate(model,
+    input_text: prompt,
+    expert_scale: 0.0,
+    max_new_tokens: 4
+  )
+
+GenServer.stop(model)
+```
+
+The output head, complete override layer, compiled XLA functions, sparse
+decoder shells, and routed-expert LRU survive across requests. Token state and
+fixed-shape K/V caches remain request-local. `generate-prefix --runs N`
+exercises this lifecycle and reports both decoder `processing_us` and complete
+call `wall_us`, excluding model startup from every request measurement.
+
+Prompt prefill now uses the same sparse path as one-token decode. Each layer
+loads one compact copy of every expert selected anywhere in the prompt and
+remaps its global router IDs into that bank. These prompt banks are deliberately
+ephemeral: admitting a one-pass prompt scan filled the 16 GiB LRU and caused
+cyclic eviction of the much smaller recurring decode working set.
+
+For two identical four-token requests over the 26-token math prompt, the first
+request took 113.04 seconds while compiling the new shapes. The warm request
+took 13.62 seconds of processing: 9.77 seconds for prefill and 1.07–1.52 seconds
+for each decode token. Before sparse prefill, the same persistent warm request
+took 50.54 seconds, including a 47.44-second prefill. This is a 73.1% reduction
+in warm request processing time and a 79.4% reduction in warm prefill. It
+preserved the greedy output `To solve a quadratic`. The decode-only cache used
+5.63 GiB across 473 experts with zero evictions.
+
+Transient expert banks, request K/V caches, and terminated model resources are
+explicitly released with `Nx.backend_deallocate/1`. Erlang's
 [per-process generational collector](https://www.erlang.org/doc/apps/erts/garbagecollection.html)
 tracks BEAM heap, stack, and referenced off-heap binaries; it does not use ROCm
 device-memory pressure as a collection trigger. Waiting for a later BEAM
