@@ -1,9 +1,9 @@
 defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
   @moduledoc """
-  Runs one-token cached decoder steps without loading complete expert banks.
+  Runs cached decoder steps without loading complete expert banks.
 
   Attention, shared-FFN, router, and normalization parameters load first. After
-  routing, only the selected expert slices are read and transferred.
+  routing, only the unique selected expert slices are read and transferred.
   """
 
   alias Gemma4MicTranscribe.Gemma4.ExpertCaller
@@ -85,8 +85,14 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
 
     finish_fun =
       Nx.Defn.jit(
-        fn prepared, moe_params, expert_params ->
-          ExtractedMoeLayer.finish_sparse(prepared, moe_params, expert_params, eps: eps).output
+        fn prepared, moe_params, expert_params, compact_expert_indices ->
+          ExtractedMoeLayer.finish_sparse_indexed(
+            prepared,
+            moe_params,
+            expert_params,
+            compact_expert_indices,
+            eps: eps
+          ).output
         end,
         build_opts(backend)
       )
@@ -117,16 +123,12 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
     |> then(&%{key: &1, value: Nx.backend_copy(&1, layer.backend)})
   end
 
-  @doc "Runs one cached token using only its selected routed experts."
+  @doc "Runs cached tokens using only their unique selected routed experts."
   def run_cached(%__MODULE__{} = layer, input, %{key: key, value: value}, offset, opts \\ [])
       when is_integer(offset) and offset >= 0 do
     input = prepare_input!(layer, input)
     token_count = Nx.axis_size(input, 0)
     cache_length = Nx.axis_size(key, 0)
-
-    unless token_count == 1 do
-      raise ArgumentError, "sparse decoder execution requires exactly one input token"
-    end
 
     unless Nx.shape(key) == Nx.shape(value) and offset + token_count <= cache_length do
       raise ArgumentError,
@@ -151,13 +153,27 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
       |> Nx.backend_copy(Nx.BinaryBackend)
       |> Nx.to_flat_list()
 
+    unique_expert_indices = Enum.uniq(expert_indices)
+
+    positions =
+      unique_expert_indices
+      |> Enum.with_index()
+      |> Map.new()
+
+    compact_expert_indices =
+      expert_indices
+      |> Enum.map(&Map.fetch!(positions, &1))
+      |> Nx.tensor(type: Nx.type(prepared.top_k_indices))
+      |> Nx.reshape(Nx.shape(prepared.top_k_indices))
+      |> transfer(layer.backend)
+
     {expert_params, expert_cache} =
       case Keyword.get(opts, :expert_cache) do
         nil ->
           {_manifest, expert_params} =
             MoeLayerArtifact.load_routed_experts!(
               layer.moe_artifact,
-              expert_indices,
+              unique_expert_indices,
               layer.backend,
               verify_checksum: false
             )
@@ -169,7 +185,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
             cache,
             layer.moe_artifact,
             layer.moe_manifest,
-            expert_indices,
+            unique_expert_indices,
             layer.backend
           )
       end
@@ -183,8 +199,16 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
         :top_k_weights
       ])
 
-    output = layer.finish_fun.(finish_input, layer.moe_params, expert_params)
+    output =
+      layer.finish_fun.(
+        finish_input,
+        layer.moe_params,
+        expert_params,
+        compact_expert_indices
+      )
+
     Nx.backend_deallocate(expert_params)
+    Nx.backend_deallocate(compact_expert_indices)
 
     Nx.backend_deallocate(Map.drop(prepared, [:key_cache, :value_cache]))
 

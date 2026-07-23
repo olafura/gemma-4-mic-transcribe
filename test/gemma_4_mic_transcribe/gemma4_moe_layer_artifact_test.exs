@@ -179,6 +179,68 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
 
     assert_all_close(sparse_result.output, sparse_baseline.output, 2.0e-2)
 
+    multi_sparse_input =
+      Nx.tensor(
+        [
+          [0.25, -0.5, 0.75, 1.0],
+          [-1.0, 0.125, 0.5, -0.25]
+        ],
+        type: :bf16
+      )
+
+    multi_params = layer.params
+
+    multi_sparse_baseline =
+      ExtractedMoeLayer.forward(multi_sparse_input, multi_params,
+        top_k: @top_k,
+        eps: @eps,
+        router_scalar: @hidden ** -0.5
+      )
+
+    multi_sparse_prepared =
+      ExtractedMoeLayer.prepare_sparse(
+        multi_sparse_input,
+        multi_params,
+        multi_sparse_baseline.top_k_indices,
+        multi_sparse_baseline.top_k_weights,
+        eps: @eps
+      )
+
+    unique_indices =
+      multi_sparse_baseline.top_k_indices
+      |> Nx.to_flat_list()
+      |> Enum.uniq()
+
+    compact_positions =
+      unique_indices
+      |> Enum.with_index()
+      |> Map.new()
+
+    compact_indices =
+      multi_sparse_baseline.top_k_indices
+      |> Nx.to_flat_list()
+      |> Enum.map(&Map.fetch!(compact_positions, &1))
+      |> Nx.tensor(type: :s64)
+      |> Nx.reshape(Nx.shape(multi_sparse_baseline.top_k_indices))
+
+    unique_indices_tensor = Nx.tensor(unique_indices, type: :s64)
+
+    unique_experts = %{
+      experts_gate_up: Nx.take(multi_params.experts_gate_up, unique_indices_tensor),
+      experts_down: Nx.take(multi_params.experts_down, unique_indices_tensor)
+    }
+
+    sparse_indexed_result =
+      ExtractedMoeLayer.finish_sparse_indexed(
+        multi_sparse_prepared,
+        multi_params,
+        unique_experts,
+        compact_indices,
+        eps: @eps
+      )
+
+    assert_all_close(sparse_indexed_result.output, multi_sparse_baseline.output, 2.0e-2)
+
     override_expert =
       actual.top_k_indices
       |> Nx.slice([0, 0], [1, 1])

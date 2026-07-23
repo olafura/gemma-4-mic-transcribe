@@ -8,7 +8,6 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
   """
 
   alias Gemma4MicTranscribe.Gemma4.ExpertCaller
-  alias Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedOutputHead
   alias Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.RoutedExpertCache
@@ -239,7 +238,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         1..29,
         {first.output, caches, state.sparse_layers, state.expert_cache},
         fn layer_index, {input, caches, sparse_layers, expert_cache} ->
-          {layer, cache, result, retain?, expert_cache} =
+          {layer, cache, result, expert_cache} =
             run_later_layer!(
               prefix,
               layer_index,
@@ -252,10 +251,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
               state.cache_length
             )
 
-          unless retain?, do: unload_decoder_layer(layer)
-
-          sparse_layers =
-            if retain?, do: Map.put(sparse_layers, layer_index, layer), else: sparse_layers
+          sparse_layers = Map.put(sparse_layers, layer_index, layer)
 
           Nx.backend_deallocate(input)
 
@@ -315,30 +311,32 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
          backend,
          input,
          caches,
-         _sparse_layers,
+         sparse_layers,
          expert_cache,
          0,
          cache_length
        ) do
     layer =
-      ExtractedDecoderLayer.load!(
-        layer_artifact(prefix, layer_index, "caller"),
-        layer_artifact(prefix, layer_index, "moe"),
-        backend
-      )
+      Map.get_lazy(sparse_layers, layer_index, fn ->
+        ExtractedSparseDecoderLayer.load!(
+          layer_artifact(prefix, layer_index, "caller"),
+          layer_artifact(prefix, layer_index, "moe"),
+          backend
+        )
+      end)
 
     cache =
       Map.get_lazy(caches, layer_index, fn ->
-        ExtractedDecoderLayer.init_cache(layer, cache_length)
+        ExtractedSparseDecoderLayer.init_cache(layer, cache_length)
       end)
 
-    {
-      layer,
-      cache,
-      ExtractedDecoderLayer.run_cached(layer, input, cache, 0),
-      false,
-      expert_cache
-    }
+    # A multi-token prompt touches more routed experts than the bounded cache
+    # can usually retain. Admitting that one-pass scan evicts the recurring
+    # one-token decode working set and causes cyclic cache thrashing on the next
+    # request, so prefill's compact expert banks remain ephemeral.
+    result = ExtractedSparseDecoderLayer.run_cached(layer, input, cache, 0)
+
+    {layer, cache, result, expert_cache}
   end
 
   defp run_later_layer!(
@@ -372,7 +370,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         expert_cache: expert_cache
       )
 
-    {layer, cache, result, true, result.expert_cache}
+    {layer, cache, result, result.expert_cache}
   end
 
   defp prediction_rows(result, tokenizer) do

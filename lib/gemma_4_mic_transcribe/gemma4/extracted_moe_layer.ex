@@ -155,6 +155,37 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
     }
   end
 
+  @doc false
+  defn finish_sparse_indexed(
+         prepared,
+         params,
+         expert_params,
+         compact_expert_indices,
+         opts \\ []
+       ) do
+    eps = opts[:eps]
+
+    routed =
+      prepared.routed_input
+      |> routed_expert_outputs(compact_expert_indices, expert_params)
+      |> combine_routed_expert_outputs(
+        prepared.top_k_weights,
+        Nx.type(prepared.residual)
+      )
+      |> rms_norm(params.norm_post_experts, eps)
+
+    combined =
+      rms_norm(prepared.shared_output + routed, params.norm_post_combined, eps)
+
+    %{
+      output: (prepared.residual + combined) * params.layer_scalar,
+      shared_output: prepared.shared_output,
+      routed_output: routed,
+      top_k_indices: prepared.top_k_indices,
+      top_k_weights: prepared.top_k_weights
+    }
+  end
+
   @doc """
   Runs the complete shell while replacing one routed expert's raw output.
 
