@@ -297,9 +297,7 @@ ablated only on its two selected routes; the complete layer output moved by
 other experts remained unchanged. A newly trained artifact with the same
 `2816 -> 704 -> 2816` contract can use the same slot. The validation path also
 computes the original bank output so it can report a baseline; removing that
-comparison is a later runtime optimization. The current three-layer run still
-requires decoder layers 3-29, final normalization, and the language-model head
-before it can decode text.
+comparison is a later runtime optimization.
 
 Attention callers and `call-chain` are layer-generic, so the complete layer-0 output can now
 remain on the ROCm device and feed layer 1 without repeating the token-embedding
@@ -330,6 +328,24 @@ embedding projection. When supplied to a complete 30-layer prefix, it reports
 the top next-token logits for both the expert-modified and baseline paths.
 `--chat` wraps the text in the canonical one-turn Gemma 4 template with thinking
 disabled; omit it when raw token activation probes are intentional.
+
+A complete extracted 30-layer chat pass now reaches the independently extracted
+output head. For a 26-token math prompt, expert 112 was selected twice. Ablating
+it left the top next-token candidate as `To`, but changed the top-10 set:
+baseline candidate `Solving` was replaced by `While`. The mean absolute
+activation delta grew through the decoder, peaked at `0.03873` in layer 25, and
+ended at `0.02181` after layer 29. The run took 126.9 seconds end to end,
+including BEAM startup, artifact verification and loading, and first-time XLA
+compilation. This is a useful next-token distribution, not autoregressive text
+generation yet.
+
+Decoder parameters are explicitly released with `Nx.backend_deallocate/1`
+after each layer. Erlang's
+[per-process generational collector](https://www.erlang.org/doc/apps/erts/garbagecollection.html)
+tracks BEAM heap, stack, and referenced off-heap binaries; it does not use ROCm
+device-memory pressure as a collection trigger. Waiting for a later BEAM
+collection therefore allowed already-finished XLA buffers to exhaust the GPU
+during the complete chain.
 
 Dense models expose their always-active feed-forward networks separately:
 
