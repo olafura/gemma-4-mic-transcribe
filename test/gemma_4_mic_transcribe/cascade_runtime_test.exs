@@ -35,6 +35,26 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
     end
   end
 
+  defmodule HandoffFastRuntime do
+    def load(opts) do
+      send(:cascade_runtime_test, {:fast_load_opts, opts})
+      {:ok, Keyword.fetch!(opts, :handoff_confidence)}
+    end
+
+    def generate_with_confidence(confidence, _input, _opts) do
+      {:ok,
+       %{
+         text: "fast transcript",
+         confidence: %{
+           handoff_confidence: confidence,
+           min_logit_margin: 0.0,
+           mean_logit_margin: 0.0,
+           token_count: 1
+         }
+       }}
+    end
+  end
+
   setup do
     Process.register(self(), :cascade_runtime_test)
     :ok
@@ -113,6 +133,36 @@ defmodule Gemma4MicTranscribe.CascadeRuntimeTest do
         fast_runtime_module: ConfidenceFastRuntime,
         fast_margin: 0.125,
         cascade_min_logit_margin: 0.125
+      )
+
+    assert {:ok, "fast transcript"} = CascadeRuntime.generate(cascade, %{samples: []})
+    refute_received :accurate_called
+  end
+
+  test "escalates E2B output below the learned handoff confidence" do
+    cascade =
+      load_cascade(
+        fast_runtime_module: HandoffFastRuntime,
+        handoff_confidence: 0.49,
+        handoff_probe_artifact: "artifacts/probe",
+        cascade_min_handoff_confidence: 0.5
+      )
+
+    assert_received {:fast_load_opts, opts}
+    assert opts[:model_name] == "gemma4-e2b"
+    assert_received {:accurate_load_opts, accurate_opts}
+    refute Keyword.has_key?(accurate_opts, :handoff_probe_artifact)
+    assert {:ok, "accurate transcript"} = CascadeRuntime.generate(cascade, %{samples: []})
+    assert_received :accurate_called
+  end
+
+  test "accepts E2B output at the learned handoff confidence threshold" do
+    cascade =
+      load_cascade(
+        fast_runtime_module: HandoffFastRuntime,
+        handoff_confidence: 0.5,
+        handoff_probe_artifact: "artifacts/probe",
+        cascade_min_handoff_confidence: 0.5
       )
 
     assert {:ok, "fast transcript"} = CascadeRuntime.generate(cascade, %{samples: []})

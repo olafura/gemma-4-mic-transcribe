@@ -136,6 +136,32 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert config.cascade_min_logit_margin == 0.125
   end
 
+  @tag :tmp_dir
+  test "parses the learned E2B model cascade", %{tmp_dir: tmp_dir} do
+    assert {:ok, %RunConfig{} = config} =
+             CLI.parse([
+               "--model-cascade",
+               "--cascade-fast-model",
+               "gemma4-e2b",
+               "--handoff-probe-artifact",
+               tmp_dir,
+               "--cascade-min-handoff-confidence",
+               "0.5"
+             ])
+
+    assert config.e4b_cascade
+    assert config.cascade_fast_model_name == "gemma4-e2b"
+    assert config.handoff_probe_artifact == Path.expand(tmp_dir)
+    assert config.cascade_min_handoff_confidence == 0.5
+  end
+
+  test "requires a probe artifact for learned handoff routing" do
+    assert {:error, message} =
+             CLI.parse(["--model-cascade", "--cascade-min-handoff-confidence", "0.5"])
+
+    assert message =~ "--handoff-probe-artifact"
+  end
+
   test "rejects incremental prefill with the initial E4B cascade" do
     assert {:error, message} = CLI.parse(["--e4b-cascade", "--incremental-prefill"])
     assert message =~ "does not support"

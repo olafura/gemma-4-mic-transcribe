@@ -13,6 +13,7 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
     :accurate_runtime,
     :min_chars_per_second,
     :min_logit_margin,
+    :min_handoff_confidence,
     :sample_rate,
     :counters
   ]
@@ -27,15 +28,25 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
     fast_module = Keyword.get(opts, :fast_runtime_module, Runtime)
     accurate_module = Keyword.get(opts, :accurate_runtime_module, Runtime)
 
+    default_fast_model =
+      if Keyword.get(opts, :handoff_probe_artifact), do: "gemma4-e2b", else: "gemma4-e4b"
+
     fast_opts =
       opts
-      |> Keyword.put(:model_name, Keyword.get(opts, :cascade_fast_model_name, "gemma4-e4b"))
+      |> Keyword.put(
+        :model_name,
+        Keyword.get(opts, :cascade_fast_model_name) || default_fast_model
+      )
       |> Keyword.put(:fused_ffn, false)
 
     # The first load performs the full VRAM safety check. Once EXLA has created
     # its allocator, rocm-smi reports that allocator's reservation as used VRAM;
     # the second load must not mistake our own reservation for another workload.
-    accurate_opts = Keyword.put(opts, :rocm_preflight, :compatibility_only)
+    accurate_opts =
+      opts
+      |> Keyword.delete(:handoff_probe_artifact)
+      |> Keyword.delete(:capture_layer)
+      |> Keyword.put(:rocm_preflight, :compatibility_only)
 
     with {:ok, fast_runtime} <- fast_module.load(fast_opts),
          {:ok, accurate_runtime} <- accurate_module.load(accurate_opts) do
@@ -47,6 +58,7 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
          accurate_runtime: accurate_runtime,
          min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
          min_logit_margin: Keyword.get(opts, :cascade_min_logit_margin, 0.0),
+         min_handoff_confidence: Keyword.get(opts, :cascade_min_handoff_confidence, 0.0),
          sample_rate: Keyword.get(opts, :sample_rate, 16_000),
          counters: :atomics.new(5, [])
        }}
@@ -75,22 +87,28 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
                input,
                cascade.min_chars_per_second,
                confidence,
-               cascade.min_logit_margin
+               cascade.min_logit_margin,
+               cascade.min_handoff_confidence
              ) do
           nil ->
             :atomics.add(cascade.counters, @accepted, 1)
-            emit_route(:fast, nil, fast_ms, 0)
+            Logger.info("cascade: accepting fast transcript #{format_confidence(confidence)}")
+            emit_route(:fast, nil, fast_ms, 0, confidence)
             {:ok, text}
 
           reason ->
-            Logger.info("cascade: escalating E4B transcript to accurate model reason=#{reason}")
-            run_accurate(cascade, input, opts, reason, fast_ms)
+            Logger.info(
+              "cascade: escalating fast transcript to accurate model reason=#{reason} " <>
+                format_confidence(confidence)
+            )
+
+            run_accurate(cascade, input, opts, reason, fast_ms, confidence)
         end
 
       {:error, reason} ->
-        Logger.warning("cascade: E4B failed, escalating reason=#{inspect(reason)}")
+        Logger.warning("cascade: fast model failed, escalating reason=#{inspect(reason)}")
         :atomics.add(cascade.counters, @fast_errors, 1)
-        run_accurate(cascade, input, opts, :fast_error, fast_ms)
+        run_accurate(cascade, input, opts, :fast_error, fast_ms, nil)
     end
   end
 
@@ -110,10 +128,17 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
 
   @doc false
   def escalate?(text, input, min_chars_per_second) when is_binary(text) do
-    escalation_reason(text, input, min_chars_per_second, nil, 0.0) != nil
+    escalation_reason(text, input, min_chars_per_second, nil, 0.0, 0.0) != nil
   end
 
-  defp escalation_reason(text, input, min_chars_per_second, confidence, min_logit_margin) do
+  defp escalation_reason(
+         text,
+         input,
+         min_chars_per_second,
+         confidence,
+         min_logit_margin,
+         min_handoff_confidence
+       ) do
     normalized = String.trim(text)
 
     cond do
@@ -123,6 +148,7 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
       String.contains?(normalized, "�") -> :replacement_character
       below_density?(normalized, input, min_chars_per_second) -> :low_character_density
       low_logit_margin?(confidence, min_logit_margin) -> :low_logit_margin
+      low_handoff_confidence?(confidence, min_handoff_confidence) -> :low_handoff_confidence
       true -> nil
     end
   end
@@ -141,23 +167,26 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
     if function_exported?(module, :warmup, 2), do: module.warmup(runtime, opts), else: :ok
   end
 
-  defp generate_fast(%{min_logit_margin: threshold} = cascade, input, opts)
-       when threshold > 0 do
-    if function_exported?(cascade.fast_module, :generate_with_confidence, 3) do
-      case cascade.fast_module.generate_with_confidence(cascade.fast_runtime, input, opts) do
-        {:ok, %{text: text, confidence: confidence}} -> {:ok, text, confidence}
-        {:error, reason} -> {:error, reason}
+  defp generate_fast(cascade, input, opts) do
+    if confidence_required?(cascade) do
+      if function_exported?(cascade.fast_module, :generate_with_confidence, 3) do
+        case cascade.fast_module.generate_with_confidence(cascade.fast_runtime, input, opts) do
+          {:ok, %{text: text, confidence: confidence}} -> {:ok, text, confidence}
+          {:error, reason} -> {:error, reason}
+        end
+      else
+        {:error, :confidence_unavailable}
       end
     else
-      {:error, :confidence_unavailable}
+      case cascade.fast_module.generate(cascade.fast_runtime, input, opts) do
+        {:ok, text} -> {:ok, text, nil}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
-  defp generate_fast(cascade, input, opts) do
-    case cascade.fast_module.generate(cascade.fast_runtime, input, opts) do
-      {:ok, text} -> {:ok, text, nil}
-      {:error, reason} -> {:error, reason}
-    end
+  defp confidence_required?(cascade) do
+    cascade.min_logit_margin > 0 or cascade.min_handoff_confidence > 0
   end
 
   defp low_logit_margin?(_confidence, threshold) when threshold <= 0, do: false
@@ -167,23 +196,47 @@ defmodule Gemma4MicTranscribe.CascadeRuntime do
     Map.get(confidence, :min_logit_margin, 0.0) < threshold
   end
 
-  defp run_accurate(cascade, input, opts, reason, fast_ms) do
+  defp low_handoff_confidence?(_confidence, threshold) when threshold <= 0, do: false
+  defp low_handoff_confidence?(nil, _threshold), do: true
+
+  defp low_handoff_confidence?(confidence, threshold) do
+    case Map.get(confidence, :handoff_confidence) do
+      value when is_number(value) -> value < threshold
+      _other -> true
+    end
+  end
+
+  defp run_accurate(cascade, input, opts, reason, fast_ms, confidence) do
     {result, accurate_ms} =
       timed(fn -> cascade.accurate_module.generate(cascade.accurate_runtime, input, opts) end)
 
     :atomics.add(cascade.counters, @escalated, 1)
     :atomics.add(cascade.counters, @accurate_ms, accurate_ms)
-    emit_route(:accurate, reason, fast_ms, accurate_ms)
+    emit_route(:accurate, reason, fast_ms, accurate_ms, confidence)
     result
   end
 
-  defp emit_route(route, reason, fast_ms, accurate_ms) do
+  defp emit_route(route, reason, fast_ms, accurate_ms, confidence) do
     :telemetry.execute(
       [:gemma_4_mic_transcribe, :cascade, :route],
       %{fast_ms: fast_ms, accurate_ms: accurate_ms},
-      %{route: route, reason: reason}
+      %{route: route, reason: reason, confidence: confidence}
     )
   end
+
+  defp format_confidence(nil), do: "confidence=unavailable"
+
+  defp format_confidence(confidence) do
+    handoff = Map.get(confidence, :handoff_confidence)
+    margin = Map.get(confidence, :min_logit_margin)
+
+    "handoff_confidence=#{format_number(handoff)} min_logit_margin=#{format_number(margin)}"
+  end
+
+  defp format_number(value) when is_number(value),
+    do: :io_lib.format("~.4f", [value]) |> IO.iodata_to_binary()
+
+  defp format_number(_value), do: "unavailable"
 
   defp timed(fun) do
     started_at = System.monotonic_time(:millisecond)

@@ -37,8 +37,11 @@ defmodule Gemma4MicTranscribe.CLI do
               fused_ffn: false,
               self_review: false,
               e4b_cascade: false,
+              cascade_fast_model_name: nil,
               cascade_min_chars_per_second: 0.0,
               cascade_min_logit_margin: 0.0,
+              cascade_min_handoff_confidence: 0.0,
+              handoff_probe_artifact: nil,
               incremental_prefill: false,
               warmup: true,
               speech_gate: Config.speech_gate?(),
@@ -86,9 +89,13 @@ defmodule Gemma4MicTranscribe.CLI do
     weights: :string,
     fused_ffn: :boolean,
     self_review: :boolean,
+    model_cascade: :boolean,
     e4b_cascade: :boolean,
+    cascade_fast_model: :string,
     cascade_min_chars_per_second: :float,
     cascade_min_logit_margin: :float,
+    cascade_min_handoff_confidence: :float,
+    handoff_probe_artifact: :string,
     incremental_prefill: :boolean,
     warmup: :boolean,
     speech_gate: :boolean,
@@ -222,9 +229,13 @@ defmodule Gemma4MicTranscribe.CLI do
       weights: Keyword.get(opts, :weights, "packed"),
       fused_ffn: Keyword.get(opts, :fused_ffn, false),
       self_review: Keyword.get(opts, :self_review, false),
-      e4b_cascade: Keyword.get(opts, :e4b_cascade, false),
+      e4b_cascade:
+        Keyword.get(opts, :model_cascade, false) or Keyword.get(opts, :e4b_cascade, false),
+      cascade_fast_model_name: Keyword.get(opts, :cascade_fast_model),
       cascade_min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
       cascade_min_logit_margin: Keyword.get(opts, :cascade_min_logit_margin, 0.0),
+      cascade_min_handoff_confidence: Keyword.get(opts, :cascade_min_handoff_confidence, 0.0),
+      handoff_probe_artifact: expand_optional_path(Keyword.get(opts, :handoff_probe_artifact)),
       incremental_prefill: Keyword.get(opts, :incremental_prefill, false),
       warmup: Keyword.get(opts, :warmup, true),
       speech_gate: Keyword.get(opts, :speech_gate, Config.speech_gate?()),
@@ -293,6 +304,17 @@ defmodule Gemma4MicTranscribe.CLI do
              config.cascade_min_logit_margin,
              "--cascade-min-logit-margin"
            ),
+         :ok <-
+           validate_ratio(
+             config.cascade_min_handoff_confidence,
+             "--cascade-min-handoff-confidence"
+           ),
+         :ok <-
+           validate_handoff_probe(
+             config.e4b_cascade,
+             config.cascade_min_handoff_confidence,
+             config.handoff_probe_artifact
+           ),
          :ok <- validate_output(config.output),
          {:ok, system_message, system_message_source} <-
            read_system_message(config.system_message, Keyword.get(opts, :system_message_file)),
@@ -313,7 +335,11 @@ defmodule Gemma4MicTranscribe.CLI do
              packed_weights: config.weights in ["packed", "hybrid"],
              hybrid_weights: config.weights == "hybrid",
              fused_ffn: config.fused_ffn,
+             cascade_fast_model_name: config.cascade_fast_model_name,
              cascade_min_chars_per_second: config.cascade_min_chars_per_second,
+             cascade_min_logit_margin: config.cascade_min_logit_margin,
+             cascade_min_handoff_confidence: config.cascade_min_handoff_confidence,
+             handoff_probe_artifact: config.handoff_probe_artifact,
              warmup: config.warmup,
              max_response_tokens: config.max_response_tokens,
              no_repeat_ngram_size: config.no_repeat_ngram,
@@ -539,8 +565,11 @@ defmodule Gemma4MicTranscribe.CLI do
       hybrid_weights: config.weights == "hybrid",
       fused_ffn: config.fused_ffn,
       self_review: config.self_review,
+      cascade_fast_model_name: config.cascade_fast_model_name,
       cascade_min_chars_per_second: config.cascade_min_chars_per_second,
       cascade_min_logit_margin: config.cascade_min_logit_margin,
+      cascade_min_handoff_confidence: config.cascade_min_handoff_confidence,
+      handoff_probe_artifact: config.handoff_probe_artifact,
       incremental_prefill: config.incremental_prefill,
       warmup: config.warmup,
       # Lag numbers are only meaningful against a loaded, warmed model, so
@@ -735,13 +764,31 @@ defmodule Gemma4MicTranscribe.CLI do
   defp validate_cascade_incremental(true, false), do: :ok
 
   defp validate_cascade_incremental(true, true),
-    do: {:error, "--e4b-cascade does not support --incremental-prefill yet"}
+    do: {:error, "--model-cascade does not support --incremental-prefill yet"}
+
+  defp validate_handoff_probe(_cascade, threshold, nil) when threshold <= 0, do: :ok
+
+  defp validate_handoff_probe(false, threshold, _artifact) when threshold > 0,
+    do: {:error, "--cascade-min-handoff-confidence requires --model-cascade"}
+
+  defp validate_handoff_probe(true, threshold, nil) when threshold > 0,
+    do: {:error, "--cascade-min-handoff-confidence requires --handoff-probe-artifact"}
+
+  defp validate_handoff_probe(_cascade, _threshold, nil), do: :ok
+
+  defp validate_handoff_probe(_cascade, _threshold, artifact) do
+    if File.dir?(artifact),
+      do: :ok,
+      else: {:error, "--handoff-probe-artifact directory not found: #{artifact}"}
+  end
 
   defp validate_output(output) when output in ["text", "jsonl"], do: :ok
   defp validate_output(_output), do: {:error, "--output must be text or jsonl"}
   defp validate_optional_positive(nil, _name), do: :ok
   defp validate_optional_positive(value, _name) when is_integer(value) and value > 0, do: :ok
   defp validate_optional_positive(_value, name), do: {:error, "#{name} must be positive"}
+  defp expand_optional_path(nil), do: nil
+  defp expand_optional_path(path), do: Path.expand(path)
   defp byte_size_or_zero(nil), do: 0
   defp byte_size_or_zero(text) when is_binary(text), do: byte_size(text)
 
@@ -853,9 +900,13 @@ defmodule Gemma4MicTranscribe.CLI do
                                         default packed
       --fused-ffn                        Fuse packed 12B FFN gate/up projections during decode
       --self-review                      Generate a draft, then correct it against the same audio
-      --e4b-cascade                       Use E4B first and escalate suspicious transcripts to 12B
-      --cascade-min-chars-per-second N   Escalate sparse E4B transcripts; 0 disables (default)
-      --cascade-min-logit-margin N       Escalate low-confidence E4B output; 0 disables (default)
+      --model-cascade                     Use a fast model first and escalate uncertain transcripts
+      --e4b-cascade                       Backward-compatible alias for --model-cascade
+      --cascade-fast-model NAME          Fast model; defaults E2B with a probe, otherwise E4B
+      --cascade-min-chars-per-second N   Escalate sparse fast transcripts; 0 disables (default)
+      --cascade-min-logit-margin N       Escalate low logit-margin output; 0 disables (default)
+      --cascade-min-handoff-confidence N Escalate below learned confidence in [0,1]; 0 disables
+      --handoff-probe-artifact PATH      Standalone artifact created by handoff_probe extract
       --incremental-prefill              Prefill audio during speech instead of after end-of-speech
       --no-warmup                        Skip startup generation warmup (JIT compiles on first utterance instead)
       --no-speech-gate                  Disable cheap local speech gating before model generation
