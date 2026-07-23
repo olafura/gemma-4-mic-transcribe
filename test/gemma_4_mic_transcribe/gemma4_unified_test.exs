@@ -760,6 +760,8 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     end
 
     assert ModelCatalog.runtime_kind("gemma4-12b-unified") == :bumblebee_axon
+    assert ModelCatalog.resolve("gemma4-e2b") == "google/gemma-4-E2B-it"
+    assert ModelCatalog.runtime_kind("gemma4-e2b") == :bumblebee_axon
 
     assert ModelCatalog.runtime_kind("gemma4-12b-qat-w4a16-ct") == :bumblebee_axon
 

@@ -21,6 +21,14 @@ defmodule Gemma4MicTranscribe.ModelCatalog do
       runtime: "llama.cpp/Ollama/LM Studio GGUF runtime"
     },
     %{
+      name: "gemma4-e2b",
+      hf_repo: "google/gemma-4-E2B-it",
+      description: "Gemma 4 E2B with conformer audio encoder",
+      artifact_format: :transformers_safetensors,
+      runtime_kind: :bumblebee_axon,
+      runtime: "local Bumblebee/Axon Gemma4 efficient audio runtime"
+    },
+    %{
       name: "gemma4-e4b",
       hf_repo: "google/gemma-4-E4B-it",
       description: "Gemma 4 E4B with conformer audio encoder",

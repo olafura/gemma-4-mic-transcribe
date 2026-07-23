@@ -1661,7 +1661,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp maybe_rebuild_for_e4b(_runtime, input), do: input
 
   defp spec_module_for(repo_id) do
-    if String.contains?(repo_id, "E4B") or String.contains?(repo_id, "e4b") do
+    if Regex.match?(~r/e[24]b/i, repo_id) do
       Gemma4MicTranscribe.Gemma4E4B.Model
     else
       Model

@@ -1031,6 +1031,12 @@ not just holding a dequantized copy.
 
 ### Gemma 4 E4B versus 12B (`--model-name gemma4-e4b`)
 
+The same configuration-driven conformer/decoder runtime also accepts the
+smaller `--model-name gemma4-e2b`. E2B is especially useful for learned
+handoff experiments: Cactus Hybrid's released correctness probe targets E2B
+decoder layer 28 at width 1536, whereas E4B's layer width is 2560 and cannot
+reuse those probe weights directly.
+
 Both models measured back-to-back on the same day, same harness
 (`--backend exla:rocm --stream-wav --realtime --no-partials --debug`,
 `journal1.wav`), E4B in its best configuration (exact incremental
