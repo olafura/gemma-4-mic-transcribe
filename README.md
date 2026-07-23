@@ -220,6 +220,13 @@ mix gemma.expert call-expert \
   --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
   --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
   --backend exla:rocm
+
+mix gemma.expert call-layer \
+  --artifact artifacts/gemma4-26b-layer0-moe \
+  --caller-artifact artifacts/gemma4-26b-layer0-caller \
+  --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
+  --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
+  --expert-scale 1.0 --backend exla:rocm
 ```
 
 The caller loads only the router and routed-input norm from the MoE artifact.
@@ -244,8 +251,20 @@ On the real prompt above, expert 112 was selected for `equation` as route 0
 (router probability 0.2531, routed weight 0.5905) and `determinant` as route 7
 (0.0200, 0.0559). Its standalone output was a nonzero `{2, 2816}` matrix with
 mean absolute value 0.2005. The matrix is useful as an intermediate activation;
-decoding text still requires the remaining MoE combination, decoder layers,
-final norm, and language-model head.
+`call-layer` now inserts it into the selected top-8 routes, combines the other
+routed experts and shared FFN, and returns the complete `{14, 2816}` layer-0
+output. With scale `1.0`, the standalone replacement matched the original
+expert bank to a mean absolute layer-output difference of `1.70e-8` and a
+maximum difference of `1.53e-5` (BF16 rounding).
+
+`--expert-scale` is a controlled replacement hook. At `0.0`, expert 112 was
+ablated only on its two selected routes; the complete layer output moved by
+`0.02149` mean absolute and `16.2946` maximum while all routing decisions and
+other experts remained unchanged. A newly trained artifact with the same
+`2816 -> 704 -> 2816` contract can use the same slot. The validation path also
+computes the original bank output so it can report a baseline; removing that
+comparison is a later runtime optimization. Decoding text still requires
+decoder layers 1-29, final normalization, and the language-model head.
 
 Dense models expose their always-active feed-forward networks separately:
 

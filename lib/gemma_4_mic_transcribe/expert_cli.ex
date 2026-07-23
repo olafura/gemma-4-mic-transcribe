@@ -23,6 +23,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     runs: :integer,
     limit: :integer,
     input_value: :float,
+    expert_scale: :float,
     text: :string,
     help: :boolean
   ]
@@ -237,6 +238,49 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
         0
 
+      {:call_layer, opts} ->
+        {:ok, backend} = Runtime.resolve_backend(opts.backend)
+
+        caller =
+          ExpertCaller.load_layer!(
+            opts.caller_artifact,
+            opts.artifact,
+            opts.expert_artifact,
+            backend
+          )
+
+        report =
+          ExpertCaller.call_layer_text!(caller, opts.text, expert_scale: opts.expert_scale)
+
+        output_f32 = Nx.as_type(report.layer_output, :f32)
+        baseline_f32 = Nx.as_type(report.baseline_layer_output, :f32)
+
+        IO.puts(
+          Jason.encode!(%{
+            event: "layer_called_with_expert_override",
+            expert: report.expert,
+            expert_scale: report.expert_scale,
+            text: report.text,
+            tokens:
+              report.tokens
+              |> Enum.with_index()
+              |> Enum.map(fn {token, position} ->
+                %{position: position, id: token.id, token: token.token}
+              end),
+            selected_calls: report.selected_calls,
+            override_route_count: report.override_route_count,
+            expert_input_shape: Tuple.to_list(Nx.shape(report.expert_inputs)),
+            expert_output_shape: Tuple.to_list(Nx.shape(report.expert_outputs)),
+            layer_output_shape: Tuple.to_list(Nx.shape(report.layer_output)),
+            layer_output_mean_abs: output_f32 |> Nx.abs() |> Nx.mean() |> Nx.to_number(),
+            baseline_output_mean_abs: baseline_f32 |> Nx.abs() |> Nx.mean() |> Nx.to_number(),
+            layer_output_delta_mean_abs: report.layer_output_delta_mean_abs,
+            layer_output_delta_max_abs: report.layer_output_delta_max_abs
+          })
+        )
+
+        0
+
       {:error, reason} ->
         IO.puts(:stderr, "error: #{reason}")
         1
@@ -393,6 +437,28 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     end
   end
 
+  def parse(["call-layer" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts),
+         :ok <- require_string(opts, :caller_artifact, "--caller-artifact PATH"),
+         :ok <- require_string(opts, :expert_artifact, "--expert-artifact PATH"),
+         :ok <- require_string(opts, :text, "--text TEXT") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:call_layer,
+         %{
+           artifact: opts[:artifact],
+           caller_artifact: opts[:caller_artifact],
+           expert_artifact: opts[:expert_artifact],
+           text: opts[:text],
+           expert_scale: opts[:expert_scale] || 1.0,
+           backend: opts[:backend] || "exla:rocm"
+         }}
+      end
+    end
+  end
+
   def parse(["--help"]), do: {:help, usage()}
   def parse(["-h"]), do: {:help, usage()}
   def parse([]), do: {:help, usage()}
@@ -475,6 +541,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       expert_tool extract-caller --artifact PATH
       expert_tool call-expert --artifact MOE_PATH --caller-artifact PATH
                               --expert-artifact PATH --text TEXT [options]
+      expert_tool call-layer --artifact MOE_PATH --caller-artifact PATH
+                             --expert-artifact PATH --text TEXT [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -503,7 +571,14 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     sends the exact pre_feedforward_layernorm_2 rows selected by the router to
     the standalone expert.
 
+    call-layer additionally loads the complete MoE shell, substitutes the
+    standalone expert output wherever its index is routed, and produces the
+    complete layer-0 output. It also returns the unchanged baseline for an
+    exact comparison. --expert-scale changes the inserted output for controlled
+    replacement and ablation experiments.
+
       --backend BACKEND     Default exla:rocm
+      --expert-scale FLOAT  Standalone expert output multiplier, default 1.0
       --tokens N            Input rows, default 1
       --runs N              Timed runs after warmup, default 3
       --limit N             Profile result count, default 10
@@ -515,7 +590,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     @moduledoc false
 
     def main([command | _argv])
-        when command in ["run", "run-layer", "profile-math", "call-expert"] do
+        when command in ["run", "run-layer", "profile-math", "call-expert", "call-layer"] do
       IO.puts(
         :stderr,
         "error: native execution requires real application priv paths; " <>

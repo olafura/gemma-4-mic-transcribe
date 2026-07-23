@@ -117,6 +117,25 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
     assert call.expert_artifact == "expert-112"
     assert call.text == "Prove the theorem."
     assert call.backend == "exla:rocm"
+
+    assert {:call_layer, layer} =
+             ExpertCLI.parse([
+               "call-layer",
+               "--artifact",
+               "moe-layer",
+               "--caller-artifact",
+               "caller",
+               "--expert-artifact",
+               "expert-112",
+               "--expert-scale",
+               "0.5",
+               "--text",
+               "Prove the theorem."
+             ])
+
+    assert layer.artifact == "moe-layer"
+    assert layer.expert_scale == 0.5
+    assert layer.text == "Prove the theorem."
   end
 
   test "validates caller command paths and text" do
