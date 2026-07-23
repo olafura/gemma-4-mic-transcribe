@@ -372,8 +372,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       cache = init_generation_cache(runtime, cache_length(0, max_utterance_cache_tokens(runtime)))
       length = length(prefix_ids)
 
-      {_logits, cache} =
-        predict_chunk(runtime, prefix_ids, silent_audio(runtime, 0), 0, cache)
+      cache =
+        predict_chunk_discard_logits(runtime, prefix_ids, silent_audio(runtime, 0), 0, cache)
 
       log_debug(runtime, fn -> "runtime: utterance started prefix_tokens=#{length}" end)
 
@@ -423,8 +423,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
         audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, chunk_tokens)
 
-        {_logits, cache} =
-          predict_chunk(runtime, audio_ids, input_features, acc.content_length, acc.cache)
+        cache =
+          predict_chunk_discard_logits(
+            runtime,
+            audio_ids,
+            input_features,
+            acc.content_length,
+            acc.cache
+          )
 
         %{
           acc
@@ -471,6 +477,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       suppression_mask = suppression_mask_for_state(runtime, channel_state)
       token_id = TokenSelection.next_token_id_from_sequence(logits, suppression_mask)
       prompt_length = offset + length(suffix_ids)
+      Nx.backend_deallocate(logits)
 
       log_debug(runtime, fn ->
         "runtime: utterance suffix prefilled audio_tokens=#{utterance.audio_tokens + flushed_tokens} " <>
@@ -478,9 +485,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           "elapsed_ms=#{System.monotonic_time(:millisecond) - started_at}"
       end)
 
-      token_ids =
+      {token_ids, final_cache} =
         if stop?(eos?(token_id, runtime.generation_config.eos_token_id), false, 1, limits) do
-          []
+          {[], cache}
         else
           greedy_decode(
             runtime,
@@ -494,7 +501,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           )
         end
 
-      {:ok, Transcript.decode(runtime.tokenizer, token_ids)}
+      transcript = Transcript.decode(runtime.tokenizer, token_ids)
+      Nx.backend_deallocate(final_cache)
+      {:ok, transcript}
     end
   rescue
     exception -> {:error, Exception.message(exception)}
@@ -535,7 +544,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
           audio_ids = List.duplicate(runtime.model_info.spec.audio_token_id, size)
 
-          {_logits, cache} = predict_chunk(runtime, audio_ids, input_features, offset, cache)
+          cache =
+            predict_chunk_discard_logits(runtime, audio_ids, input_features, offset, cache)
 
           {offset + size, cache, flushed + size, mel_state}
         end
@@ -699,6 +709,12 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     {logits, cache}
   end
 
+  defp predict_chunk_discard_logits(runtime, input_ids, input_features, offset, cache) do
+    {logits, cache} = predict_chunk(runtime, input_ids, input_features, offset, cache)
+    Nx.backend_deallocate(logits)
+    cache
+  end
+
   def generate(%__MODULE__{} = runtime, input, opts \\ []) do
     with {:ok, result} <- generate_result(runtime, input, opts, false) do
       {:ok, result.text}
@@ -780,7 +796,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
       limits = generate_limits(runtime, opts)
 
-      {token_ids, margins, captured_rows} =
+      {token_ids, margins, captured_rows, final_cache} =
         if confidence? do
           cached_greedy_generate_with_confidence(
             runtime,
@@ -791,15 +807,20 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
             limits
           )
         else
-          {cached_greedy_generate(
-             runtime,
-             input_ids,
-             input_features,
-             input_features_mask,
-             masks,
-             limits
-           ), [], []}
+          {token_ids, final_cache} =
+            cached_greedy_generate(
+              runtime,
+              input_ids,
+              input_features,
+              input_features_mask,
+              masks,
+              limits
+            )
+
+          {token_ids, [], [], final_cache}
         end
+
+      release_request_tensors(final_cache, input_features, input_features_mask)
 
       log_debug(runtime, fn ->
         "runtime: generation finished generated_tokens=#{length(token_ids)}"
@@ -946,7 +967,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          %{max_new_tokens: max_new_tokens}
        )
        when max_new_tokens <= 0 do
-    []
+    {[], nil}
   end
 
   defp cached_greedy_generate(
@@ -976,7 +997,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          %{max_new_tokens: max_new_tokens}
        )
        when max_new_tokens <= 0,
-       do: {[], [], []}
+       do: {[], [], [], nil}
 
   defp cached_greedy_generate_with_confidence(
          runtime,
@@ -1008,9 +1029,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
+    Nx.backend_deallocate(logits)
 
     if stop?(eos?, pad?, 1, limits) do
-      {[], [], []}
+      {[], [], [], cache}
     else
       greedy_decode_with_confidence(
         runtime,
@@ -1029,7 +1051,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp greedy_decode_with_confidence(
          _runtime,
-         _cache,
+         cache,
          _previous_token_id,
          _prompt_length,
          generated,
@@ -1040,7 +1062,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
          _channel_state
        )
        when generated_count >= max_new_tokens,
-       do: {Enum.reverse(generated), Enum.reverse(margins), Enum.reverse(captured_rows)}
+       do: {Enum.reverse(generated), Enum.reverse(margins), Enum.reverse(captured_rows), cache}
 
   defp greedy_decode_with_confidence(
          runtime,
@@ -1068,9 +1090,10 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     step = generated_count + 1
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
+    Nx.backend_deallocate(logits)
 
     if stop?(eos?, pad?, step, limits) do
-      {Enum.reverse(generated), Enum.reverse(margins), Enum.reverse(captured_rows)}
+      {Enum.reverse(generated), Enum.reverse(margins), Enum.reverse(captured_rows), cache}
     else
       greedy_decode_with_confidence(
         runtime,
@@ -1128,6 +1151,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
     elapsed_ms = System.monotonic_time(:millisecond) - started_at
+    Nx.backend_deallocate(logits)
 
     log_debug(runtime, fn ->
       "runtime: generation step 1/#{limits.max_new_tokens} prefill token_id=#{token_id} " <>
@@ -1135,7 +1159,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     end)
 
     if stop?(eos?, pad?, 1, limits) do
-      []
+      {[], cache}
     else
       greedy_decode(
         runtime,
@@ -1165,7 +1189,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         "runtime: generation reached max_new_tokens=#{limits.max_new_tokens}"
       end)
 
-      Enum.reverse(generated)
+      {Enum.reverse(generated), cache}
     else
       step = generated_count + 1
       previous_token_position = prompt_length + generated_count - 1
@@ -1198,6 +1222,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       eos? = eos?(token_id, runtime.generation_config.eos_token_id)
       pad? = token_id == runtime.model_info.spec.pad_token_id
       elapsed_ms = System.monotonic_time(:millisecond) - started_at
+      Nx.backend_deallocate(logits)
 
       log_debug(runtime, fn ->
         "runtime: generation step #{step}/#{limits.max_new_tokens} token_id=#{token_id} " <>
@@ -1205,7 +1230,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       end)
 
       if stop?(eos?, pad?, step, limits) do
-        Enum.reverse(generated)
+        {Enum.reverse(generated), cache}
       else
         greedy_decode(
           runtime,
@@ -1319,6 +1344,13 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       Nx.backend_copy(input_features, backend),
       Nx.backend_copy(input_features_mask, backend)
     }
+  end
+
+  defp release_request_tensors(final_cache, input_features, input_features_mask) do
+    if final_cache, do: Nx.backend_deallocate(final_cache)
+    Nx.backend_deallocate(input_features)
+    Nx.backend_deallocate(input_features_mask)
+    :ok
   end
 
   defp runtime_backend(%__MODULE__{backend: nil}), do: Nx.BinaryBackend
