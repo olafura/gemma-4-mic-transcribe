@@ -6,6 +6,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   alias Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact
   alias Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedExpert
+  alias Gemma4MicTranscribe.Gemma4.ExtractedGenerator
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedOutputHead
   alias Gemma4MicTranscribe.Gemma4.MathExpertProfiler
@@ -28,6 +29,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     expert: :integer,
     backend: :string,
     tokens: :integer,
+    max_new_tokens: :integer,
     runs: :integer,
     limit: :integer,
     input_value: :float,
@@ -298,6 +300,41 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
             final_output_shape: Tuple.to_list(Nx.shape(final_output)),
             predictions: predictions,
             baseline_predictions: baseline_predictions
+          })
+        )
+
+        0
+
+      {:generate_prefix, opts} ->
+        {:ok, backend} = Runtime.resolve_backend(opts.backend)
+
+        result =
+          ExtractedGenerator.generate!(
+            artifact_prefix: opts.artifact_prefix,
+            expert_artifact: opts.expert_artifact,
+            head_artifact: opts.head_artifact,
+            input_text: opts.input_text,
+            backend: backend,
+            expert_scale: opts.expert_scale,
+            max_new_tokens: opts.max_new_tokens
+          )
+
+        IO.puts(
+          Jason.encode!(%{
+            event: "extracted_decoder_generated",
+            text: opts.text,
+            expert_scale: opts.expert_scale,
+            generated_ids: result.generated_ids,
+            generated_text: result.generated_text,
+            eos: result.eos?,
+            override_route_count: result.override_route_count,
+            input_tokens:
+              Enum.map(result.input_tokens, fn token ->
+                %{id: token.id, token: token.token}
+              end),
+            steps: result.steps,
+            elapsed_us: result.elapsed_us,
+            mean_token_us: result.mean_token_us
           })
         )
 
@@ -639,6 +676,31 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     end
   end
 
+  def parse(["generate-prefix" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_string(opts, :artifact_prefix, "--artifact-prefix PATH"),
+         :ok <- require_string(opts, :expert_artifact, "--expert-artifact PATH"),
+         :ok <- require_string(opts, :head_artifact, "--head-artifact PATH"),
+         :ok <- require_string(opts, :text, "--text TEXT"),
+         :ok <- positive(opts[:max_new_tokens] || 1, "--max-new-tokens") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:generate_prefix,
+         %{
+           artifact_prefix: opts[:artifact_prefix],
+           expert_artifact: opts[:expert_artifact],
+           head_artifact: opts[:head_artifact],
+           text: opts[:text],
+           input_text: if(opts[:chat], do: chat_prompt(opts[:text]), else: opts[:text]),
+           expert_scale: opts[:expert_scale] || 1.0,
+           max_new_tokens: opts[:max_new_tokens] || 1,
+           backend: opts[:backend] || "exla:rocm"
+         }}
+      end
+    end
+  end
+
   def parse(["--help"]), do: {:help, usage()}
   def parse(["-h"]), do: {:help, usage()}
   def parse([]), do: {:help, usage()}
@@ -884,6 +946,9 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       expert_tool call-prefix --artifact-prefix PATH --expert-artifact PATH
                               --text TEXT [--last-layer INDEX]
                               [--head-artifact PATH] [--chat] [options]
+      expert_tool generate-prefix --artifact-prefix PATH --expert-artifact PATH
+                                  --head-artifact PATH --text TEXT
+                                  [--max-new-tokens N] [--chat] [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -932,9 +997,13 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     predictions for both the modified and unchanged paths.
     --chat wraps --text in Gemma 4's canonical one-turn, thinking-disabled
     template. Without it, text is tokenized directly for activation probes.
+    generate-prefix greedily decodes from the complete 30-layer extracted
+    prefix. It runs one output-only model path and recomputes the growing token
+    prefix for each new token; KV-cache execution is the next optimization.
 
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0
+      --max-new-tokens N    Greedy generation limit, default 1
       --tokens N            Input rows, default 1
       --runs N              Timed runs after warmup, default 3
       --limit N             Profile result count, default 10
@@ -953,7 +1022,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                "call-expert",
                "call-layer",
                "call-chain",
-               "call-prefix"
+               "call-prefix",
+               "generate-prefix"
              ] do
       IO.puts(
         :stderr,

@@ -214,6 +214,29 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
     assert prefix.input_text ==
              "<|turn>user\nProve the theorem.<turn|>\n" <>
                "<|turn>model\n<|channel>thought\n<channel|>"
+
+    assert {:generate_prefix, generation} =
+             ExpertCLI.parse([
+               "generate-prefix",
+               "--artifact-prefix",
+               "artifacts/gemma4-26b",
+               "--expert-artifact",
+               "expert-112",
+               "--head-artifact",
+               "output-head",
+               "--max-new-tokens",
+               "3",
+               "--chat",
+               "--expert-scale",
+               "0.0",
+               "--text",
+               "Prove the theorem."
+             ])
+
+    assert generation.max_new_tokens == 3
+    assert generation.expert_scale == 0.0
+    assert generation.head_artifact == "output-head"
+    assert generation.input_text == prefix.input_text
   end
 
   test "validates caller command paths and text" do

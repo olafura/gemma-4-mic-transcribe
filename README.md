@@ -261,6 +261,13 @@ mix gemma.expert call-prefix \
   --head-artifact artifacts/gemma4-26b-output-head \
   --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
   --chat --expert-scale 0.0 --backend exla:rocm
+
+mix gemma.expert generate-prefix \
+  --artifact-prefix artifacts/gemma4-26b \
+  --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
+  --head-artifact artifacts/gemma4-26b-output-head \
+  --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
+  --chat --expert-scale 0.0 --max-new-tokens 2 --backend exla:rocm
 ```
 
 The caller loads only the router and routed-input norm from the MoE artifact.
@@ -337,7 +344,16 @@ activation delta grew through the decoder, peaked at `0.03873` in layer 25, and
 ended at `0.02181` after layer 29. The run took 126.9 seconds end to end,
 including BEAM startup, artifact verification and loading, and first-time XLA
 compilation. This is a useful next-token distribution, not autoregressive text
-generation yet.
+generation yet. `generate-prefix` closes that loop: it greedily selects a token,
+reads the corresponding row from the extracted tied embedding matrix, appends
+it to the input, and runs the independently assembled model again. Generation
+uses output-only compiled layer entry points, so it does not execute the
+diagnostic baseline path or return every layer's routing tensors.
+
+The first generator intentionally recomputes the growing prefix. This establishes
+end-to-end generation correctness before attention KV caches change the layer
+contract. Consequently, its steady-state latency is not representative of the
+eventual service; fixed-shape per-layer KV caches are the next optimization.
 
 Decoder parameters are explicitly released with `Nx.backend_deallocate/1`
 after each layer. Erlang's
