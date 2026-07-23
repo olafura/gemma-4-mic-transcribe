@@ -35,46 +35,79 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
     text_config = config["text_config"] || config
     specs = tensor_specs!(text_config, layer)
 
-    shards =
+    grouped_specs =
       specs
-      |> Map.values()
-      |> Enum.map(fn spec -> get_in(index, ["weight_map", spec.source]) end)
-      |> Enum.uniq()
+      |> Enum.group_by(fn {_name, spec} ->
+        get_in(index, ["weight_map", spec.source])
+      end)
 
-    unless match?([shard] when is_binary(shard), shards) do
+    if Map.has_key?(grouped_specs, nil) do
+      missing =
+        grouped_specs
+        |> Map.fetch!(nil)
+        |> Enum.map(fn {_name, spec} -> spec.source end)
+
       raise ArgumentError,
-            "MoE layer #{layer} tensors must be present in one checkpoint shard, got: #{inspect(shards)}"
+            "MoE layer #{layer} tensors are missing from the checkpoint index: #{inspect(missing)}"
     end
 
-    [shard] = shards
-    shard_url = "#{base_url}/#{shard}"
-    {header_length, header} = fetch_header!(shard_url, fetch_range)
-    tensors = validate_tensors!(specs, header)
+    {ranges, _next_offset} =
+      grouped_specs
+      |> Enum.sort_by(fn {shard, _specs} -> shard end)
+      |> Enum.map_reduce(0, fn {shard, shard_specs}, parameter_offset ->
+        shard_url = "#{base_url}/#{shard}"
+        {header_length, header} = fetch_header!(shard_url, fetch_range)
+        tensors = validate_tensors!(Map.new(shard_specs), header)
 
-    source_start =
-      tensors
-      |> Map.values()
-      |> Enum.map(& &1.source_start)
-      |> Enum.min()
+        source_start =
+          tensors
+          |> Map.values()
+          |> Enum.map(& &1.source_start)
+          |> Enum.min()
 
-    source_end =
-      tensors
-      |> Map.values()
-      |> Enum.map(& &1.source_end)
-      |> Enum.max()
+        source_end =
+          tensors
+          |> Map.values()
+          |> Enum.map(& &1.source_end)
+          |> Enum.max()
 
-    data_base = 8 + header_length
-    absolute_start = data_base + source_start
-    absolute_end = data_base + source_end - 1
-    parameter_bytes = absolute_end - absolute_start + 1
+        data_base = 8 + header_length
+        absolute_start = data_base + source_start
+        absolute_end = data_base + source_end - 1
+        byte_size = absolute_end - absolute_start + 1
+
+        range = %{
+          shard: shard,
+          url: shard_url,
+          header_length: header_length,
+          source_start: source_start,
+          absolute_start: absolute_start,
+          absolute_end: absolute_end,
+          parameter_offset: parameter_offset,
+          byte_size: byte_size,
+          tensors: tensors
+        }
+
+        {range, parameter_offset + byte_size}
+      end)
+
+    parameter_bytes = Enum.sum(Enum.map(ranges, & &1.byte_size))
 
     tensors =
-      Map.new(tensors, fn {name, metadata} ->
-        {name,
-         metadata
-         |> Map.put(:offset, metadata.source_start - source_start)
-         |> Map.put(:byte_size, metadata.source_end - metadata.source_start)
-         |> Map.drop([:source_start, :source_end])}
+      Enum.reduce(ranges, %{}, fn range, tensors ->
+        range_tensors =
+          Map.new(range.tensors, fn {name, metadata} ->
+            {name,
+             metadata
+             |> Map.put(
+               :offset,
+               range.parameter_offset + metadata.source_start - range.source_start
+             )
+             |> Map.put(:byte_size, metadata.source_end - metadata.source_start)
+             |> Map.drop([:source_start, :source_end])}
+          end)
+
+        Map.merge(tensors, range_tensors)
       end)
 
     temporary = path <> ".tmp-#{System.unique_integer([:positive])}"
@@ -86,7 +119,16 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
 
       copied =
         File.open!(parameters_path, [:write, :raw], fn file ->
-          copy_range!(shard_url, absolute_start, absolute_end, file, fetch_range)
+          Enum.reduce(ranges, 0, fn range, copied ->
+            copied +
+              copy_range!(
+                range.url,
+                range.absolute_start,
+                range.absolute_end,
+                file,
+                fetch_range
+              )
+          end)
         end)
 
       unless copied == parameter_bytes do
@@ -94,15 +136,29 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
               "checkpoint range wrote #{copied} bytes, expected #{parameter_bytes}"
       end
 
+      source_ranges =
+        Enum.map(ranges, fn range ->
+          %{
+            shard: range.shard,
+            range: {range.absolute_start, range.absolute_end},
+            parameter_offset: range.parameter_offset
+          }
+        end)
+
+      source_shards = Enum.map(ranges, & &1.shard)
+
       manifest = %{
         version: @version,
         kind: @kind,
         source_repo: repo,
         source_revision: revision,
-        source_shard: shard,
+        source_shard: if(length(source_shards) == 1, do: hd(source_shards)),
+        source_shards: source_shards,
         source_checkpoint_bytes: get_in(index, ["metadata", "total_size"]),
-        source_range: {absolute_start, absolute_end},
-        downloaded_bytes: 8 + header_length + copied,
+        source_range: if(length(source_ranges) == 1, do: hd(source_ranges).range),
+        source_ranges: source_ranges,
+        downloaded_bytes:
+          copied + Enum.sum(Enum.map(ranges, fn range -> 8 + range.header_length end)),
         parameter_file: @parameters,
         parameter_bytes: copied,
         parameter_sha256: sha256_file(parameters_path),

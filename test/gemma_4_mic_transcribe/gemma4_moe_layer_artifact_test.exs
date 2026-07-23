@@ -153,6 +153,82 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
     assert max_abs_difference(ablated.output, ablated.baseline_output) > 0.0
   end
 
+  @tag :tmp_dir
+  test "concatenates MoE tensors that cross checkpoint shards", %{tmp_dir: tmp_dir} do
+    tensors = synthetic_tensors()
+
+    {first_tensors, second_tensors} =
+      Enum.split_with(tensors, fn {name, _tensor} ->
+        String.contains?(name, ".experts.") or
+          String.ends_with?(name, ".router.scale") or
+          String.ends_with?(name, ".router.per_expert_scale") or
+          String.ends_with?(name, ".layer_scalar")
+      end)
+
+    sources = %{
+      "model-00001-of-00002.safetensors" =>
+        first_tensors |> Map.new() |> Safetensors.dump() |> IO.iodata_to_binary(),
+      "model-00002-of-00002.safetensors" =>
+        second_tensors |> Map.new() |> Safetensors.dump() |> IO.iodata_to_binary()
+    }
+
+    first_names = MapSet.new(first_tensors, &elem(&1, 0))
+
+    weight_map =
+      Map.new(tensors, fn {name, _tensor} ->
+        shard =
+          if MapSet.member?(first_names, name),
+            do: "model-00001-of-00002.safetensors",
+            else: "model-00002-of-00002.safetensors"
+
+        {name, shard}
+      end)
+
+    index = %{
+      "metadata" => %{"total_size" => Enum.sum(Enum.map(sources, &byte_size(elem(&1, 1))))},
+      "weight_map" => weight_map
+    }
+
+    fetch_json = fn url ->
+      if String.ends_with?(url, "config.json"), do: @config, else: index
+    end
+
+    fetch_range = fn url, first, last ->
+      {shard, source} =
+        Enum.find(sources, fn {shard, _source} -> String.ends_with?(url, shard) end)
+
+      assert is_binary(shard)
+      binary_part(source, first, last - first + 1)
+    end
+
+    artifact = Path.join(tmp_dir, "multi-shard-moe-layer")
+
+    manifest =
+      MoeLayerArtifact.extract!(artifact,
+        layer: 0,
+        fetch_json: fetch_json,
+        fetch_range: fetch_range
+      )
+
+    assert manifest.source_shard == nil
+    assert manifest.source_range == nil
+    assert manifest.source_shards == Enum.sort(Map.keys(sources))
+    assert Enum.map(manifest.source_ranges, & &1.parameter_offset) |> hd() == 0
+    assert length(manifest.source_ranges) == 2
+
+    {_, params} = MoeLayerArtifact.load!(artifact, Torchx.Backend)
+
+    assert_all_close(
+      params.experts_gate_up,
+      tensors["model.language_model.layers.0.experts.gate_up_proj"]
+    )
+
+    assert_all_close(
+      params.shared_down,
+      tensors["model.language_model.layers.0.mlp.down_proj.weight"]
+    )
+  end
+
   defp synthetic_tensors do
     prefix = "model.language_model.layers.0"
 
