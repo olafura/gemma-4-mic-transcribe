@@ -45,6 +45,10 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
       kv_heads: manifest.num_key_value_heads,
       head_dim: manifest.head_dim,
       rope_theta: manifest.rope_theta,
+      partial_rotary_factor: Map.get(manifest, :partial_rotary_factor, 1.0),
+      rotary_angles:
+        trunc(Map.get(manifest, :partial_rotary_factor, 1.0) * div(manifest.head_dim, 2)),
+      alternative_attention: Map.get(manifest, :alternative_attention, false),
       sliding_window: manifest.sliding_window
     ]
 

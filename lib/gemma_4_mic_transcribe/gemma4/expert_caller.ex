@@ -68,6 +68,10 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       kv_heads: manifest.num_key_value_heads,
       head_dim: manifest.head_dim,
       rope_theta: manifest.rope_theta,
+      partial_rotary_factor: Map.get(manifest, :partial_rotary_factor, 1.0),
+      rotary_angles:
+        trunc(Map.get(manifest, :partial_rotary_factor, 1.0) * div(manifest.head_dim, 2)),
+      alternative_attention: Map.get(manifest, :alternative_attention, false),
       sliding_window: Map.get(manifest, :sliding_window, 1024)
     ]
 
@@ -323,6 +327,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
   @doc false
   defn forward(embeddings, attention_params, moe_params, opts \\ []) do
     eps = opts[:eps]
+    alternative_attention = opts[:alternative_attention]
+    rotary_angles = opts[:rotary_angles]
     hidden = embeddings * opts[:embedding_scalar]
     normed = rms_norm(hidden, attention_params.input_norm, eps)
     token_count = Nx.axis_size(hidden, 0)
@@ -333,19 +339,34 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       |> Nx.reshape({token_count, opts[:heads], opts[:head_dim]})
       |> rms_norm(attention_params.query_norm, eps)
 
-    key =
+    key_projection =
       normed
       |> Nx.dot(Nx.transpose(attention_params.key))
       |> Nx.reshape({token_count, opts[:kv_heads], opts[:head_dim]})
+
+    key =
+      key_projection
       |> rms_norm(attention_params.key_norm, eps)
 
     value =
-      normed
-      |> Nx.dot(Nx.transpose(attention_params.value))
-      |> Nx.reshape({token_count, opts[:kv_heads], opts[:head_dim]})
-      |> rms_norm_without_scale(eps)
+      if alternative_attention do
+        rms_norm_without_scale(key_projection, eps)
+      else
+        normed
+        |> Nx.dot(Nx.transpose(attention_params.value))
+        |> Nx.reshape({token_count, opts[:kv_heads], opts[:head_dim]})
+        |> rms_norm_without_scale(eps)
+      end
 
-    {query, key} = apply_rope(query, key, opts[:head_dim], opts[:rope_theta])
+    {query, key} =
+      apply_rope(
+        query,
+        key,
+        opts[:head_dim],
+        opts[:rope_theta],
+        rotary_angles
+      )
+
     groups = div(opts[:heads], opts[:kv_heads])
     key = repeat_kv(key, groups, opts[:heads], opts[:head_dim])
     value = repeat_kv(value, groups, opts[:heads], opts[:head_dim])
@@ -399,11 +420,18 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
     }
   end
 
-  defnp apply_rope(query, key, head_dim, theta) do
+  defnp apply_rope(query, key, head_dim, theta, rotary_angles) do
     token_count = Nx.axis_size(query, 0)
     half = div(head_dim, 2)
     frequency_index = Nx.iota({half}, type: :f32)
-    inverse_frequency = Nx.pow(theta, frequency_index * (-2.0 / head_dim))
+
+    inverse_frequency =
+      Nx.select(
+        Nx.less(frequency_index, rotary_angles),
+        Nx.pow(theta, frequency_index * (-2.0 / head_dim)),
+        0.0
+      )
+
     positions = Nx.iota({token_count}, type: :f32)
     frequency = Nx.new_axis(positions, 1) * Nx.new_axis(inverse_frequency, 0)
     embedding = Nx.concatenate([frequency, frequency], axis: 1)

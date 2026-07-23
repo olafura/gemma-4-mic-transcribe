@@ -32,7 +32,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
     text_config = config["text_config"] || config
     attention_type = attention_type!(text_config, layer)
     rope_parameters = get_in(text_config, ["rope_parameters", attention_type]) || %{}
-    specs = tensor_specs!(text_config, layer)
+    dimensions = attention_dimensions!(text_config, attention_type)
+    specs = tensor_specs!(text_config, layer, dimensions)
 
     shards =
       specs
@@ -40,17 +41,21 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
       |> Enum.map(&get_in(index, ["weight_map", &1.source]))
       |> Enum.uniq()
 
-    unless match?([shard] when is_binary(shard), shards) do
-      raise ArgumentError, "layer #{layer} attention tensors must occupy one checkpoint shard"
+    unless shards != [] and Enum.all?(shards, &is_binary/1) do
+      raise ArgumentError, "checkpoint index is missing layer #{layer} attention tensors"
     end
 
-    [shard] = shards
-    shard_url = "#{base_url}/#{shard}"
-    {header_length, header} = fetch_header!(shard_url, fetch_range)
-    data_base = 8 + header_length
+    shard_headers =
+      Map.new(shards, fn shard ->
+        shard_url = "#{base_url}/#{shard}"
+        {shard, {shard_url, fetch_header!(shard_url, fetch_range)}}
+      end)
 
     tensors =
       Map.new(specs, fn {name, spec} ->
+        shard = get_in(index, ["weight_map", spec.source])
+        {shard_url, {header_length, header}} = Map.fetch!(shard_headers, shard)
+        data_base = 8 + header_length
         metadata = Map.fetch!(header, spec.source)
 
         unless metadata["dtype"] == "BF16" and metadata["shape"] == spec.shape do
@@ -88,17 +93,21 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
         kind: :gemma4_expert_caller,
         source_repo: repo,
         source_revision: revision,
-        source_shard: shard,
+        source_shard: if(length(shards) == 1, do: hd(shards)),
+        source_shards: shards,
         source_checkpoint_bytes: get_in(index, ["metadata", "total_size"]),
         layer_index: layer,
         attention_type: attention_type,
         hidden_size: positive_integer!(text_config, "hidden_size"),
         num_attention_heads: positive_integer!(text_config, "num_attention_heads"),
-        num_key_value_heads: positive_integer!(text_config, "num_key_value_heads"),
-        head_dim: positive_integer!(text_config, "head_dim"),
+        num_key_value_heads: dimensions.kv_heads,
+        head_dim: dimensions.head_dim,
+        alternative_attention: dimensions.alternative_attention,
         rms_norm_eps: number!(text_config, "rms_norm_eps"),
         sliding_window: sliding_window(text_config, attention_type),
         rope_theta: number_value!(rope_parameters["rope_theta"], "#{attention_type} rope_theta"),
+        rope_type: rope_parameters["rope_type"] || "default",
+        partial_rotary_factor: Map.get(rope_parameters, "partial_rotary_factor", 1.0),
         parameter_file: @parameters,
         parameter_bytes: File.stat!(parameters_path).size,
         parameter_count:
@@ -157,22 +166,47 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact do
     |> :erlang.binary_to_term([:safe])
   end
 
-  defp tensor_specs!(config, layer) do
+  defp tensor_specs!(config, layer, dimensions) do
     hidden = positive_integer!(config, "hidden_size")
     heads = positive_integer!(config, "num_attention_heads")
-    kv_heads = positive_integer!(config, "num_key_value_heads")
-    head_dim = positive_integer!(config, "head_dim")
+    kv_heads = dimensions.kv_heads
+    head_dim = dimensions.head_dim
     prefix = "model.language_model.layers.#{layer}"
 
-    %{
+    specs = %{
       "input_norm" => spec("#{prefix}.input_layernorm.weight", [hidden]),
       "post_attention_norm" => spec("#{prefix}.post_attention_layernorm.weight", [hidden]),
       "query" => spec("#{prefix}.self_attn.q_proj.weight", [heads * head_dim, hidden]),
       "key" => spec("#{prefix}.self_attn.k_proj.weight", [kv_heads * head_dim, hidden]),
-      "value" => spec("#{prefix}.self_attn.v_proj.weight", [kv_heads * head_dim, hidden]),
       "output" => spec("#{prefix}.self_attn.o_proj.weight", [hidden, heads * head_dim]),
       "query_norm" => spec("#{prefix}.self_attn.q_norm.weight", [head_dim]),
       "key_norm" => spec("#{prefix}.self_attn.k_norm.weight", [head_dim])
+    }
+
+    if dimensions.alternative_attention do
+      specs
+    else
+      Map.put(
+        specs,
+        "value",
+        spec("#{prefix}.self_attn.v_proj.weight", [kv_heads * head_dim, hidden])
+      )
+    end
+  end
+
+  defp attention_dimensions!(config, "sliding_attention") do
+    %{
+      head_dim: positive_integer!(config, "head_dim"),
+      kv_heads: positive_integer!(config, "num_key_value_heads"),
+      alternative_attention: false
+    }
+  end
+
+  defp attention_dimensions!(config, "full_attention") do
+    %{
+      head_dim: positive_integer!(config, "global_head_dim"),
+      kv_heads: positive_integer!(config, "num_global_key_value_heads"),
+      alternative_attention: config["attention_k_eq_v"] == true
     }
   end
 
