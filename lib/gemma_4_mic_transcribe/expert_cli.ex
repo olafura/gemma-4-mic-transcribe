@@ -2,6 +2,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   @moduledoc false
 
   alias Gemma4MicTranscribe.Gemma4.ExpertArtifact
+  alias Gemma4MicTranscribe.Gemma4.ExpertCaller
+  alias Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact
   alias Gemma4MicTranscribe.Gemma4.ExtractedExpert
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
   alias Gemma4MicTranscribe.Gemma4.MathExpertProfiler
@@ -10,6 +12,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
   @switches [
     artifact: :string,
+    caller_artifact: :string,
+    expert_artifact: :string,
     repo: :string,
     revision: :string,
     layer: :integer,
@@ -19,6 +23,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     runs: :integer,
     limit: :integer,
     input_value: :float,
+    text: :string,
     help: :boolean
   ]
 
@@ -175,6 +180,63 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
         IO.puts(Jason.encode!(report))
         0
 
+      {:extract_caller, opts} ->
+        manifest =
+          ExpertCallerArtifact.extract!(opts.artifact,
+            repo: opts.repo,
+            revision: opts.revision,
+            layer: 0
+          )
+
+        IO.puts(
+          Jason.encode!(%{
+            event: "expert_caller_extracted",
+            artifact: Path.expand(opts.artifact),
+            layer: manifest.layer_index,
+            parameter_count: manifest.parameter_count,
+            parameter_bytes: manifest.parameter_bytes
+          })
+        )
+
+        0
+
+      {:call_expert, opts} ->
+        {:ok, backend} = Runtime.resolve_backend(opts.backend)
+
+        caller =
+          ExpertCaller.load!(
+            opts.caller_artifact,
+            opts.artifact,
+            opts.expert_artifact,
+            backend
+          )
+
+        report = ExpertCaller.call_text!(caller, opts.text)
+        output = report.expert_outputs
+
+        IO.puts(
+          Jason.encode!(%{
+            event: "expert_called",
+            expert: report.expert,
+            text: report.text,
+            tokens:
+              report.tokens
+              |> Enum.with_index()
+              |> Enum.map(fn {token, position} ->
+                %{position: position, id: token.id, token: token.token}
+              end),
+            selected_calls: report.selected_calls,
+            expert_input_shape: Tuple.to_list(Nx.shape(report.expert_inputs)),
+            expert_output_shape: if(output, do: Tuple.to_list(Nx.shape(output))),
+            expert_output_mean_abs:
+              if(output,
+                do: output |> Nx.as_type(:f32) |> Nx.abs() |> Nx.mean() |> Nx.to_number()
+              )
+          })
+        )
+
+        0
+
       {:error, reason} ->
         IO.puts(:stderr, "error: #{reason}")
         1
@@ -294,6 +356,43 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     end
   end
 
+  def parse(["extract-caller" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts) do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:extract_caller,
+         %{
+           artifact: opts[:artifact],
+           repo: opts[:repo] || "google/gemma-4-26B-A4B-it",
+           revision: opts[:revision] || "main"
+         }}
+      end
+    end
+  end
+
+  def parse(["call-expert" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts),
+         :ok <- require_string(opts, :caller_artifact, "--caller-artifact PATH"),
+         :ok <- require_string(opts, :expert_artifact, "--expert-artifact PATH"),
+         :ok <- require_string(opts, :text, "--text TEXT") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:call_expert,
+         %{
+           artifact: opts[:artifact],
+           caller_artifact: opts[:caller_artifact],
+           expert_artifact: opts[:expert_artifact],
+           text: opts[:text],
+           backend: opts[:backend] || "exla:rocm"
+         }}
+      end
+    end
+  end
+
   def parse(["--help"]), do: {:help, usage()}
   def parse(["-h"]), do: {:help, usage()}
   def parse([]), do: {:help, usage()}
@@ -309,6 +408,10 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
   defp require_artifact(opts) do
     if is_binary(opts[:artifact]), do: :ok, else: {:error, "--artifact PATH is required"}
+  end
+
+  defp require_string(opts, key, label) do
+    if is_binary(opts[key]), do: :ok, else: {:error, "#{label} is required"}
   end
 
   defp positive(value, _name) when is_integer(value) and value > 0, do: :ok
@@ -369,6 +472,9 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       expert_tool inspect-layer --artifact PATH
       expert_tool run-layer --artifact PATH [options]
       expert_tool profile-math --artifact PATH [options]
+      expert_tool extract-caller --artifact PATH
+      expert_tool call-expert --artifact MOE_PATH --caller-artifact PATH
+                              --expert-artifact PATH --text TEXT [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -392,6 +498,11 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     corpora against a layer-0 router. It is a fast candidate search, not a
     substitute for capturing post-attention activations from the full model.
 
+    extract-caller saves the layer-0 attention prefix. call-expert tokenizes
+    text, reconstructs the post-attention residual and routing decision, then
+    sends the exact pre_feedforward_layernorm_2 rows selected by the router to
+    the standalone expert.
+
       --backend BACKEND     Default exla:rocm
       --tokens N            Input rows, default 1
       --runs N              Timed runs after warmup, default 3
@@ -403,7 +514,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   defmodule Escript do
     @moduledoc false
 
-    def main([command | _argv]) when command in ["run", "run-layer", "profile-math"] do
+    def main([command | _argv])
+        when command in ["run", "run-layer", "profile-math", "call-expert"] do
       IO.puts(
         :stderr,
         "error: native execution requires real application priv paths; " <>

@@ -91,4 +91,44 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
     assert profile.backend == "exla:rocm"
     assert profile.limit == 7
   end
+
+  test "parses caller extraction and a text-to-expert call" do
+    assert {:extract_caller, extract} =
+             ExpertCLI.parse(["extract-caller", "--artifact", "caller"])
+
+    assert extract.artifact == "caller"
+    assert extract.repo == "google/gemma-4-26B-A4B-it"
+
+    assert {:call_expert, call} =
+             ExpertCLI.parse([
+               "call-expert",
+               "--artifact",
+               "moe-layer",
+               "--caller-artifact",
+               "caller",
+               "--expert-artifact",
+               "expert-112",
+               "--text",
+               "Prove the theorem."
+             ])
+
+    assert call.artifact == "moe-layer"
+    assert call.caller_artifact == "caller"
+    assert call.expert_artifact == "expert-112"
+    assert call.text == "Prove the theorem."
+    assert call.backend == "exla:rocm"
+  end
+
+  test "validates caller command paths and text" do
+    assert {:error, "--caller-artifact PATH is required"} =
+             ExpertCLI.parse([
+               "call-expert",
+               "--artifact",
+               "moe-layer",
+               "--expert-artifact",
+               "expert-112",
+               "--text",
+               "x"
+             ])
+  end
 end

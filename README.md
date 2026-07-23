@@ -206,6 +206,47 @@ router decisions across all 30 layers on real math and control prompts, then
 ablating the consistently enriched experts and measuring math-specific quality
 loss.
 
+The layer-0 caller closes the token-embedding approximation. It separately
+extracts the eight attention and norm tensors needed to produce the real router
+input:
+
+```bash
+./expert_tool extract-caller \
+  --artifact artifacts/gemma4-26b-layer0-caller
+
+mix gemma.expert call-expert \
+  --artifact artifacts/gemma4-26b-layer0-moe \
+  --caller-artifact artifacts/gemma4-26b-layer0-caller \
+  --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
+  --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
+  --backend exla:rocm
+```
+
+The caller loads only the router and routed-input norm from the MoE artifact.
+It fetches the prompt's embedding rows, prepends the model's `<bos>` token, and
+runs the following path on XLA:
+
+```text
+token embeddings
+  -> sqrt(hidden_size) scaling
+  -> layer-0 input RMS norm
+  -> Q/K/V projections, Q/K norms, RoPE, causal sliding attention
+  -> output projection and post-attention RMS norm
+  -> attention residual
+  -> router top-8 selection
+  -> pre_feedforward_layernorm_2
+  -> selected standalone expert
+```
+
+The caller artifact contains 34,609,152 BF16 parameters (69,218,942 bytes),
+rather than another copy of the 1.56 GB MoE layer or the 51.6 GB checkpoint.
+On the real prompt above, expert 112 was selected for `equation` as route 0
+(router probability 0.2531, routed weight 0.5905) and `determinant` as route 7
+(0.0200, 0.0559). Its standalone output was a nonzero `{2, 2816}` matrix with
+mean absolute value 0.2005. The matrix is useful as an intermediate activation;
+decoding text still requires the remaining MoE combination, decoder layers,
+final norm, and language-model head.
+
 Dense models expose their always-active feed-forward networks separately:
 
 ```elixir
