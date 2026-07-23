@@ -233,6 +233,7 @@ defmodule Gemma4MicTranscribe.StreamingSession do
       packed_weights: Keyword.get(opts, :packed_weights, true),
       hybrid_weights: Keyword.get(opts, :hybrid_weights, false),
       fused_ffn: Keyword.get(opts, :fused_ffn, false),
+      self_review: Keyword.get(opts, :self_review, false),
       cascade_min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
       cascade_min_logit_margin: Keyword.get(opts, :cascade_min_logit_margin, 0.0),
       sample_rate: Keyword.get(opts, :sample_rate, 16_000),
@@ -623,14 +624,21 @@ defmodule Gemma4MicTranscribe.StreamingSession do
 
       {{status, text_or_reason}, generate_ms} =
         timed(fn ->
-          case state.runtime_module.generate(
-                 state.runtime,
-                 input,
-                 Keyword.merge(
-                   [timeout_seconds: Keyword.get(state.runtime_opts, :request_timeout_seconds)],
-                   generate_opts
-                 )
-               ) do
+          opts =
+            Keyword.merge(
+              [timeout_seconds: Keyword.get(state.runtime_opts, :request_timeout_seconds)],
+              generate_opts
+            )
+
+          result =
+            if Keyword.get(state.runtime_opts, :self_review, false) and
+                 function_exported?(state.runtime_module, :generate_reviewed, 3) do
+              state.runtime_module.generate_reviewed(state.runtime, input, opts)
+            else
+              state.runtime_module.generate(state.runtime, input, opts)
+            end
+
+          case result do
             {:ok, text} -> {:ok, String.trim(text)}
             {:error, reason} -> {:error, reason}
           end

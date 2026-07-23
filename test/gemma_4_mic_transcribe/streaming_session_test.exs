@@ -32,11 +32,33 @@ defmodule Gemma4MicTranscribe.StreamingSessionTest do
     def stats(:runtime), do: %{requests: 3}
   end
 
+  defmodule ReviewRuntime do
+    def load(_opts), do: {:ok, :runtime}
+    def generate(:runtime, _input, _opts), do: {:ok, "draft"}
+
+    def generate_reviewed(:runtime, _input, _opts) do
+      send(:streaming_review_test, :reviewed)
+      {:ok, "corrected transcript"}
+    end
+  end
+
   test "exposes runtime-specific service statistics" do
     {:ok, session} =
       StreamingSession.start_link(runtime_module: StatsRuntime, runtime: :runtime)
 
     assert StreamingSession.runtime_stats(session) == %{requests: 3}
+  end
+
+  test "optionally asks the runtime for a reviewed transcript" do
+    Process.register(self(), :streaming_review_test)
+
+    {:ok, session} =
+      start_test_session(runtime_module: ReviewRuntime, self_review: true, partials: false)
+
+    samples = List.duplicate(0.2, 60) ++ List.duplicate(0.0, 60)
+    assert {:ok, events} = StreamingSession.push_audio(session, samples, 0.0)
+    assert Enum.any?(events, &(&1[:text] == "corrected transcript"))
+    assert_received :reviewed
   end
 
   defmodule BlockingRuntime do

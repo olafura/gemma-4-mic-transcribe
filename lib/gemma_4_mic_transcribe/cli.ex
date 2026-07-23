@@ -35,6 +35,7 @@ defmodule Gemma4MicTranscribe.CLI do
               param_type: "bf16",
               weights: "packed",
               fused_ffn: false,
+              self_review: false,
               e4b_cascade: false,
               cascade_min_chars_per_second: 0.0,
               cascade_min_logit_margin: 0.0,
@@ -84,6 +85,7 @@ defmodule Gemma4MicTranscribe.CLI do
     param_type: :string,
     weights: :string,
     fused_ffn: :boolean,
+    self_review: :boolean,
     e4b_cascade: :boolean,
     cascade_min_chars_per_second: :float,
     cascade_min_logit_margin: :float,
@@ -219,6 +221,7 @@ defmodule Gemma4MicTranscribe.CLI do
       param_type: Keyword.get(opts, :param_type, "bf16"),
       weights: Keyword.get(opts, :weights, "packed"),
       fused_ffn: Keyword.get(opts, :fused_ffn, false),
+      self_review: Keyword.get(opts, :self_review, false),
       e4b_cascade: Keyword.get(opts, :e4b_cascade, false),
       cascade_min_chars_per_second: Keyword.get(opts, :cascade_min_chars_per_second, 0.0),
       cascade_min_logit_margin: Keyword.get(opts, :cascade_min_logit_margin, 0.0),
@@ -535,6 +538,7 @@ defmodule Gemma4MicTranscribe.CLI do
       packed_weights: config.weights in ["packed", "hybrid"],
       hybrid_weights: config.weights == "hybrid",
       fused_ffn: config.fused_ffn,
+      self_review: config.self_review,
       cascade_min_chars_per_second: config.cascade_min_chars_per_second,
       cascade_min_logit_margin: config.cascade_min_logit_margin,
       incremental_prefill: config.incremental_prefill,
@@ -848,6 +852,7 @@ defmodule Gemma4MicTranscribe.CLI do
                                         hybrid: both, fast prefill and fast decode (~31GB)
                                         default packed
       --fused-ffn                        Fuse packed 12B FFN gate/up projections during decode
+      --self-review                      Generate a draft, then correct it against the same audio
       --e4b-cascade                       Use E4B first and escalate suspicious transcripts to 12B
       --cascade-min-chars-per-second N   Escalate sparse E4B transcripts; 0 disables (default)
       --cascade-min-logit-margin N       Escalate low-confidence E4B output; 0 disables (default)

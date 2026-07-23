@@ -674,6 +674,26 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     end
   end
 
+  @doc "Generates a draft, then asks the same model to correct it against the audio."
+  def generate_reviewed(%__MODULE__{} = runtime, input, opts \\ []) do
+    with {:ok, draft} <- generate(runtime, input, opts) do
+      review_prompt = """
+      Listen to the audio again and review the candidate transcription below. The candidate may contain errors. Correct only errors supported by the audio and surrounding sentence context. Preserve the original spoken language and writing system; do not translate or transliterate. Output only the corrected final transcription, with no explanation or newlines.
+
+      Candidate transcription: #{String.trim(draft)}
+      """
+
+      review_input =
+        Input.build(input.samples,
+          prompt: review_prompt,
+          system_message: input[:system_message],
+          audio_token_count: input.audio.token_count
+        )
+
+      generate(runtime, review_input, opts)
+    end
+  end
+
   @doc "Runs generation while collecting per-token top-two logit margins."
   def generate_with_confidence(%__MODULE__{} = runtime, input, opts \\ []) do
     generate_result(runtime, input, opts, true)

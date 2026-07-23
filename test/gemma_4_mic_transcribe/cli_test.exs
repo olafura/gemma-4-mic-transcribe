@@ -117,6 +117,10 @@ defmodule Gemma4MicTranscribe.CLITest do
     assert {:ok, %RunConfig{fused_ffn: true}} = CLI.parse(["--fused-ffn"])
   end
 
+  test "parses transcript self-review flag" do
+    assert {:ok, %RunConfig{self_review: true}} = CLI.parse(["--self-review"])
+  end
+
   test "parses E4B cascade controls" do
     assert {:ok, %RunConfig{} = config} =
              CLI.parse([

@@ -1001,6 +1001,16 @@ The same `0.125` threshold also accepted the journal transcript containing
 `biripo`; logit margin measures decisiveness, not correctness, and cannot be
 the cascade's only semantic quality signal.
 
+`--self-review` is a separate prompt-guided experiment. It asks the selected
+model for a draft, then sends the same audio and draft back to the model with a
+correction instruction. It is off by default: it runs inference twice and the
+draft makes prompt lengths variable, so a service may compile more prefill
+shapes. Use it to measure whether revision quality justifies that cost before
+enabling it in production. On the second `journal1.wav` utterance, E4B review
+changed the official-prompt draft's invented `birapul` to the real but still
+incorrect word `purple`; it improved lexical plausibility without recovering
+`is beautiful`, so review is not enabled as a quality policy.
+
 The cascade emits `[:gemma_4_mic_transcribe, :cascade, :route]` telemetry with
 the selected route, escalation reason, and per-model processing time. Streaming
 benchmark runs also print accepted/escalated counts and average model times, so
