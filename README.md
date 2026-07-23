@@ -781,12 +781,21 @@ verbatim identical. The flag requires packed or hybrid weights and has no effect
 on E4B.
 
 On an NVIDIA L40S with CUDA 12.8 and the `cuda12` XLA archive, the same two
-five-second windows both took 1.708 seconds after warmup. Prefill took 167–170
-ms and decode steps took 150–154 ms. Both transcripts were identical to the
-ROCm reference. This is the generic packed-q4 fallback: the custom q4
-GEMM/GEMV currently targets ROCm only, so CUDA warns that it has no q4 kernel
-and lowers the dequantization graph through XLA. The 1,302-second checkpoint
-download/load/assembly is excluded from these resident processing times.
+five-second windows both took 1.708 seconds after warmup before CUDA packed-q4
+kernels were added. Prefill took 167–170 ms and decode steps took 150–154 ms.
+Both transcripts were identical to the ROCm reference. This was the generic
+packed-q4 fallback, which lowered the dequantization graph through XLA. The
+1,302-second checkpoint download/load/assembly is excluded from these resident
+processing times.
+
+The first CUDA packed-q4 implementation reduced those windows to 869 and 876
+ms. Decode fell to 28–31 ms per token, but sending rank-2 prefill through the
+simple packed GEMM increased prefill to 558 ms. The final hybrid dispatch
+therefore uses XLA's tuned CUDA GEMM for rank-2 prefill and packed CUDA GEMV
+plus dual-GEMV for decode. It produced the same transcripts in 499 and 475 ms:
+an average of 487 ms, 3.51 times faster than the original CUDA fallback.
+Prefill took 165–173 ms and decode steps took 28–33 ms. One-time checkpoint
+loading and the 127-second shape-compilation warmup are excluded.
 
 Use `--execution split` when an observable runtime boundary is required. It
 dispatches the prefix and tail as separate XLA executables and measured
