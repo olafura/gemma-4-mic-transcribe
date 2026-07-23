@@ -155,19 +155,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
 
     unique_expert_indices = Enum.uniq(expert_indices)
 
-    positions =
-      unique_expert_indices
-      |> Enum.with_index()
-      |> Map.new()
-
-    compact_expert_indices =
-      expert_indices
-      |> Enum.map(&Map.fetch!(positions, &1))
-      |> Nx.tensor(type: Nx.type(prepared.top_k_indices))
-      |> Nx.reshape(Nx.shape(prepared.top_k_indices))
-      |> transfer(layer.backend)
-
-    {expert_params, expert_cache} =
+    {expert_params, positions, expert_cache, expert_params_owned?} =
       case Keyword.get(opts, :expert_cache) do
         nil ->
           {_manifest, expert_params} =
@@ -178,17 +166,33 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
               verify_checksum: false
             )
 
-          {expert_params, nil}
+          positions =
+            unique_expert_indices
+            |> Enum.with_index()
+            |> Map.new()
+
+          {expert_params, positions, nil, true}
 
         %RoutedExpertCache{} = cache ->
-          RoutedExpertCache.checkout!(
-            cache,
-            layer.moe_artifact,
-            layer.moe_manifest,
-            unique_expert_indices,
-            layer.backend
-          )
+          {expert_params, slots, cache} =
+            RoutedExpertCache.checkout_table!(
+              cache,
+              layer.moe_artifact,
+              layer.moe_manifest,
+              unique_expert_indices,
+              layer.backend
+            )
+
+          positions = Map.new(Enum.zip(unique_expert_indices, slots))
+          {expert_params, positions, cache, false}
       end
+
+    compact_expert_indices =
+      expert_indices
+      |> Enum.map(&Map.fetch!(positions, &1))
+      |> Nx.tensor(type: Nx.type(prepared.top_k_indices))
+      |> Nx.reshape(Nx.shape(prepared.top_k_indices))
+      |> transfer(layer.backend)
 
     finish_input =
       Map.take(prepared, [
@@ -207,7 +211,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer do
         compact_expert_indices
       )
 
-    Nx.backend_deallocate(expert_params)
+    if expert_params_owned?, do: Nx.backend_deallocate(expert_params)
     Nx.backend_deallocate(compact_expert_indices)
 
     Nx.backend_deallocate(Map.drop(prepared, [:key_cache, :value_cache]))

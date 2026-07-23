@@ -119,11 +119,37 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
 
     stats = RoutedExpertCache.stats(cache)
     assert stats.entries == 2
+    assert stats.tables == 1
     assert stats.hits == 1
     assert stats.misses == 3
     assert stats.evictions == 1
     assert stats.bytes == 2 * expert_bytes
     Nx.backend_deallocate(cached_experts)
+
+    {resident_table, slots, cache} =
+      RoutedExpertCache.checkout_table!(
+        cache,
+        artifact,
+        manifest,
+        [2, 1],
+        Nx.BinaryBackend
+      )
+
+    assert slots == [1, 0]
+    assert Nx.axis_size(resident_table.experts_gate_up, 0) == 2
+
+    {same_table, reverse_slots, cache} =
+      RoutedExpertCache.checkout_table!(
+        cache,
+        artifact,
+        manifest,
+        [1, 2],
+        Nx.BinaryBackend
+      )
+
+    assert reverse_slots == [0, 1]
+    assert_all_close(same_table.experts_gate_up, resident_table.experts_gate_up)
+
     :ok = RoutedExpertCache.release(cache)
 
     input =
