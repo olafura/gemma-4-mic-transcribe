@@ -76,20 +76,23 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
 
     shared = rms_norm(shared, params.norm_post_shared, eps)
 
-    router_input = rms_norm_without_scale(residual, eps)
-
-    router_input = router_input * params.router_scale * router_scalar
-
-    router_logits = Nx.dot(router_input, Nx.transpose(params.router_proj))
-    router_probabilities = softmax_f32(router_logits)
-    {top_k_weights, top_k_indices} = Nx.top_k(router_probabilities, k: top_k)
-    top_k_weights = top_k_weights / Nx.sum(top_k_weights, axes: [-1], keep_axes: true)
-
-    per_expert_scale = Nx.take(params.router_per_expert_scale, top_k_indices)
-    top_k_weights = top_k_weights * Nx.as_type(per_expert_scale, :f32)
+    routing =
+      route(residual, params,
+        top_k: top_k,
+        eps: eps,
+        router_scalar: router_scalar
+      )
 
     routed_input = rms_norm(residual, params.norm_pre_experts, eps)
-    routed = routed_experts(routed_input, top_k_indices, top_k_weights, params)
+
+    routed =
+      routed_experts(
+        routed_input,
+        routing.top_k_indices,
+        routing.top_k_weights,
+        params
+      )
+
     routed = rms_norm(routed, params.norm_post_experts, eps)
 
     combined = rms_norm(shared + routed, params.norm_post_combined, eps)
@@ -99,6 +102,29 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
       output: output,
       shared_output: shared,
       routed_output: routed,
+      router_probabilities: routing.router_probabilities,
+      top_k_indices: routing.top_k_indices,
+      top_k_weights: routing.top_k_weights
+    }
+  end
+
+  @doc false
+  defn route(input, params, opts \\ []) do
+    top_k = opts[:top_k]
+    eps = opts[:eps]
+    router_scalar = opts[:router_scalar]
+
+    router_input = rms_norm_without_scale(input, eps)
+    router_input = router_input * params.router_scale * router_scalar
+    router_logits = Nx.dot(router_input, Nx.transpose(params.router_proj))
+    router_probabilities = softmax_f32(router_logits)
+    {top_k_weights, top_k_indices} = Nx.top_k(router_probabilities, k: top_k)
+    top_k_weights = top_k_weights / Nx.sum(top_k_weights, axes: [-1], keep_axes: true)
+
+    per_expert_scale = Nx.take(params.router_per_expert_scale, top_k_indices)
+    top_k_weights = top_k_weights * Nx.as_type(per_expert_scale, :f32)
+
+    %{
       router_probabilities: router_probabilities,
       top_k_indices: top_k_indices,
       top_k_weights: top_k_weights

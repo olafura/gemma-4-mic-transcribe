@@ -70,6 +70,11 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
       tensors["model.language_model.layers.0.router.proj.weight"]
     )
 
+    {_, router_params} = MoeLayerArtifact.load_router!(artifact, Torchx.Backend)
+
+    assert router_params |> Map.keys() |> Enum.sort() ==
+             [:router_per_expert_scale, :router_proj, :router_scale]
+
     input =
       Nx.tensor(
         [

@@ -131,6 +131,19 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
 
   @doc "Loads the complete MoE shell onto the requested Nx backend."
   def load!(path, backend \\ Nx.BinaryBackend) do
+    load_parameters!(path, backend, :all)
+  end
+
+  @doc "Loads only the three router tensors onto the requested Nx backend."
+  def load_router!(path, backend \\ Nx.BinaryBackend) do
+    load_parameters!(path, backend, [
+      "router_proj",
+      "router_scale",
+      "router_per_expert_scale"
+    ])
+  end
+
+  defp load_parameters!(path, backend, names) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
 
@@ -144,9 +157,15 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
       raise ArgumentError, "MoE layer parameter checksum mismatch"
     end
 
+    tensors =
+      case names do
+        :all -> manifest.tensors
+        names -> Map.take(manifest.tensors, names)
+      end
+
     params =
-      Map.new(manifest.tensors, fn {name, metadata} ->
-        {String.to_existing_atom(name), load_tensor!(parameters_path, metadata, backend)}
+      Map.new(tensors, fn {name, metadata} ->
+        {parameter_name!(name), load_tensor!(parameters_path, metadata, backend)}
       end)
 
     {manifest, params}
@@ -330,6 +349,24 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
     |> Enum.map(fn metadata -> Enum.product(metadata.shape) end)
     |> Enum.sum()
   end
+
+  defp parameter_name!("experts_gate_up"), do: :experts_gate_up
+  defp parameter_name!("experts_down"), do: :experts_down
+  defp parameter_name!("shared_gate"), do: :shared_gate
+  defp parameter_name!("shared_up"), do: :shared_up
+  defp parameter_name!("shared_down"), do: :shared_down
+  defp parameter_name!("router_proj"), do: :router_proj
+  defp parameter_name!("router_scale"), do: :router_scale
+  defp parameter_name!("router_per_expert_scale"), do: :router_per_expert_scale
+  defp parameter_name!("norm_pre_shared"), do: :norm_pre_shared
+  defp parameter_name!("norm_post_shared"), do: :norm_post_shared
+  defp parameter_name!("norm_pre_experts"), do: :norm_pre_experts
+  defp parameter_name!("norm_post_experts"), do: :norm_post_experts
+  defp parameter_name!("norm_post_combined"), do: :norm_post_combined
+  defp parameter_name!("layer_scalar"), do: :layer_scalar
+
+  defp parameter_name!(name),
+    do: raise(ArgumentError, "unsupported MoE layer parameter #{inspect(name)}")
 
   defp normalize_manifest(manifest) do
     Map.put(manifest, :parameter_type, nx_type!(manifest.parameter_type))
