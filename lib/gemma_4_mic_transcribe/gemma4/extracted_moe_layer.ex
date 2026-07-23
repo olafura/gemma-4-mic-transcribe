@@ -108,6 +108,53 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
     }
   end
 
+  @doc false
+  defn prepare_sparse(input, params, top_k_indices, top_k_weights, opts \\ []) do
+    eps = opts[:eps]
+    residual = input
+
+    shared_input = rms_norm(residual, params.norm_pre_shared, eps)
+
+    shared =
+      expert_forward(shared_input, params.shared_gate, params.shared_up, params.shared_down)
+
+    %{
+      residual: residual,
+      shared_output: rms_norm(shared, params.norm_post_shared, eps),
+      routed_input: rms_norm(residual, params.norm_pre_experts, eps),
+      top_k_indices: top_k_indices,
+      top_k_weights: top_k_weights
+    }
+  end
+
+  @doc false
+  defn finish_sparse(prepared, params, expert_params, opts \\ []) do
+    eps = opts[:eps]
+
+    routed =
+      prepared.routed_input
+      |> compact_routed_expert_outputs(
+        expert_params.experts_gate_up,
+        expert_params.experts_down
+      )
+      |> combine_routed_expert_outputs(
+        prepared.top_k_weights,
+        Nx.type(prepared.residual)
+      )
+      |> rms_norm(params.norm_post_experts, eps)
+
+    combined =
+      rms_norm(prepared.shared_output + routed, params.norm_post_combined, eps)
+
+    %{
+      output: (prepared.residual + combined) * params.layer_scalar,
+      shared_output: prepared.shared_output,
+      routed_output: routed,
+      top_k_indices: prepared.top_k_indices,
+      top_k_weights: prepared.top_k_weights
+    }
+  end
+
   @doc """
   Runs the complete shell while replacing one routed expert's raw output.
 
@@ -214,6 +261,35 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
     token_count = Nx.axis_size(input, 0)
     top_k = Nx.axis_size(indices, 1)
     hidden_size = Nx.axis_size(input, 1)
+
+    expert_input =
+      input
+      |> Nx.new_axis(1)
+      |> Nx.broadcast({token_count, top_k, hidden_size})
+      |> Nx.new_axis(-1)
+
+    gate_up =
+      Nx.dot(selected_gate_up, [3], [0, 1], expert_input, [2], [0, 1])
+      |> Nx.squeeze(axes: [3])
+
+    intermediate_size = div(Nx.axis_size(gate_up, 2), 2)
+    gate = Nx.slice_along_axis(gate_up, 0, intermediate_size, axis: 2)
+    up = Nx.slice_along_axis(gate_up, intermediate_size, intermediate_size, axis: 2)
+
+    hidden =
+      (Bumblebee.Layers.gelu_approx_tanh(gate) * up)
+      |> Nx.new_axis(-1)
+
+    Nx.dot(selected_down, [3], [0, 1], hidden, [2], [0, 1])
+    |> Nx.squeeze(axes: [3])
+  end
+
+  defnp compact_routed_expert_outputs(input, experts_gate_up, experts_down) do
+    token_count = Nx.axis_size(input, 0)
+    top_k = Nx.axis_size(experts_gate_up, 0)
+    hidden_size = Nx.axis_size(input, 1)
+    selected_gate_up = Nx.new_axis(experts_gate_up, 0)
+    selected_down = Nx.new_axis(experts_down, 0)
 
     expert_input =
       input

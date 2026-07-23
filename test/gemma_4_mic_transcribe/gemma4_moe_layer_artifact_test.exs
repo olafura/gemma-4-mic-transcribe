@@ -75,6 +75,18 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
     assert router_params |> Map.keys() |> Enum.sort() ==
              [:router_per_expert_scale, :router_proj, :router_scale]
 
+    {_, sparse_base} = MoeLayerArtifact.load_sparse_base!(artifact, Torchx.Backend)
+    refute Map.has_key?(sparse_base, :experts_gate_up)
+    refute Map.has_key?(sparse_base, :experts_down)
+    assert Map.has_key?(sparse_base, :shared_gate)
+
+    {_, routed_experts} =
+      MoeLayerArtifact.load_routed_experts!(artifact, [3, 1], Torchx.Backend)
+
+    indices = Nx.tensor([3, 1], type: :s64)
+    assert_all_close(routed_experts.experts_gate_up, Nx.take(params.experts_gate_up, indices))
+    assert_all_close(routed_experts.experts_down, Nx.take(params.experts_down, indices))
+
     input =
       Nx.tensor(
         [
@@ -97,6 +109,36 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
     assert_all_close(actual.shared_output, expected.shared_output, 2.0e-2)
     assert_all_close(actual.routed_output, expected.routed_output, 2.0e-2)
     assert_all_close(actual.output, expected.output, 2.0e-2)
+
+    sparse_input = Nx.tensor([[0.25, -0.5, 0.75, 1.0]], type: :bf16)
+
+    sparse_baseline =
+      ExtractedMoeLayer.forward(sparse_input, params,
+        top_k: @top_k,
+        eps: @eps,
+        router_scalar: @hidden ** -0.5
+      )
+
+    sparse_indices = Nx.squeeze(sparse_baseline.top_k_indices, axes: [0])
+
+    compact_experts = %{
+      experts_gate_up: Nx.take(params.experts_gate_up, sparse_indices),
+      experts_down: Nx.take(params.experts_down, sparse_indices)
+    }
+
+    sparse_prepared =
+      ExtractedMoeLayer.prepare_sparse(
+        sparse_input,
+        params,
+        sparse_baseline.top_k_indices,
+        sparse_baseline.top_k_weights,
+        eps: @eps
+      )
+
+    sparse_result =
+      ExtractedMoeLayer.finish_sparse(sparse_prepared, params, compact_experts, eps: @eps)
+
+    assert_all_close(sparse_result.output, sparse_baseline.output, 2.0e-2)
 
     override_expert =
       actual.top_k_indices

@@ -10,6 +10,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
   alias Gemma4MicTranscribe.Gemma4.ExpertCaller
   alias Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedOutputHead
+  alias Gemma4MicTranscribe.Gemma4.ExtractedSparseDecoderLayer
 
   @default_eos_token_ids [1, 106]
 
@@ -149,20 +150,17 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
 
     {final_output, caches} =
       Enum.reduce(1..29, {first.output, caches}, fn layer_index, {input, caches} ->
-        layer =
-          ExtractedDecoderLayer.load!(
-            layer_artifact(prefix, layer_index, "caller"),
-            layer_artifact(prefix, layer_index, "moe"),
+        {layer, cache, result} =
+          run_later_layer!(
+            prefix,
+            layer_index,
             backend,
-            verify_checksum: state.offset == 0
+            input,
+            caches,
+            state.offset,
+            state.cache_length
           )
 
-        cache =
-          Map.get_lazy(caches, layer_index, fn ->
-            ExtractedDecoderLayer.init_cache(layer, state.cache_length)
-          end)
-
-        result = ExtractedDecoderLayer.run_cached(layer, input, cache, state.offset)
         unload_decoder_layer(layer)
         Nx.backend_deallocate(input)
         {result.output, put_cache(caches, layer_index, cache, result)}
@@ -205,6 +203,55 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
   defp put_cache(caches, layer_index, previous, result) do
     Nx.backend_deallocate(previous)
     Map.put(caches, layer_index, %{key: result.key_cache, value: result.value_cache})
+  end
+
+  defp run_later_layer!(
+         prefix,
+         layer_index,
+         backend,
+         input,
+         caches,
+         0,
+         cache_length
+       ) do
+    layer =
+      ExtractedDecoderLayer.load!(
+        layer_artifact(prefix, layer_index, "caller"),
+        layer_artifact(prefix, layer_index, "moe"),
+        backend
+      )
+
+    cache =
+      Map.get_lazy(caches, layer_index, fn ->
+        ExtractedDecoderLayer.init_cache(layer, cache_length)
+      end)
+
+    {layer, cache, ExtractedDecoderLayer.run_cached(layer, input, cache, 0)}
+  end
+
+  defp run_later_layer!(
+         prefix,
+         layer_index,
+         backend,
+         input,
+         caches,
+         offset,
+         cache_length
+       ) do
+    layer =
+      ExtractedSparseDecoderLayer.load!(
+        layer_artifact(prefix, layer_index, "caller"),
+        layer_artifact(prefix, layer_index, "moe"),
+        backend,
+        verify_checksum: false
+      )
+
+    cache =
+      Map.get_lazy(caches, layer_index, fn ->
+        ExtractedSparseDecoderLayer.init_cache(layer, cache_length)
+      end)
+
+    {layer, cache, ExtractedSparseDecoderLayer.run_cached(layer, input, cache, offset)}
   end
 
   defp prediction_rows(result, tokenizer) do

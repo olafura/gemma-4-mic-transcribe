@@ -14,6 +14,20 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
   @parameters "parameters.bin"
   @default_repo "google/gemma-4-26B-A4B-it"
   @bf_type_atom :bf
+  @sparse_base_names [
+    "shared_gate",
+    "shared_up",
+    "shared_down",
+    "router_proj",
+    "router_scale",
+    "router_per_expert_scale",
+    "norm_pre_shared",
+    "norm_post_shared",
+    "norm_pre_experts",
+    "norm_post_experts",
+    "norm_post_combined",
+    "layer_scalar"
+  ]
 
   @doc "Range-extracts a complete MoE feed-forward shell for one decoder layer."
   def extract!(path, opts \\ []) do
@@ -219,6 +233,56 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
     )
   end
 
+  @doc "Loads every MoE parameter except the two complete routed-expert banks."
+  def load_sparse_base!(path, backend \\ Nx.BinaryBackend, opts \\ []) do
+    load_parameters!(path, backend, @sparse_base_names, opts)
+  end
+
+  @doc "Loads selected routed experts as compact banks in the requested order."
+  def load_routed_experts!(path, expert_indices, backend \\ Nx.BinaryBackend, opts \\ [])
+      when is_list(expert_indices) and expert_indices != [] do
+    path = Path.expand(path)
+    manifest = read_manifest!(path)
+
+    unless manifest.version == @version and manifest.kind == @kind do
+      raise ArgumentError, "unsupported Gemma 4 MoE layer artifact"
+    end
+
+    unless Enum.all?(
+             expert_indices,
+             &(is_integer(&1) and &1 >= 0 and &1 < manifest.num_experts)
+           ) do
+      raise ArgumentError,
+            "expert indices must be integers in 0..#{manifest.num_experts - 1}"
+    end
+
+    parameters_path = Path.join(path, manifest.parameter_file)
+
+    if Keyword.get(opts, :verify_checksum, true) and
+         sha256_file(parameters_path) != manifest.parameter_sha256 do
+      raise ArgumentError, "MoE layer parameter checksum mismatch"
+    end
+
+    params = %{
+      experts_gate_up:
+        load_expert_slices!(
+          parameters_path,
+          Map.fetch!(manifest.tensors, "experts_gate_up"),
+          expert_indices,
+          backend
+        ),
+      experts_down:
+        load_expert_slices!(
+          parameters_path,
+          Map.fetch!(manifest.tensors, "experts_down"),
+          expert_indices,
+          backend
+        )
+    }
+
+    {manifest, params}
+  end
+
   defp load_parameters!(path, backend, names, opts) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
@@ -414,6 +478,30 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
       |> Nx.reshape(List.to_tuple(metadata.shape))
 
     transfer(tensor, backend)
+  end
+
+  defp load_expert_slices!(path, metadata, expert_indices, backend) do
+    [expert_count | slice_shape] = metadata.shape
+    slice_bytes = div(metadata.byte_size, expert_count)
+    {:ok, file} = :file.open(String.to_charlist(path), [:read, :raw, :binary])
+
+    binary =
+      try do
+        Enum.map(expert_indices, fn expert_index ->
+          {:ok, binary} =
+            :file.pread(file, metadata.offset + expert_index * slice_bytes, slice_bytes)
+
+          binary
+        end)
+        |> IO.iodata_to_binary()
+      after
+        :ok = :file.close(file)
+      end
+
+    binary
+    |> Nx.from_binary(:bf16, backend: Nx.BinaryBackend)
+    |> Nx.reshape(List.to_tuple([length(expert_indices) | slice_shape]))
+    |> transfer(backend)
   end
 
   defp transfer(tensor, nil), do: tensor
