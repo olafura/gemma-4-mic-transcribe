@@ -128,6 +128,44 @@ defmodule Gemma4MicTranscribe.Gemma4.MathExpertProfiler do
     }
   end
 
+  @doc "Loads real checkpoint embedding rows for one or more text strings."
+  def embedding_inputs!(artifact_path, texts, opts \\ []) when is_list(texts) do
+    manifest = MoeLayerArtifact.read_manifest!(artifact_path)
+
+    tokenizer =
+      Keyword.get_lazy(opts, :tokenizer, fn ->
+        {:ok, tokenizer} =
+          Bumblebee.load_tokenizer({:hf, manifest.source_repo}, type: :gemma)
+
+        Bumblebee.configure(tokenizer, add_special_tokens: false)
+      end)
+
+    texts =
+      if Keyword.get(opts, :prepend_bos, false) do
+        Enum.map(texts, &("<bos>" <> &1))
+      else
+        texts
+      end
+
+    tokens = tokenize(tokenizer, texts)
+    embeddings = fetch_embedding_rows!(manifest, tokens, opts)
+
+    %{
+      manifest: manifest,
+      tokenizer: tokenizer,
+      tokens:
+        Enum.map(tokens, fn token ->
+          Map.put(
+            token,
+            :token,
+            Bumblebee.Tokenizer.id_to_token(tokenizer, token.id) ||
+              Bumblebee.Tokenizer.decode(tokenizer, [token.id])
+          )
+        end),
+      input: tokens |> Enum.map(&Map.fetch!(embeddings, &1.id)) |> Nx.stack()
+    }
+  end
+
   @doc "Ranks experts from already captured math and control routing outputs."
   def rank(math_routing, control_routing, num_experts) do
     math_rows = Nx.axis_size(math_routing.router_probabilities, 0)

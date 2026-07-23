@@ -143,6 +143,16 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifact do
     ])
   end
 
+  @doc "Loads the router and routed-expert input norm for an expert caller."
+  def load_caller!(path, backend \\ Nx.BinaryBackend) do
+    load_parameters!(path, backend, [
+      "router_proj",
+      "router_scale",
+      "router_per_expert_scale",
+      "norm_pre_experts"
+    ])
+  end
+
   defp load_parameters!(path, backend, names) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
