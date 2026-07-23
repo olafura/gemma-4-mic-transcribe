@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   alias Gemma4MicTranscribe.Gemma4.ExpertArtifact
   alias Gemma4MicTranscribe.Gemma4.ExpertCaller
   alias Gemma4MicTranscribe.Gemma4.ExpertCallerArtifact
+  alias Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer
   alias Gemma4MicTranscribe.Gemma4.ExtractedExpert
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
   alias Gemma4MicTranscribe.Gemma4.MathExpertProfiler
@@ -14,6 +15,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     artifact: :string,
     caller_artifact: :string,
     expert_artifact: :string,
+    next_artifact: :string,
+    next_caller_artifact: :string,
     repo: :string,
     revision: :string,
     layer: :integer,
@@ -186,7 +189,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
           ExpertCallerArtifact.extract!(opts.artifact,
             repo: opts.repo,
             revision: opts.revision,
-            layer: 0
+            layer: opts.layer
           )
 
         IO.puts(
@@ -196,6 +199,80 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
             layer: manifest.layer_index,
             parameter_count: manifest.parameter_count,
             parameter_bytes: manifest.parameter_bytes
+          })
+        )
+
+        0
+
+      {:call_chain, opts} ->
+        {:ok, backend} = Runtime.resolve_backend(opts.backend)
+
+        layer_0 =
+          ExpertCaller.load_layer!(
+            opts.caller_artifact,
+            opts.artifact,
+            opts.expert_artifact,
+            backend
+          )
+
+        first =
+          ExpertCaller.call_layer_text!(layer_0, opts.text, expert_scale: opts.expert_scale)
+
+        next_layer =
+          ExtractedDecoderLayer.load!(
+            opts.next_caller_artifact,
+            opts.next_artifact,
+            backend
+          )
+
+        unless next_layer.manifest.layer_index == layer_0.manifest.layer_index + 1 do
+          raise ArgumentError, "next decoder artifact must immediately follow the first layer"
+        end
+
+        second =
+          next_layer
+          |> ExtractedDecoderLayer.run(first.layer_output)
+          |> Nx.backend_copy(Nx.BinaryBackend)
+
+        baseline_second =
+          next_layer
+          |> ExtractedDecoderLayer.run(first.baseline_layer_output)
+          |> Nx.backend_copy(Nx.BinaryBackend)
+
+        propagated_delta =
+          second.output
+          |> Nx.as_type(:f32)
+          |> Nx.subtract(Nx.as_type(baseline_second.output, :f32))
+          |> Nx.abs()
+
+        IO.puts(
+          Jason.encode!(%{
+            event: "decoder_layer_chain_called",
+            layers: [layer_0.manifest.layer_index, next_layer.manifest.layer_index],
+            text: first.text,
+            expert_override: first.expert,
+            expert_scale: first.expert_scale,
+            override_route_count: first.override_route_count,
+            tokens:
+              first.tokens
+              |> Enum.with_index()
+              |> Enum.map(fn {token, position} ->
+                %{position: position, id: token.id, token: token.token}
+              end),
+            layer_0_output_shape: Tuple.to_list(Nx.shape(first.layer_output)),
+            layer_0_output_mean_abs:
+              first.layer_output
+              |> Nx.as_type(:f32)
+              |> Nx.abs()
+              |> Nx.mean()
+              |> Nx.to_number(),
+            layer_1_selected_experts: Nx.to_list(second.top_k_indices),
+            layer_1_selected_weights: Nx.to_list(second.top_k_weights),
+            layer_1_output_shape: Tuple.to_list(Nx.shape(second.output)),
+            layer_1_output_mean_abs:
+              second.output |> Nx.as_type(:f32) |> Nx.abs() |> Nx.mean() |> Nx.to_number(),
+            layer_1_output_delta_mean_abs: propagated_delta |> Nx.mean() |> Nx.to_number(),
+            layer_1_output_delta_max_abs: propagated_delta |> Nx.reduce_max() |> Nx.to_number()
           })
         )
 
@@ -402,7 +479,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
   def parse(["extract-caller" | argv]) do
     with {:ok, opts} <- parse_options(argv),
-         :ok <- require_artifact(opts) do
+         :ok <- require_artifact(opts),
+         :ok <- non_negative(opts[:layer] || 0, "--layer") do
       if opts[:help] do
         {:help, usage()}
       else
@@ -410,7 +488,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
          %{
            artifact: opts[:artifact],
            repo: opts[:repo] || "google/gemma-4-26B-A4B-it",
-           revision: opts[:revision] || "main"
+           revision: opts[:revision] || "main",
+           layer: opts[:layer] || 0
          }}
       end
     end
@@ -451,6 +530,32 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
            artifact: opts[:artifact],
            caller_artifact: opts[:caller_artifact],
            expert_artifact: opts[:expert_artifact],
+           text: opts[:text],
+           expert_scale: opts[:expert_scale] || 1.0,
+           backend: opts[:backend] || "exla:rocm"
+         }}
+      end
+    end
+  end
+
+  def parse(["call-chain" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts),
+         :ok <- require_string(opts, :caller_artifact, "--caller-artifact PATH"),
+         :ok <- require_string(opts, :expert_artifact, "--expert-artifact PATH"),
+         :ok <- require_string(opts, :next_artifact, "--next-artifact PATH"),
+         :ok <- require_string(opts, :next_caller_artifact, "--next-caller-artifact PATH"),
+         :ok <- require_string(opts, :text, "--text TEXT") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:call_chain,
+         %{
+           artifact: opts[:artifact],
+           caller_artifact: opts[:caller_artifact],
+           expert_artifact: opts[:expert_artifact],
+           next_artifact: opts[:next_artifact],
+           next_caller_artifact: opts[:next_caller_artifact],
            text: opts[:text],
            expert_scale: opts[:expert_scale] || 1.0,
            backend: opts[:backend] || "exla:rocm"
@@ -538,11 +643,14 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       expert_tool inspect-layer --artifact PATH
       expert_tool run-layer --artifact PATH [options]
       expert_tool profile-math --artifact PATH [options]
-      expert_tool extract-caller --artifact PATH
+      expert_tool extract-caller --artifact PATH [--layer INDEX]
       expert_tool call-expert --artifact MOE_PATH --caller-artifact PATH
                               --expert-artifact PATH --text TEXT [options]
       expert_tool call-layer --artifact MOE_PATH --caller-artifact PATH
                              --expert-artifact PATH --text TEXT [options]
+      expert_tool call-chain --artifact MOE_PATH --caller-artifact PATH
+                             --expert-artifact PATH --next-artifact MOE_PATH
+                             --next-caller-artifact PATH --text TEXT [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -566,7 +674,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     corpora against a layer-0 router. It is a fast candidate search, not a
     substitute for capturing post-attention activations from the full model.
 
-    extract-caller saves the layer-0 attention prefix. call-expert tokenizes
+    extract-caller saves one decoder layer's attention prefix. call-expert tokenizes
     text, reconstructs the post-attention residual and routing decision, then
     sends the exact pre_feedforward_layernorm_2 rows selected by the router to
     the standalone expert.
@@ -576,6 +684,10 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     complete layer-0 output. It also returns the unchanged baseline for an
     exact comparison. --expert-scale changes the inserted output for controlled
     replacement and ablation experiments.
+
+    call-chain feeds that complete layer-0 output into the next extracted
+    attention and MoE artifacts without applying embedding scaling a second
+    time.
 
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0
@@ -590,7 +702,14 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     @moduledoc false
 
     def main([command | _argv])
-        when command in ["run", "run-layer", "profile-math", "call-expert", "call-layer"] do
+        when command in [
+               "run",
+               "run-layer",
+               "profile-math",
+               "call-expert",
+               "call-layer",
+               "call-chain"
+             ] do
       IO.puts(
         :stderr,
         "error: native execution requires real application priv paths; " <>

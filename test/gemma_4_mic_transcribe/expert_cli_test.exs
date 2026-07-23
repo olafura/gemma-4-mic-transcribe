@@ -98,6 +98,7 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
 
     assert extract.artifact == "caller"
     assert extract.repo == "google/gemma-4-26B-A4B-it"
+    assert extract.layer == 0
 
     assert {:call_expert, call} =
              ExpertCLI.parse([
@@ -136,6 +137,27 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
     assert layer.artifact == "moe-layer"
     assert layer.expert_scale == 0.5
     assert layer.text == "Prove the theorem."
+
+    assert {:call_chain, chain} =
+             ExpertCLI.parse([
+               "call-chain",
+               "--artifact",
+               "layer-0-moe",
+               "--caller-artifact",
+               "layer-0-caller",
+               "--expert-artifact",
+               "expert-112",
+               "--next-artifact",
+               "layer-1-moe",
+               "--next-caller-artifact",
+               "layer-1-caller",
+               "--text",
+               "Prove the theorem."
+             ])
+
+    assert chain.next_artifact == "layer-1-moe"
+    assert chain.next_caller_artifact == "layer-1-caller"
+    assert chain.expert_scale == 1.0
   end
 
   test "validates caller command paths and text" do
