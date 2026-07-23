@@ -4,6 +4,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   alias Gemma4MicTranscribe.Gemma4.ExpertArtifact
   alias Gemma4MicTranscribe.Gemma4.ExtractedExpert
   alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
+  alias Gemma4MicTranscribe.Gemma4.MathExpertProfiler
   alias Gemma4MicTranscribe.Gemma4.MoeLayerArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
 
@@ -16,6 +17,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     backend: :string,
     tokens: :integer,
     runs: :integer,
+    limit: :integer,
     input_value: :float,
     help: :boolean
   ]
@@ -163,6 +165,16 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
         0
 
+      {:profile_math, opts} ->
+        {:ok, backend} = Runtime.resolve_backend(opts.backend)
+
+        report =
+          MathExpertProfiler.profile!(opts.artifact, backend: backend)
+          |> Map.update!(:experts, &Enum.take(&1, opts.limit))
+
+        IO.puts(Jason.encode!(report))
+        0
+
       {:error, reason} ->
         IO.puts(:stderr, "error: #{reason}")
         1
@@ -265,6 +277,23 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     end
   end
 
+  def parse(["profile-math" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts),
+         :ok <- positive(opts[:limit] || 10, "--limit") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:profile_math,
+         %{
+           artifact: opts[:artifact],
+           backend: opts[:backend] || "exla:rocm",
+           limit: opts[:limit] || 10
+         }}
+      end
+    end
+  end
+
   def parse(["--help"]), do: {:help, usage()}
   def parse(["-h"]), do: {:help, usage()}
   def parse([]), do: {:help, usage()}
@@ -339,6 +368,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
       expert_tool extract-layer --artifact PATH [options]
       expert_tool inspect-layer --artifact PATH
       expert_tool run-layer --artifact PATH [options]
+      expert_tool profile-math --artifact PATH [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -358,9 +388,14 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     each synthetic residual-state row selected. Attention and token embedding
     are not included. The 26B-A4B checkpoint has no audio encoder.
 
+    profile-math compares real token embeddings for curated math and control
+    corpora against a layer-0 router. It is a fast candidate search, not a
+    substitute for capturing post-attention activations from the full model.
+
       --backend BACKEND     Default exla:rocm
       --tokens N            Input rows, default 1
       --runs N              Timed runs after warmup, default 3
+      --limit N             Profile result count, default 10
       --input-value FLOAT   Value in every input cell, default 0.01
     """
   end
@@ -368,7 +403,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   defmodule Escript do
     @moduledoc false
 
-    def main([command | _argv]) when command in ["run", "run-layer"] do
+    def main([command | _argv]) when command in ["run", "run-layer", "profile-math"] do
       IO.puts(
         :stderr,
         "error: native execution requires real application priv paths; " <>

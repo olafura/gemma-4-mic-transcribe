@@ -182,6 +182,30 @@ recombining the router and expert mechanism. The CLI benchmark uses synthetic
 residual states; meaningful text still requires embeddings, attention, every
 decoder layer, final normalization, and the language-model head.
 
+The first specialization probe compares real token embeddings from curated math
+and control corpora against the extracted layer-0 router:
+
+```bash
+mix gemma.expert profile-math \
+  --artifact artifacts/gemma4-26b-layer0-moe \
+  --backend exla:rocm --limit 10
+```
+
+This range-fetches only the embedding rows used by the corpora and loads only
+the router's projection and scale tensors. Expert 112 was the strongest stable
+math candidate: it was selected for 29/75 math tokens versus 9/68 controls
+(38.7% versus 13.2%, 2.72x enrichment). On a held-out set of complete math and
+ordinary-language questions it remained enriched at 21/91 versus 9/92 (23.1%
+versus 9.8%, 2.22x). Expert 32 was second on the discovery vocabulary, while
+experts 9 and 16 showed narrower spikes on symbolic problem tokens.
+
+These are candidates, not semantic labels embedded in the checkpoint. Layer 0
+uses post-attention residual states in real inference, while this inexpensive
+probe substitutes token embeddings. A definitive result requires capturing
+router decisions across all 30 layers on real math and control prompts, then
+ablating the consistently enriched experts and measuring math-specific quality
+loss.
+
 Dense models expose their always-active feed-forward networks separately:
 
 ```elixir

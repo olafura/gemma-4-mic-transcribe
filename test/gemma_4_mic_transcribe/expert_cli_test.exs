@@ -76,5 +76,19 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
     assert run.backend == "exla:rocm"
     assert run.tokens == 3
     assert run.runs == 5
+
+    assert {:profile_math, profile} =
+             ExpertCLI.parse([
+               "profile-math",
+               "--artifact",
+               "moe-layer",
+               "--backend",
+               "exla:rocm",
+               "--limit",
+               "7"
+             ])
+
+    assert profile.backend == "exla:rocm"
+    assert profile.limit == 7
   end
 end
