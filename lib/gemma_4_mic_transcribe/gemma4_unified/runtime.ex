@@ -480,7 +480,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       suppression_mask = suppression_mask_for_state(runtime, channel_state)
       token_id = TokenSelection.next_token_id_from_sequence(logits, suppression_mask)
       prompt_length = offset + length(suffix_ids)
-      Nx.backend_deallocate(logits)
+      deallocate(logits)
 
       log_debug(runtime, fn ->
         "runtime: utterance suffix prefilled audio_tokens=#{utterance.audio_tokens + flushed_tokens} " <>
@@ -505,7 +505,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         end
 
       transcript = Transcript.decode(runtime.tokenizer, token_ids)
-      Nx.backend_deallocate(final_cache)
+      deallocate(final_cache)
       {:ok, transcript}
     end
   rescue
@@ -714,7 +714,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
   defp predict_chunk_discard_logits(runtime, input_ids, input_features, offset, cache) do
     {logits, cache} = predict_chunk(runtime, input_ids, input_features, offset, cache)
-    Nx.backend_deallocate(logits)
+    deallocate(logits)
     cache
   end
 
@@ -1032,7 +1032,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
-    Nx.backend_deallocate(logits)
+    deallocate(logits)
 
     if stop?(eos?, pad?, 1, limits) do
       {[], [], [], cache}
@@ -1093,7 +1093,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     step = generated_count + 1
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
-    Nx.backend_deallocate(logits)
+    deallocate(logits)
 
     if stop?(eos?, pad?, step, limits) do
       {Enum.reverse(generated), Enum.reverse(margins), Enum.reverse(captured_rows), cache}
@@ -1154,7 +1154,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     eos? = eos?(token_id, runtime.generation_config.eos_token_id)
     pad? = token_id == runtime.model_info.spec.pad_token_id
     elapsed_ms = System.monotonic_time(:millisecond) - started_at
-    Nx.backend_deallocate(logits)
+    deallocate(logits)
 
     log_debug(runtime, fn ->
       "runtime: generation step 1/#{limits.max_new_tokens} prefill token_id=#{token_id} " <>
@@ -1225,7 +1225,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       eos? = eos?(token_id, runtime.generation_config.eos_token_id)
       pad? = token_id == runtime.model_info.spec.pad_token_id
       elapsed_ms = System.monotonic_time(:millisecond) - started_at
-      Nx.backend_deallocate(logits)
+      deallocate(logits)
 
       log_debug(runtime, fn ->
         "runtime: generation step #{step}/#{limits.max_new_tokens} token_id=#{token_id} " <>
@@ -1350,10 +1350,25 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   end
 
   defp release_request_tensors(final_cache, input_features, input_features_mask) do
-    if final_cache, do: Nx.backend_deallocate(final_cache)
-    Nx.backend_deallocate(input_features)
-    Nx.backend_deallocate(input_features_mask)
+    if final_cache, do: deallocate(final_cache)
+    deallocate(input_features)
+    deallocate(input_features_mask)
     :ok
+  end
+
+  # Nx.backend_deallocate/1 threads the backend return value through its
+  # composite reduction. Torchx returns :already_deallocated for cache tensors
+  # shared by successive decoder states, which would make Nx's next reduction
+  # clause fail. Deallocate each tensor independently so cleanup is idempotent.
+  defp deallocate(tensor_or_container) do
+    Nx.Defn.Composite.reduce(tensor_or_container, :ok, fn
+      %Nx.Tensor{} = tensor, _acc ->
+        Nx.backend_deallocate(tensor)
+        :ok
+
+      _, acc ->
+        acc
+    end)
   end
 
   defp runtime_backend(%__MODULE__{backend: nil}), do: Nx.BinaryBackend
@@ -1793,13 +1808,16 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
   defp param_type({_kind, _size} = type), do: {:ok, type}
   defp param_type(other), do: {:error, "unsupported param type #{inspect(other)}"}
 
-  # ROCm gfx1151 segfaults in the eager GPU kernels generated while unpacking
-  # compressed-tensors weights and casting them to bf16, and the EXLA host
-  # client has crashed in its own JIT code doing the same unpack, so
-  # checkpoint loading is staged on Torchx CPU (libtorch) when available and
-  # only the finished parameters are transferred to the GPU.
+  # GPU checkpoint loading may eagerly unpack compressed-tensors weights while
+  # casting them to bf16. ROCm gfx1151 segfaults in those kernels, and Torchx
+  # CUDA can throw from its NIF while loading the 12B checkpoint directly.
+  # Stage on Torchx CPU when available, then transfer only the finished
+  # parameters to the selected GPU backend.
   defp stage_params_on_host?({EXLA.Backend, backend_opts}),
     do: backend_opts[:client] == :rocm
+
+  defp stage_params_on_host?({Torchx.Backend, backend_opts}),
+    do: backend_opts[:device] == :cuda
 
   defp stage_params_on_host?(_backend), do: false
 
