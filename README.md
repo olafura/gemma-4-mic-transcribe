@@ -283,13 +283,13 @@ requires decoder layers 2-29, final normalization, and the language-model head
 before it can decode text.
 
 Attention callers are layer-generic, so the complete layer-0 output can now
-feed layer 1 without repeating the token-embedding scale. The real two-layer
-chain produced `{14, 2816}` at both boundaries. Layer 1 made new top-8 routing
-decisions for every token and returned a mean absolute output of `0.38057` with
-the original expert-112 replacement. Ablating layer-0 expert 112 changed some
-downstream layer-1 routes and propagated to a layer-1 mean absolute delta of
-`0.02316` (`7.5633` maximum). This is the first observable Frankenstein-model
-effect across a decoder-layer boundary, though it is still two of 30 layers.
+remain on the ROCm device and feed layer 1 without repeating the token-embedding
+scale or crossing through host memory. The real two-layer chain produced
+`{14, 2816}` at both boundaries, and layer 1 made new top-8 routing decisions
+for every token. Ablating layer-0 expert 112 changed some downstream layer-1
+routes and propagated to a layer-1 mean absolute delta of `0.02313` (`7.5371`
+maximum). This is the first observable Frankenstein-model effect across a
+decoder-layer boundary, though it is still two of 30 layers.
 
 Dense models expose their always-active feed-forward networks separately:
 

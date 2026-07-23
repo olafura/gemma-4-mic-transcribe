@@ -215,8 +215,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
             backend
           )
 
-        first =
-          ExpertCaller.call_layer_text!(layer_0, opts.text, expert_scale: opts.expert_scale)
+        {embedding_data, first_device} =
+          ExpertCaller.call_layer_device!(layer_0, opts.text, expert_scale: opts.expert_scale)
 
         next_layer =
           ExtractedDecoderLayer.load!(
@@ -231,13 +231,15 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
         second =
           next_layer
-          |> ExtractedDecoderLayer.run(first.layer_output)
+          |> ExtractedDecoderLayer.run(first_device.output)
           |> Nx.backend_copy(Nx.BinaryBackend)
 
         baseline_second =
           next_layer
-          |> ExtractedDecoderLayer.run(first.baseline_layer_output)
+          |> ExtractedDecoderLayer.run(first_device.baseline_output)
           |> Nx.backend_copy(Nx.BinaryBackend)
+
+        first = Nx.backend_copy(first_device, Nx.BinaryBackend)
 
         propagated_delta =
           second.output
@@ -249,19 +251,19 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
           Jason.encode!(%{
             event: "decoder_layer_chain_called",
             layers: [layer_0.manifest.layer_index, next_layer.manifest.layer_index],
-            text: first.text,
-            expert_override: first.expert,
-            expert_scale: first.expert_scale,
-            override_route_count: first.override_route_count,
+            text: opts.text,
+            expert_override: layer_0.expert.manifest.expert_index,
+            expert_scale: opts.expert_scale,
+            override_route_count: Nx.to_number(first.override_route_count),
             tokens:
-              first.tokens
+              embedding_data.tokens
               |> Enum.with_index()
               |> Enum.map(fn {token, position} ->
                 %{position: position, id: token.id, token: token.token}
               end),
-            layer_0_output_shape: Tuple.to_list(Nx.shape(first.layer_output)),
+            layer_0_output_shape: Tuple.to_list(Nx.shape(first.output)),
             layer_0_output_mean_abs:
-              first.layer_output
+              first.output
               |> Nx.as_type(:f32)
               |> Nx.abs()
               |> Nx.mean()

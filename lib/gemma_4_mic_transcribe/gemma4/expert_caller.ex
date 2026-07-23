@@ -149,29 +149,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
         opts \\ []
       )
       when is_function(layer_predict_fun) do
-    require_text_input_layer!(caller)
-    embedding_data = embedding_inputs!(caller, text, opts)
-
-    embeddings =
-      embedding_data.input
-      |> Nx.as_type(:bf16)
-      |> transfer(caller.backend)
-
-    expert_scale =
-      opts
-      |> Keyword.get(:expert_scale, 1.0)
-      |> Nx.tensor(type: :f32)
-      |> transfer(caller.backend)
-
-    result =
-      layer_predict_fun.(
-        embeddings,
-        caller.attention_params,
-        caller.moe_params,
-        caller.expert.params,
-        expert_scale
-      )
-      |> Nx.backend_copy(Nx.BinaryBackend)
+    {embedding_data, result} = call_layer_device!(caller, text, opts)
+    result = Nx.backend_copy(result, Nx.BinaryBackend)
 
     expert_index = caller.expert.manifest.expert_index
     selected = selected_calls(result, embedding_data.tokens, expert_index)
@@ -203,6 +182,39 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       top_k_indices: result.top_k_indices,
       top_k_weights: result.top_k_weights
     }
+  end
+
+  @doc "Runs the layer override while keeping all activation tensors on its backend."
+  def call_layer_device!(
+        %__MODULE__{layer_predict_fun: layer_predict_fun} = caller,
+        text,
+        opts \\ []
+      )
+      when is_function(layer_predict_fun) do
+    require_text_input_layer!(caller)
+    embedding_data = embedding_inputs!(caller, text, opts)
+
+    embeddings =
+      embedding_data.input
+      |> Nx.as_type(:bf16)
+      |> transfer(caller.backend)
+
+    expert_scale =
+      opts
+      |> Keyword.get(:expert_scale, 1.0)
+      |> Nx.tensor(type: :f32)
+      |> transfer(caller.backend)
+
+    result =
+      layer_predict_fun.(
+        embeddings,
+        caller.attention_params,
+        caller.moe_params,
+        caller.expert.params,
+        expert_scale
+      )
+
+    {embedding_data, result}
   end
 
   @doc "Tokenizes text, captures real layer-0 expert inputs, and calls the selected expert."
