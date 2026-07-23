@@ -240,6 +240,8 @@ mix gemma.expert call-chain \
   --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
   --next-artifact artifacts/gemma4-26b-layer1-moe \
   --next-caller-artifact artifacts/gemma4-26b-layer1-caller \
+  --next-artifact artifacts/gemma4-26b-layer2-moe \
+  --next-caller-artifact artifacts/gemma4-26b-layer2-caller \
   --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
   --expert-scale 0.0 --backend exla:rocm
 ```
@@ -278,18 +280,27 @@ ablated only on its two selected routes; the complete layer output moved by
 other experts remained unchanged. A newly trained artifact with the same
 `2816 -> 704 -> 2816` contract can use the same slot. The validation path also
 computes the original bank output so it can report a baseline; removing that
-comparison is a later runtime optimization. The current two-layer chain still
-requires decoder layers 2-29, final normalization, and the language-model head
+comparison is a later runtime optimization. The current three-layer run still
+requires decoder layers 3-29, final normalization, and the language-model head
 before it can decode text.
 
-Attention callers are layer-generic, so the complete layer-0 output can now
+Attention callers and `call-chain` are layer-generic, so the complete layer-0 output can now
 remain on the ROCm device and feed layer 1 without repeating the token-embedding
-scale or crossing through host memory. The real two-layer chain produced
-`{14, 2816}` at both boundaries, and layer 1 made new top-8 routing decisions
-for every token. Ablating layer-0 expert 112 changed some downstream layer-1
-routes and propagated to a layer-1 mean absolute delta of `0.02313` (`7.5371`
-maximum). This is the first observable Frankenstein-model effect across a
-decoder-layer boundary, though it is still two of 30 layers.
+scale or crossing through host memory. Repeated `--next-artifact` and
+`--next-caller-artifact` pairs form a validated contiguous list; later layer
+weights load sequentially, so extending the chain does not require every layer
+to reside on the GPU simultaneously. Sliding layers use 256-wide attention
+heads. Full-attention layers use the checkpoint's 512-wide global heads, two
+shared K/V heads, and proportional partial RoPE. The real layer-5 caller
+validated that path across both checkpoint shards: 49,027,584 BF16 parameters
+(98,055,722 artifact bytes), with no duplicate value projection.
+
+The real three-layer chain produced `{14, 2816}` at every boundary, with fresh
+top-8 routing decisions per token and layer. Ablating layer-0 expert 112
+propagated mean absolute output deltas of `0.02313` at layer 1 and `0.01902` at
+layer 2; the corresponding maxima were `7.5370` and `5.7120`. The effect is now
+observable across an arbitrary extracted decoder-layer chain, though this run
+still covers only three of 30 layers.
 
 Dense models expose their always-active feed-forward networks separately:
 

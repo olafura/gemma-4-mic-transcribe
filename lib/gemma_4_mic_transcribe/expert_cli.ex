@@ -15,8 +15,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     artifact: :string,
     caller_artifact: :string,
     expert_artifact: :string,
-    next_artifact: :string,
-    next_caller_artifact: :string,
+    next_artifact: :keep,
+    next_caller_artifact: :keep,
     repo: :string,
     revision: :string,
     layer: :integer,
@@ -218,63 +218,42 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
         {embedding_data, first_device} =
           ExpertCaller.call_layer_device!(layer_0, opts.text, expert_scale: opts.expert_scale)
 
-        next_layer =
-          ExtractedDecoderLayer.load!(
-            opts.next_caller_artifact,
-            opts.next_artifact,
-            backend
+        first_report =
+          decoder_layer_report(
+            layer_0.manifest.layer_index,
+            first_device,
+            %{output: first_device.baseline_output}
           )
 
-        unless next_layer.manifest.layer_index == layer_0.manifest.layer_index + 1 do
-          raise ArgumentError, "next decoder artifact must immediately follow the first layer"
-        end
-
-        second =
-          next_layer
-          |> ExtractedDecoderLayer.run(first_device.output)
-          |> Nx.backend_copy(Nx.BinaryBackend)
-
-        baseline_second =
-          next_layer
-          |> ExtractedDecoderLayer.run(first_device.baseline_output)
-          |> Nx.backend_copy(Nx.BinaryBackend)
-
-        first = Nx.backend_copy(first_device, Nx.BinaryBackend)
-
-        propagated_delta =
-          second.output
-          |> Nx.as_type(:f32)
-          |> Nx.subtract(Nx.as_type(baseline_second.output, :f32))
-          |> Nx.abs()
+        {final_output, layer_reports} =
+          run_decoder_chain!(
+            opts.layers,
+            backend,
+            layer_0.manifest.layer_index + 1,
+            first_device.output,
+            first_device.baseline_output,
+            [first_report]
+          )
 
         IO.puts(
           Jason.encode!(%{
             event: "decoder_layer_chain_called",
-            layers: [layer_0.manifest.layer_index, next_layer.manifest.layer_index],
+            layers: Enum.map(layer_reports, & &1.layer),
             text: opts.text,
             expert_override: layer_0.expert.manifest.expert_index,
             expert_scale: opts.expert_scale,
-            override_route_count: Nx.to_number(first.override_route_count),
+            override_route_count:
+              first_device.override_route_count
+              |> Nx.backend_copy(Nx.BinaryBackend)
+              |> Nx.to_number(),
             tokens:
               embedding_data.tokens
               |> Enum.with_index()
               |> Enum.map(fn {token, position} ->
                 %{position: position, id: token.id, token: token.token}
               end),
-            layer_0_output_shape: Tuple.to_list(Nx.shape(first.output)),
-            layer_0_output_mean_abs:
-              first.output
-              |> Nx.as_type(:f32)
-              |> Nx.abs()
-              |> Nx.mean()
-              |> Nx.to_number(),
-            layer_1_selected_experts: Nx.to_list(second.top_k_indices),
-            layer_1_selected_weights: Nx.to_list(second.top_k_weights),
-            layer_1_output_shape: Tuple.to_list(Nx.shape(second.output)),
-            layer_1_output_mean_abs:
-              second.output |> Nx.as_type(:f32) |> Nx.abs() |> Nx.mean() |> Nx.to_number(),
-            layer_1_output_delta_mean_abs: propagated_delta |> Nx.mean() |> Nx.to_number(),
-            layer_1_output_delta_max_abs: propagated_delta |> Nx.reduce_max() |> Nx.to_number()
+            layer_reports: layer_reports,
+            final_output_shape: Tuple.to_list(Nx.shape(final_output))
           })
         )
 
@@ -545,8 +524,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
          :ok <- require_artifact(opts),
          :ok <- require_string(opts, :caller_artifact, "--caller-artifact PATH"),
          :ok <- require_string(opts, :expert_artifact, "--expert-artifact PATH"),
-         :ok <- require_string(opts, :next_artifact, "--next-artifact PATH"),
-         :ok <- require_string(opts, :next_caller_artifact, "--next-caller-artifact PATH"),
+         {:ok, layers} <- parse_layer_pairs(opts),
          :ok <- require_string(opts, :text, "--text TEXT") do
       if opts[:help] do
         {:help, usage()}
@@ -556,8 +534,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
            artifact: opts[:artifact],
            caller_artifact: opts[:caller_artifact],
            expert_artifact: opts[:expert_artifact],
-           next_artifact: opts[:next_artifact],
-           next_caller_artifact: opts[:next_caller_artifact],
+           layers: layers,
            text: opts[:text],
            expert_scale: opts[:expert_scale] || 1.0,
            backend: opts[:backend] || "exla:rocm"
@@ -585,6 +562,94 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
   defp require_string(opts, key, label) do
     if is_binary(opts[key]), do: :ok, else: {:error, "#{label} is required"}
+  end
+
+  defp parse_layer_pairs(opts) do
+    moe_artifacts = Keyword.get_values(opts, :next_artifact)
+    caller_artifacts = Keyword.get_values(opts, :next_caller_artifact)
+
+    cond do
+      moe_artifacts == [] ->
+        {:error, "at least one --next-artifact PATH is required"}
+
+      caller_artifacts == [] ->
+        {:error, "at least one --next-caller-artifact PATH is required"}
+
+      length(moe_artifacts) != length(caller_artifacts) ->
+        {:error, "--next-artifact and --next-caller-artifact counts must match"}
+
+      true ->
+        {:ok,
+         Enum.zip_with(caller_artifacts, moe_artifacts, fn caller, moe ->
+           %{caller_artifact: caller, moe_artifact: moe}
+         end)}
+    end
+  end
+
+  defp run_decoder_chain!(
+         [],
+         _backend,
+         _expected_layer,
+         output,
+         _baseline_output,
+         reports
+       ) do
+    {output, Enum.reverse(reports)}
+  end
+
+  defp run_decoder_chain!(
+         [artifact | rest],
+         backend,
+         expected_layer,
+         input,
+         baseline_input,
+         reports
+       ) do
+    layer =
+      ExtractedDecoderLayer.load!(
+        artifact.caller_artifact,
+        artifact.moe_artifact,
+        backend
+      )
+
+    unless layer.manifest.layer_index == expected_layer do
+      raise ArgumentError,
+            "expected decoder layer #{expected_layer}, got #{layer.manifest.layer_index}"
+    end
+
+    result = ExtractedDecoderLayer.run(layer, input)
+    baseline_result = ExtractedDecoderLayer.run(layer, baseline_input)
+    report = decoder_layer_report(expected_layer, result, baseline_result)
+
+    run_decoder_chain!(
+      rest,
+      backend,
+      expected_layer + 1,
+      result.output,
+      baseline_result.output,
+      [report | reports]
+    )
+  end
+
+  defp decoder_layer_report(layer, result, baseline_result) do
+    output = Nx.backend_copy(result.output, Nx.BinaryBackend)
+    baseline_output = Nx.backend_copy(baseline_result.output, Nx.BinaryBackend)
+
+    delta =
+      output
+      |> Nx.as_type(:f32)
+      |> Nx.subtract(Nx.as_type(baseline_output, :f32))
+      |> Nx.abs()
+
+    %{
+      layer: layer,
+      output_shape: Tuple.to_list(Nx.shape(output)),
+      output_mean_abs: output |> Nx.as_type(:f32) |> Nx.abs() |> Nx.mean() |> Nx.to_number(),
+      output_delta_mean_abs: delta |> Nx.mean() |> Nx.to_number(),
+      output_delta_max_abs: delta |> Nx.reduce_max() |> Nx.to_number(),
+      selected_experts: result.top_k_indices |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_list(),
+      selected_weights: result.top_k_weights |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_list()
+    }
   end
 
   defp positive(value, _name) when is_integer(value) and value > 0, do: :ok
@@ -652,7 +717,9 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                              --expert-artifact PATH --text TEXT [options]
       expert_tool call-chain --artifact MOE_PATH --caller-artifact PATH
                              --expert-artifact PATH --next-artifact MOE_PATH
-                             --next-caller-artifact PATH --text TEXT [options]
+                             --next-caller-artifact PATH
+                             [--next-artifact ... --next-caller-artifact ...]
+                             --text TEXT [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -687,9 +754,11 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     exact comparison. --expert-scale changes the inserted output for controlled
     replacement and ablation experiments.
 
-    call-chain feeds that complete layer-0 output into the next extracted
-    attention and MoE artifacts without applying embedding scaling a second
-    time.
+    call-chain feeds that complete layer-0 output through any contiguous list
+    of later decoder layers without applying embedding scaling again. Repeat
+    --next-artifact and --next-caller-artifact as an ordered pair for every
+    layer. Later layer parameters load sequentially while hidden states remain
+    on the GPU.
 
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0

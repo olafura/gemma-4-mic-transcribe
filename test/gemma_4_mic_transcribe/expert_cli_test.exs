@@ -151,12 +151,19 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
                "layer-1-moe",
                "--next-caller-artifact",
                "layer-1-caller",
+               "--next-artifact",
+               "layer-2-moe",
+               "--next-caller-artifact",
+               "layer-2-caller",
                "--text",
                "Prove the theorem."
              ])
 
-    assert chain.next_artifact == "layer-1-moe"
-    assert chain.next_caller_artifact == "layer-1-caller"
+    assert chain.layers == [
+             %{caller_artifact: "layer-1-caller", moe_artifact: "layer-1-moe"},
+             %{caller_artifact: "layer-2-caller", moe_artifact: "layer-2-moe"}
+           ]
+
     assert chain.expert_scale == 1.0
   end
 
@@ -168,6 +175,25 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
                "moe-layer",
                "--expert-artifact",
                "expert-112",
+               "--text",
+               "x"
+             ])
+
+    assert {:error, "--next-artifact and --next-caller-artifact counts must match"} =
+             ExpertCLI.parse([
+               "call-chain",
+               "--artifact",
+               "layer-0-moe",
+               "--caller-artifact",
+               "layer-0-caller",
+               "--expert-artifact",
+               "expert-112",
+               "--next-artifact",
+               "layer-1-moe",
+               "--next-artifact",
+               "layer-2-moe",
+               "--next-caller-artifact",
+               "layer-1-caller",
                "--text",
                "x"
              ])
