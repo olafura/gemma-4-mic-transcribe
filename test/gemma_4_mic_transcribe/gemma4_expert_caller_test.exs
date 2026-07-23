@@ -59,6 +59,76 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerTest do
            |> Nx.is_nan()
            |> Nx.any()
            |> Nx.to_number() == 1
+
+    cache = Nx.broadcast(Nx.tensor(0.0, type: :bf16), {5, 1, 2})
+
+    cached =
+      ExpertCaller.forward_cached(
+        embeddings,
+        attention_params,
+        moe_params,
+        cache,
+        cache,
+        Nx.tensor(0, type: :s64),
+        top_k: 2,
+        eps: 1.0e-6,
+        router_scalar: 0.5,
+        embedding_scalar: 2.0,
+        heads: 2,
+        kv_heads: 1,
+        head_dim: 2,
+        rope_theta: 10_000.0,
+        rotary_angles: 1,
+        alternative_attention: false,
+        sliding_window: 2
+      )
+
+    assert_all_close(cached.residual_after_attention, result.residual_after_attention, 1.0e-3)
+    assert Nx.to_flat_list(cached.top_k_indices) == Nx.to_flat_list(result.top_k_indices)
+
+    next_embedding = Nx.tensor([[0.125, 0.25, -0.375, 0.5]], type: :bf16)
+
+    decoded =
+      ExpertCaller.forward_cached(
+        next_embedding,
+        attention_params,
+        moe_params,
+        cached.key_cache,
+        cached.value_cache,
+        Nx.tensor(3, type: :s64),
+        top_k: 2,
+        eps: 1.0e-6,
+        router_scalar: 0.5,
+        embedding_scalar: 2.0,
+        heads: 2,
+        kv_heads: 1,
+        head_dim: 2,
+        rope_theta: 10_000.0,
+        rotary_angles: 1,
+        alternative_attention: false,
+        sliding_window: 2
+      )
+
+    complete =
+      ExpertCaller.forward(
+        Nx.concatenate([embeddings, next_embedding]),
+        attention_params,
+        moe_params,
+        top_k: 2,
+        eps: 1.0e-6,
+        router_scalar: 0.5,
+        embedding_scalar: 2.0,
+        heads: 2,
+        kv_heads: 1,
+        head_dim: 2,
+        rope_theta: 10_000.0,
+        rotary_angles: 1,
+        alternative_attention: false,
+        sliding_window: 2
+      )
+
+    expected_last = Nx.slice_along_axis(complete.residual_after_attention, 3, 1, axis: 0)
+    assert_all_close(decoded.residual_after_attention, expected_last, 1.0e-3)
   end
 
   test "feeds a preceding hidden state through a complete later decoder layer" do
@@ -192,5 +262,18 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerTest do
     |> Nx.add(1)
     |> Nx.divide(divisor)
     |> Nx.as_type(:bf16)
+  end
+
+  defp assert_all_close(left, right, tolerance) do
+    difference =
+      left
+      |> Nx.as_type(:f32)
+      |> Nx.subtract(Nx.as_type(right, :f32))
+      |> Nx.abs()
+      |> Nx.reduce_max()
+      |> Nx.to_number()
+
+    assert difference <= tolerance,
+           "maximum absolute difference #{difference} exceeds #{tolerance}"
   end
 end

@@ -25,6 +25,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
     :predict_fun,
     :layer_predict_fun,
     :layer_output_predict_fun,
+    :layer_cached_output_predict_fun,
     :backend,
     :moe_artifact
   ]
@@ -161,6 +162,59 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
         )
       end
 
+    layer_cached_output_predict_fun =
+      if mode == :complete_layer do
+        expert_index = expert.manifest.expert_index
+
+        Nx.Defn.jit(
+          fn embeddings,
+             attention_params,
+             moe_params,
+             expert_params,
+             expert_scale,
+             key_cache,
+             value_cache,
+             offset ->
+            capture =
+              forward_cached(
+                embeddings,
+                attention_params,
+                moe_params,
+                key_cache,
+                value_cache,
+                offset,
+                forward_opts
+              )
+
+            standalone_output =
+              capture.expert_input
+              |> ExtractedExpert.forward(expert_params)
+              |> Nx.as_type(:f32)
+              |> Nx.multiply(expert_scale)
+              |> Nx.as_type(Nx.type(capture.expert_input))
+
+            layer =
+              ExtractedMoeLayer.forward_with_override(
+                capture.residual_after_attention,
+                moe_params,
+                expert_index,
+                standalone_output,
+                top_k: top_k,
+                eps: eps,
+                router_scalar: router_scalar
+              )
+
+            %{
+              output: layer.output,
+              override_route_count: layer.override_route_count,
+              key_cache: capture.key_cache,
+              value_cache: capture.value_cache
+            }
+          end,
+          build_opts(backend)
+        )
+      end
+
     %__MODULE__{
       manifest: manifest,
       attention_params: attention_params,
@@ -170,6 +224,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       predict_fun: predict_fun,
       layer_predict_fun: layer_predict_fun,
       layer_output_predict_fun: layer_output_predict_fun,
+      layer_cached_output_predict_fun: layer_cached_output_predict_fun,
       backend: backend,
       moe_artifact: Path.expand(moe_artifact)
     }
@@ -293,6 +348,70 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       caller.moe_params,
       caller.expert.params,
       expert_scale
+    )
+  end
+
+  @doc "Allocates a fixed-shape attention cache for the caller's decoder layer."
+  def init_cache(%__MODULE__{} = caller, max_length)
+      when is_integer(max_length) and max_length > 0 do
+    shape = {
+      max_length,
+      caller.manifest.num_key_value_heads,
+      caller.manifest.head_dim
+    }
+
+    Nx.broadcast(Nx.tensor(0.0, type: :bf16), shape)
+    |> transfer(caller.backend)
+    |> then(&%{key: &1, value: Nx.backend_copy(&1, caller.backend)})
+  end
+
+  @doc "Runs output-only layer-0 prefill or decode with a fixed-shape cache."
+  def call_layer_cached_output_device!(
+        %__MODULE__{layer_cached_output_predict_fun: predict_fun} = caller,
+        embeddings,
+        %{key: key, value: value},
+        offset,
+        opts \\ []
+      )
+      when is_function(predict_fun) and is_integer(offset) and offset >= 0 do
+    embeddings =
+      embeddings
+      |> Nx.to_tensor()
+      |> Nx.as_type(:bf16)
+      |> transfer(caller.backend)
+
+    expected = caller.manifest.hidden_size
+    token_count = Nx.axis_size(embeddings, 0)
+    cache_length = Nx.axis_size(key, 0)
+
+    unless Nx.rank(embeddings) == 2 and elem(Nx.shape(embeddings), 1) == expected do
+      raise ArgumentError,
+            "expected layer-0 embeddings shape {tokens, #{expected}}, got #{inspect(Nx.shape(embeddings))}"
+    end
+
+    unless Nx.shape(key) == Nx.shape(value) and offset + token_count <= cache_length do
+      raise ArgumentError,
+            "layer-0 cache cannot place #{token_count} tokens at offset #{offset} " <>
+              "in cache length #{cache_length}"
+    end
+
+    expert_scale =
+      opts
+      |> Keyword.get(:expert_scale, 1.0)
+      |> Nx.tensor(type: :f32)
+      |> transfer(caller.backend)
+
+    offset = Nx.tensor(offset, type: :s64) |> transfer(caller.backend)
+
+    predict_fun.(
+      embeddings,
+      caller.attention_params,
+      caller.moe_params,
+      caller.expert.params,
+      expert_scale,
+      key,
+      value,
+      offset
     )
   end
 
@@ -495,8 +614,124 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
     }
   end
 
+  @doc false
+  defn forward_cached(
+         embeddings,
+         attention_params,
+         moe_params,
+         key_cache,
+         value_cache,
+         offset,
+         opts \\ []
+       ) do
+    eps = opts[:eps]
+    alternative_attention = opts[:alternative_attention]
+    rotary_angles = opts[:rotary_angles]
+    hidden = embeddings * opts[:embedding_scalar]
+    normed = rms_norm(hidden, attention_params.input_norm, eps)
+    token_count = Nx.axis_size(hidden, 0)
+
+    query =
+      normed
+      |> Nx.dot(Nx.transpose(attention_params.query))
+      |> Nx.reshape({token_count, opts[:heads], opts[:head_dim]})
+      |> rms_norm(attention_params.query_norm, eps)
+
+    key_projection =
+      normed
+      |> Nx.dot(Nx.transpose(attention_params.key))
+      |> Nx.reshape({token_count, opts[:kv_heads], opts[:head_dim]})
+
+    key = rms_norm(key_projection, attention_params.key_norm, eps)
+
+    value =
+      if alternative_attention do
+        rms_norm_without_scale(key_projection, eps)
+      else
+        normed
+        |> Nx.dot(Nx.transpose(attention_params.value))
+        |> Nx.reshape({token_count, opts[:kv_heads], opts[:head_dim]})
+        |> rms_norm_without_scale(eps)
+      end
+
+    positions = Nx.iota({token_count}, type: :f32) + Nx.as_type(offset, :f32)
+
+    {query, key} =
+      apply_rope_at(
+        query,
+        key,
+        opts[:head_dim],
+        opts[:rope_theta],
+        rotary_angles,
+        positions
+      )
+
+    key_cache = Nx.put_slice(key_cache, [offset, 0, 0], key)
+    value_cache = Nx.put_slice(value_cache, [offset, 0, 0], value)
+    groups = div(opts[:heads], opts[:kv_heads])
+    key = repeat_kv(key_cache, groups, opts[:heads], opts[:head_dim])
+    value = repeat_kv(value_cache, groups, opts[:heads], opts[:head_dim])
+
+    query = Nx.transpose(query, axes: [1, 0, 2])
+    key = Nx.transpose(key, axes: [1, 0, 2])
+    value = Nx.transpose(value, axes: [1, 0, 2])
+
+    scores =
+      Nx.dot(query, [2], [0], key, [2], [0])
+      |> Nx.as_type(:f32)
+
+    cache_length = Nx.axis_size(key_cache, 0)
+    query_positions = Nx.new_axis(positions, 1)
+    key_positions = Nx.iota({1, cache_length}, axis: 1, type: :f32)
+
+    causal_mask =
+      Nx.logical_and(
+        Nx.less_equal(key_positions, query_positions),
+        Nx.greater_equal(key_positions, query_positions - opts[:sliding_window] + 1)
+      )
+      |> Nx.new_axis(0)
+      |> Nx.broadcast({opts[:heads], token_count, cache_length})
+
+    scores = Nx.select(causal_mask, scores, Nx.tensor(-1.0e30))
+    weights = softmax_f32(scores)
+
+    attention =
+      Nx.dot(weights, [2], [0], value, [1], [0])
+      |> Nx.transpose(axes: [1, 0, 2])
+      |> Nx.reshape({token_count, opts[:heads] * opts[:head_dim]})
+      |> Nx.dot(Nx.transpose(attention_params.output))
+      |> rms_norm(attention_params.post_attention_norm, eps)
+
+    residual_after_attention = hidden + attention
+
+    routing =
+      ExtractedMoeLayer.route(residual_after_attention, moe_params,
+        top_k: opts[:top_k],
+        eps: eps,
+        router_scalar: opts[:router_scalar]
+      )
+
+    expert_input = rms_norm(residual_after_attention, moe_params.norm_pre_experts, eps)
+
+    %{
+      expert_input: expert_input,
+      residual_after_attention: residual_after_attention,
+      router_probabilities: routing.router_probabilities,
+      top_k_indices: routing.top_k_indices,
+      top_k_weights: routing.top_k_weights,
+      key_cache: key_cache,
+      value_cache: value_cache
+    }
+  end
+
   defnp apply_rope(query, key, head_dim, theta, rotary_angles) do
     token_count = Nx.axis_size(query, 0)
+    positions = Nx.iota({token_count}, type: :f32)
+
+    apply_rope_at(query, key, head_dim, theta, rotary_angles, positions)
+  end
+
+  defnp apply_rope_at(query, key, head_dim, theta, rotary_angles, positions) do
     half = div(head_dim, 2)
     frequency_index = Nx.iota({half}, type: :f32)
 
@@ -507,7 +742,6 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
         0.0
       )
 
-    positions = Nx.iota({token_count}, type: :f32)
     frequency = Nx.new_axis(positions, 1) * Nx.new_axis(inverse_frequency, 0)
     embedding = Nx.concatenate([frequency, frequency], axis: 1)
     cosine = embedding |> Nx.cos() |> Nx.new_axis(1)

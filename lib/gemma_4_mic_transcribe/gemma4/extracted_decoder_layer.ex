@@ -21,6 +21,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
     :moe_params,
     :predict_fun,
     :output_predict_fun,
+    :cached_predict_fun,
     :backend
   ]
 
@@ -69,6 +70,25 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
         build_opts(backend)
       )
 
+    cached_predict_fun =
+      Nx.Defn.jit(
+        fn input, attention_params, moe_params, key_cache, value_cache, offset ->
+          result =
+            forward_cached(
+              input,
+              attention_params,
+              moe_params,
+              key_cache,
+              value_cache,
+              offset,
+              attention_opts
+            )
+
+          %{output: result.output, key_cache: result.key_cache, value_cache: result.value_cache}
+        end,
+        build_opts(backend)
+      )
+
     %__MODULE__{
       manifest: manifest,
       attention_params: attention_params,
@@ -76,6 +96,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
       moe_params: moe_params,
       predict_fun: predict_fun,
       output_predict_fun: output_predict_fun,
+      cached_predict_fun: cached_predict_fun,
       backend: backend
     }
   end
@@ -90,6 +111,45 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
   def run_output(%__MODULE__{} = layer, input) do
     input = prepare_input!(layer, input)
     layer.output_predict_fun.(input, layer.attention_params, layer.moe_params)
+  end
+
+  @doc "Allocates a fixed-shape attention cache for one extracted layer."
+  def init_cache(%__MODULE__{} = layer, max_length)
+      when is_integer(max_length) and max_length > 0 do
+    shape = {
+      max_length,
+      layer.manifest.num_key_value_heads,
+      layer.manifest.head_dim
+    }
+
+    Nx.broadcast(Nx.tensor(0.0, type: :bf16), shape)
+    |> transfer(layer.backend)
+    |> then(&%{key: &1, value: Nx.backend_copy(&1, layer.backend)})
+  end
+
+  @doc "Runs prefill or one-token decode against a fixed-shape attention cache."
+  def run_cached(%__MODULE__{} = layer, input, %{key: key, value: value}, offset)
+      when is_integer(offset) and offset >= 0 do
+    input = prepare_input!(layer, input)
+    token_count = Nx.axis_size(input, 0)
+    cache_length = Nx.axis_size(key, 0)
+
+    unless Nx.shape(key) == Nx.shape(value) and offset + token_count <= cache_length do
+      raise ArgumentError,
+            "decoder cache cannot place #{token_count} tokens at offset #{offset} " <>
+              "in cache length #{cache_length}"
+    end
+
+    offset = Nx.tensor(offset, type: :s64) |> transfer(layer.backend)
+
+    layer.cached_predict_fun.(
+      input,
+      layer.attention_params,
+      layer.moe_params,
+      key,
+      value,
+      offset
+    )
   end
 
   @doc false
@@ -109,6 +169,43 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
       shared_output: feed_forward.shared_output,
       routed_output: feed_forward.routed_output,
       router_probabilities: feed_forward.router_probabilities,
+      top_k_indices: feed_forward.top_k_indices,
+      top_k_weights: feed_forward.top_k_weights
+    }
+  end
+
+  @doc false
+  defn forward_cached(
+         input,
+         attention_params,
+         moe_params,
+         key_cache,
+         value_cache,
+         offset,
+         opts \\ []
+       ) do
+    attention =
+      ExpertCaller.forward_cached(
+        input,
+        attention_params,
+        moe_params,
+        key_cache,
+        value_cache,
+        offset,
+        opts
+      )
+
+    feed_forward =
+      ExtractedMoeLayer.forward(attention.residual_after_attention, moe_params,
+        top_k: opts[:top_k],
+        eps: opts[:eps],
+        router_scalar: opts[:router_scalar]
+      )
+
+    %{
+      output: feed_forward.output,
+      key_cache: attention.key_cache,
+      value_cache: attention.value_cache,
       top_k_indices: feed_forward.top_k_indices,
       top_k_weights: feed_forward.top_k_weights
     }

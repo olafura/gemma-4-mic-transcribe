@@ -2,9 +2,9 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
   @moduledoc """
   Greedy text generation through independently extracted Gemma 4 decoder layers.
 
-  This initial generator recomputes the complete token prefix for each new
-  token. It deliberately uses the output-only layer entry points so it executes
-  one model path and does not retain diagnostic routing tensors.
+  Prefill processes the complete prompt once. Every later step processes only
+  the preceding token against fixed-shape per-layer attention K/V caches, so
+  XLA can reuse the one-token decode executable.
   """
 
   alias Gemma4MicTranscribe.Gemma4.ExpertCaller
@@ -41,15 +41,19 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
 
       embedding_data = ExpertCaller.prepare_embeddings!(first_layer, input_text)
 
-      embeddings =
+      prompt_embeddings =
         embedding_data.input
         |> Nx.as_type(:bf16)
         |> transfer(backend)
 
+      prompt_length = Nx.axis_size(prompt_embeddings, 0)
       started_at = System.monotonic_time(:microsecond)
 
       state = %{
-        embeddings: embeddings,
+        input: prompt_embeddings,
+        offset: 0,
+        cache_length: prompt_length + max_new_tokens,
+        caches: %{},
         generated_ids: [],
         steps: [],
         override_route_count: 0,
@@ -79,7 +83,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
 
       elapsed_us = System.monotonic_time(:microsecond) - started_at
       generated_ids = Enum.reverse(state.generated_ids)
-      Nx.backend_deallocate(state.embeddings)
+      Nx.backend_deallocate(state.input)
+      Nx.backend_deallocate(state.caches)
 
       %{
         input_tokens: embedding_data.tokens,
@@ -117,10 +122,17 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
           backend
         )
 
+    first_cache =
+      Map.get_lazy(state.caches, 0, fn ->
+        ExpertCaller.init_cache(first_layer, state.cache_length)
+      end)
+
     first =
-      ExpertCaller.call_layer_output_device!(
+      ExpertCaller.call_layer_cached_output_device!(
         first_layer,
-        state.embeddings,
+        state.input,
+        first_cache,
+        state.offset,
         expert_scale: expert_scale
       )
 
@@ -132,8 +144,10 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
     unload_first_layer(first_layer)
     Nx.backend_deallocate(first.override_route_count)
 
-    final_output =
-      Enum.reduce(1..29, first.output, fn layer_index, input ->
+    caches = put_cache(state.caches, 0, first_cache, first)
+
+    {final_output, caches} =
+      Enum.reduce(1..29, {first.output, caches}, fn layer_index, {input, caches} ->
         layer =
           ExtractedDecoderLayer.load!(
             layer_artifact(prefix, layer_index, "caller"),
@@ -141,21 +155,26 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
             backend
           )
 
-        output = ExtractedDecoderLayer.run_output(layer, input)
+        cache =
+          Map.get_lazy(caches, layer_index, fn ->
+            ExtractedDecoderLayer.init_cache(layer, state.cache_length)
+          end)
+
+        result = ExtractedDecoderLayer.run_cached(layer, input, cache, state.offset)
         unload_decoder_layer(layer)
         Nx.backend_deallocate(input)
-        output
+        {result.output, put_cache(caches, layer_index, cache, result)}
       end)
 
     prediction = ExtractedOutputHead.run(head, final_output, top_k: 5)
     candidates = prediction_rows(prediction, tokenizer)
     token = hd(candidates)
-    token_embedding = ExtractedOutputHead.embedding(head, token.id)
-    next_embeddings = Nx.concatenate([state.embeddings, token_embedding], axis: 0)
+    next_input = ExtractedOutputHead.embedding(head, token.id)
+    next_offset = state.offset + Nx.axis_size(state.input, 0)
 
     Nx.backend_deallocate(final_output)
     Nx.backend_deallocate(prediction)
-    Nx.backend_deallocate(state.embeddings)
+    Nx.backend_deallocate(state.input)
 
     elapsed_us = System.monotonic_time(:microsecond) - started_at
 
@@ -163,19 +182,27 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
       Map.merge(token, %{
         step: step,
         elapsed_us: elapsed_us,
-        prefix_tokens: Nx.axis_size(next_embeddings, 0)
+        prefix_tokens: next_offset + 1
       })
 
     {
       token,
       %{
-        embeddings: next_embeddings,
+        input: next_input,
+        offset: next_offset,
+        cache_length: state.cache_length,
+        caches: caches,
         generated_ids: [token.id | state.generated_ids],
         steps: [Map.put(token, :candidates, candidates) | state.steps],
         override_route_count: state.override_route_count + route_count,
         first_layer: nil
       }
     }
+  end
+
+  defp put_cache(caches, layer_index, previous, result) do
+    Nx.backend_deallocate(previous)
+    Map.put(caches, layer_index, %{key: result.key_cache, value: result.value_cache})
   end
 
   defp prediction_rows(result, tokenizer) do
