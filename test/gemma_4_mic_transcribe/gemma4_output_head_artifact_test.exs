@@ -84,6 +84,7 @@ defmodule Gemma4MicTranscribe.Gemma4.OutputHeadArtifactTest do
     expected = softcap(expected_raw)
     {expected_raw_values, expected_indices} = Nx.top_k(expected_raw, k: 3)
     expected_values = softcap(expected_raw_values)
+    greedy_hidden = Nx.backend_copy(hidden, Nx.BinaryBackend)
     result = ExtractedOutputHead.run(head, hidden, top_k: 3)
 
     assert_all_close(result.logits, expected, 1.0e-4)
@@ -91,6 +92,15 @@ defmodule Gemma4MicTranscribe.Gemma4.OutputHeadArtifactTest do
     assert_all_close(result.top_k_values, expected_values, 1.0e-4)
     assert_all_close(result.raw_top_k_values, expected_raw_values, 1.0e-4)
     assert Nx.to_flat_list(result.top_k_indices) == Nx.to_flat_list(expected_indices)
+
+    assert ExtractedOutputHead.greedy_token_id(head, greedy_hidden) ==
+             Nx.to_number(expected_indices[0])
+
+    assert_all_close(ExtractedOutputHead.embedding(head, 3), embedding[3..3], 1.0e-4)
+
+    assert_raise ArgumentError, ~r/token ID must be in/, fn ->
+      ExtractedOutputHead.embedding(head, @vocab)
+    end
   end
 
   defp reference_raw_logits(hidden, embedding, norm) do

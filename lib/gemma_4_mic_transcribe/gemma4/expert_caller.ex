@@ -24,6 +24,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
     :expert,
     :predict_fun,
     :layer_predict_fun,
+    :layer_output_predict_fun,
     :backend,
     :moe_artifact
   ]
@@ -128,6 +129,38 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
         )
       end
 
+    layer_output_predict_fun =
+      if mode == :complete_layer do
+        expert_index = expert.manifest.expert_index
+
+        Nx.Defn.jit(
+          fn embeddings, attention_params, moe_params, expert_params, expert_scale ->
+            capture = forward(embeddings, attention_params, moe_params, forward_opts)
+
+            standalone_output =
+              capture.expert_input
+              |> ExtractedExpert.forward(expert_params)
+              |> Nx.as_type(:f32)
+              |> Nx.multiply(expert_scale)
+              |> Nx.as_type(Nx.type(capture.expert_input))
+
+            layer =
+              ExtractedMoeLayer.forward_with_override(
+                capture.residual_after_attention,
+                moe_params,
+                expert_index,
+                standalone_output,
+                top_k: top_k,
+                eps: eps,
+                router_scalar: router_scalar
+              )
+
+            %{output: layer.output, override_route_count: layer.override_route_count}
+          end,
+          build_opts(backend)
+        )
+      end
+
     %__MODULE__{
       manifest: manifest,
       attention_params: attention_params,
@@ -136,6 +169,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       expert: expert,
       predict_fun: predict_fun,
       layer_predict_fun: layer_predict_fun,
+      layer_output_predict_fun: layer_output_predict_fun,
       backend: backend,
       moe_artifact: Path.expand(moe_artifact)
     }
@@ -219,6 +253,47 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       )
 
     {embedding_data, result}
+  end
+
+  @doc "Tokenizes text and loads its tied embedding rows without running layer 0."
+  def prepare_embeddings!(%__MODULE__{} = caller, text, opts \\ []) do
+    require_text_input_layer!(caller)
+    embedding_inputs!(caller, text, opts)
+  end
+
+  @doc "Runs the expert override and returns only the layer output and route count."
+  def call_layer_output_device!(
+        %__MODULE__{layer_output_predict_fun: layer_output_predict_fun} = caller,
+        embeddings,
+        opts \\ []
+      )
+      when is_function(layer_output_predict_fun) do
+    embeddings =
+      embeddings
+      |> Nx.to_tensor()
+      |> Nx.as_type(:bf16)
+      |> transfer(caller.backend)
+
+    expected = caller.manifest.hidden_size
+
+    unless Nx.rank(embeddings) == 2 and elem(Nx.shape(embeddings), 1) == expected do
+      raise ArgumentError,
+            "expected layer-0 embeddings shape {tokens, #{expected}}, got #{inspect(Nx.shape(embeddings))}"
+    end
+
+    expert_scale =
+      opts
+      |> Keyword.get(:expert_scale, 1.0)
+      |> Nx.tensor(type: :f32)
+      |> transfer(caller.backend)
+
+    layer_output_predict_fun.(
+      embeddings,
+      caller.attention_params,
+      caller.moe_params,
+      caller.expert.params,
+      expert_scale
+    )
   end
 
   @doc "Tokenizes text, captures real layer-0 expert inputs, and calls the selected expert."

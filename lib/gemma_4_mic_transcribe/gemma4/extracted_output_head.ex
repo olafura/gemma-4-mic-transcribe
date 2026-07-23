@@ -64,6 +64,27 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedOutputHead do
     }
   end
 
+  @doc "Returns the greedy raw-logit token ID for the final hidden-state row."
+  def greedy_token_id(%__MODULE__{} = head, hidden) do
+    head
+    |> run(hidden, top_k: 1)
+    |> Map.fetch!(:top_k_indices)
+    |> Nx.backend_copy(Nx.BinaryBackend)
+    |> Nx.squeeze()
+    |> Nx.to_number()
+  end
+
+  @doc "Returns one tied input-embedding row on the output head's backend."
+  def embedding(%__MODULE__{} = head, token_id)
+      when is_integer(token_id) and token_id >= 0 do
+    if token_id >= head.manifest.vocab_size do
+      raise ArgumentError,
+            "token ID must be in 0..#{head.manifest.vocab_size - 1}, got: #{token_id}"
+    end
+
+    Nx.slice_along_axis(head.params.embedding, token_id, 1, axis: 0)
+  end
+
   @doc false
   defn raw_logits(hidden, params, opts \\ []) do
     eps = opts[:eps]

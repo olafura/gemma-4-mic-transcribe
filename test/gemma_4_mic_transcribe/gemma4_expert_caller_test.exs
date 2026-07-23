@@ -166,6 +166,26 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCallerTest do
     assert Nx.shape(result.top_k_indices) == {1, 2}
   end
 
+  test "output-only decoder execution preserves the device result contract" do
+    layer = %ExtractedDecoderLayer{
+      manifest: %{hidden_size: 4},
+      attention_params: %{},
+      moe_params: %{},
+      output_predict_fun: fn input, %{}, %{} -> Nx.add(input, 1) end,
+      backend: Nx.BinaryBackend
+    }
+
+    input = Nx.tensor([[0.25, -0.5, 0.75, 1.0]], type: :f32)
+    output = ExtractedDecoderLayer.run_output(layer, input)
+
+    assert Nx.type(output) == {:bf, 16}
+    assert Nx.to_flat_list(output) == [1.25, 0.5, 1.75, 2.0]
+
+    assert_raise ArgumentError, ~r/expected decoder input shape/, fn ->
+      ExtractedDecoderLayer.run_output(layer, Nx.tensor([[1.0, 2.0]]))
+    end
+  end
+
   defp ramp(shape, divisor) do
     shape
     |> Nx.iota(type: :f32)

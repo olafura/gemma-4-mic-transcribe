@@ -20,6 +20,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
     :moe_manifest,
     :moe_params,
     :predict_fun,
+    :output_predict_fun,
     :backend
   ]
 
@@ -60,32 +61,35 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
         build_opts(backend)
       )
 
+    output_predict_fun =
+      Nx.Defn.jit(
+        fn input, attention_params, moe_params ->
+          forward(input, attention_params, moe_params, attention_opts).output
+        end,
+        build_opts(backend)
+      )
+
     %__MODULE__{
       manifest: manifest,
       attention_params: attention_params,
       moe_manifest: moe_manifest,
       moe_params: moe_params,
       predict_fun: predict_fun,
+      output_predict_fun: output_predict_fun,
       backend: backend
     }
   end
 
   @doc "Runs `[tokens, hidden]` states through attention and the complete MoE shell."
   def run(%__MODULE__{} = layer, input) do
-    input = Nx.to_tensor(input)
-    expected = layer.manifest.hidden_size
-
-    unless Nx.rank(input) == 2 and elem(Nx.shape(input), 1) == expected do
-      raise ArgumentError,
-            "expected decoder input shape {tokens, #{expected}}, got #{inspect(Nx.shape(input))}"
-    end
-
-    input =
-      input
-      |> Nx.as_type(:bf16)
-      |> transfer(layer.backend)
-
+    input = prepare_input!(layer, input)
     layer.predict_fun.(input, layer.attention_params, layer.moe_params)
+  end
+
+  @doc "Runs one layer while returning only its hidden-state output."
+  def run_output(%__MODULE__{} = layer, input) do
+    input = prepare_input!(layer, input)
+    layer.output_predict_fun.(input, layer.attention_params, layer.moe_params)
   end
 
   @doc false
@@ -113,6 +117,20 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedDecoderLayer do
   defp transfer(tensor, nil), do: tensor
   defp transfer(tensor, Nx.BinaryBackend), do: Nx.backend_copy(tensor, Nx.BinaryBackend)
   defp transfer(tensor, backend), do: Nx.backend_transfer(tensor, backend)
+
+  defp prepare_input!(layer, input) do
+    input = Nx.to_tensor(input)
+    expected = layer.manifest.hidden_size
+
+    unless Nx.rank(input) == 2 and elem(Nx.shape(input), 1) == expected do
+      raise ArgumentError,
+            "expected decoder input shape {tokens, #{expected}}, got #{inspect(Nx.shape(input))}"
+    end
+
+    input
+    |> Nx.as_type(:bf16)
+    |> transfer(layer.backend)
+  end
 
   defp build_opts(EXLA.Backend), do: [compiler: EXLA]
 
