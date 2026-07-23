@@ -13,6 +13,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
   @switches [
     artifact: :string,
+    artifact_prefix: :string,
     caller_artifact: :string,
     expert_artifact: :string,
     next_artifact: :keep,
@@ -20,6 +21,7 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     repo: :string,
     revision: :string,
     layer: :integer,
+    last_layer: :integer,
     expert: :integer,
     backend: :string,
     tokens: :integer,
@@ -543,6 +545,38 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     end
   end
 
+  def parse(["call-prefix" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_string(opts, :artifact_prefix, "--artifact-prefix PATH"),
+         :ok <- require_string(opts, :expert_artifact, "--expert-artifact PATH"),
+         :ok <- require_string(opts, :text, "--text TEXT"),
+         :ok <- decoder_layer_index(opts[:last_layer] || 29, "--last-layer") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        last_layer = opts[:last_layer] || 29
+        prefix = opts[:artifact_prefix]
+
+        {:call_chain,
+         %{
+           artifact: layer_artifact(prefix, 0, "moe"),
+           caller_artifact: layer_artifact(prefix, 0, "caller"),
+           expert_artifact: opts[:expert_artifact],
+           layers:
+             Enum.map(1..last_layer, fn layer ->
+               %{
+                 caller_artifact: layer_artifact(prefix, layer, "caller"),
+                 moe_artifact: layer_artifact(prefix, layer, "moe")
+               }
+             end),
+           text: opts[:text],
+           expert_scale: opts[:expert_scale] || 1.0,
+           backend: opts[:backend] || "exla:rocm"
+         }}
+      end
+    end
+  end
+
   def parse(["--help"]), do: {:help, usage()}
   def parse(["-h"]), do: {:help, usage()}
   def parse([]), do: {:help, usage()}
@@ -657,6 +691,13 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   defp non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
   defp non_negative(_value, name), do: {:error, "#{name} must be non-negative"}
 
+  defp decoder_layer_index(value, _name) when is_integer(value) and value in 1..29, do: :ok
+
+  defp decoder_layer_index(_value, name),
+    do: {:error, "#{name} must be an integer from 1 through 29"}
+
+  defp layer_artifact(prefix, layer, kind), do: "#{prefix}-layer#{layer}-#{kind}"
+
   defp percentile(sorted_values, quantile) do
     index = ceil((length(sorted_values) - 1) * quantile)
     Enum.at(sorted_values, index)
@@ -720,6 +761,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                              --next-caller-artifact PATH
                              [--next-artifact ... --next-caller-artifact ...]
                              --text TEXT [options]
+      expert_tool call-prefix --artifact-prefix PATH --expert-artifact PATH
+                              --text TEXT [--last-layer INDEX] [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -760,6 +803,10 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     layer. Later layer parameters load sequentially while hidden states remain
     on the GPU.
 
+    call-prefix derives that ordered list from artifacts named
+    PREFIX-layer0-moe, PREFIX-layer0-caller, and so on. It runs through layer
+    29 by default; --last-layer can stop earlier for prefix experiments.
+
       --backend BACKEND     Default exla:rocm
       --expert-scale FLOAT  Standalone expert output multiplier, default 1.0
       --tokens N            Input rows, default 1
@@ -779,7 +826,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
                "profile-math",
                "call-expert",
                "call-layer",
-               "call-chain"
+               "call-chain",
+               "call-prefix"
              ] do
       IO.puts(
         :stderr,

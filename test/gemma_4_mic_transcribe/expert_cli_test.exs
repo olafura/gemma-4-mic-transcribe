@@ -165,6 +165,41 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
            ]
 
     assert chain.expert_scale == 1.0
+
+    assert {:call_chain, prefix} =
+             ExpertCLI.parse([
+               "call-prefix",
+               "--artifact-prefix",
+               "artifacts/gemma4-26b",
+               "--expert-artifact",
+               "expert-112",
+               "--last-layer",
+               "3",
+               "--expert-scale",
+               "0.0",
+               "--text",
+               "Prove the theorem."
+             ])
+
+    assert prefix.artifact == "artifacts/gemma4-26b-layer0-moe"
+    assert prefix.caller_artifact == "artifacts/gemma4-26b-layer0-caller"
+
+    assert prefix.layers == [
+             %{
+               caller_artifact: "artifacts/gemma4-26b-layer1-caller",
+               moe_artifact: "artifacts/gemma4-26b-layer1-moe"
+             },
+             %{
+               caller_artifact: "artifacts/gemma4-26b-layer2-caller",
+               moe_artifact: "artifacts/gemma4-26b-layer2-moe"
+             },
+             %{
+               caller_artifact: "artifacts/gemma4-26b-layer3-caller",
+               moe_artifact: "artifacts/gemma4-26b-layer3-moe"
+             }
+           ]
+
+    assert prefix.expert_scale == 0.0
   end
 
   test "validates caller command paths and text" do
@@ -194,6 +229,19 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
                "layer-2-moe",
                "--next-caller-artifact",
                "layer-1-caller",
+               "--text",
+               "x"
+             ])
+
+    assert {:error, "--last-layer must be an integer from 1 through 29"} =
+             ExpertCLI.parse([
+               "call-prefix",
+               "--artifact-prefix",
+               "artifacts/gemma4-26b",
+               "--expert-artifact",
+               "expert-112",
+               "--last-layer",
+               "30",
                "--text",
                "x"
              ])

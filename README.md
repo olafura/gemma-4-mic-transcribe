@@ -244,6 +244,13 @@ mix gemma.expert call-chain \
   --next-caller-artifact artifacts/gemma4-26b-layer2-caller \
   --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
   --expert-scale 0.0 --backend exla:rocm
+
+mix gemma.expert call-prefix \
+  --artifact-prefix artifacts/gemma4-26b \
+  --expert-artifact artifacts/gemma4-26b-layer0-expert112 \
+  --last-layer 5 \
+  --text "Solve the quadratic equation and prove the theorem using a matrix determinant." \
+  --expert-scale 0.0 --backend exla:rocm
 ```
 
 The caller loads only the router and routed-input norm from the MoE artifact.
@@ -295,12 +302,19 @@ shared K/V heads, and proportional partial RoPE. The real layer-5 caller
 validated that path across both checkpoint shards: 49,027,584 BF16 parameters
 (98,055,722 artifact bytes), with no duplicate value projection.
 
-The real three-layer chain produced `{14, 2816}` at every boundary, with fresh
+The initial three-layer chain produced `{14, 2816}` at every boundary, with fresh
 top-8 routing decisions per token and layer. Ablating layer-0 expert 112
 propagated mean absolute output deltas of `0.02313` at layer 1 and `0.01902` at
-layer 2; the corresponding maxima were `7.5370` and `5.7120`. The effect is now
-observable across an arbitrary extracted decoder-layer chain, though this run
-still covers only three of 30 layers.
+layer 2; the corresponding maxima were `7.5370` and `5.7120`. The effect is
+observable across an arbitrary extracted decoder-layer chain.
+
+The chain has since been extended through layer 5, the first full-attention
+block. The layer-0 ablation remained measurable there with mean absolute output
+delta `0.02374` and maximum delta `2.7935`, against mean absolute activation
+`0.53446`. The full six-layer run took 47.6 seconds including application
+startup, loading six MoE artifacts, and first-time XLA compilation. Use
+`call-prefix` to derive a validated ordered chain from the
+`PREFIX-layerN-{moe,caller}` names instead of repeating two flags per layer.
 
 Dense models expose their always-active feed-forward networks separately:
 
