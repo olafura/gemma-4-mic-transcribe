@@ -435,6 +435,16 @@ in warm request processing time and a 79.4% reduction in warm prefill. It
 preserved the greedy output `To solve a quadratic`. The decode-only cache used
 5.63 GiB across 473 experts with zero evictions.
 
+The decode cache now stores those experts as one contiguous GPU table per
+layer. Router IDs map directly to resident table slots inside the sparse XLA
+finish graph; the old path copied and concatenated eight individual matrices
+for every layer and token. On the same warm request, decode fell from
+1.07–1.52 seconds per token to 78–84 milliseconds per token. Total four-token
+processing fell again from 13.62 to 10.18 seconds, of which 9.93 seconds was
+prefill. The 29 tables occupied 5.61 GiB across 472 exact BF16 experts with no
+evictions, survived repeated XLA calls without buffer donation, and preserved
+`To solve a quadratic`.
+
 Transient expert banks, request K/V caches, and terminated model resources are
 explicitly released with `Nx.backend_deallocate/1`. Erlang's
 [per-process generational collector](https://www.erlang.org/doc/apps/erts/garbagecollection.html)
