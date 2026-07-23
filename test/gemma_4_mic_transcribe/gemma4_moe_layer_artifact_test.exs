@@ -97,6 +97,60 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
     assert_all_close(actual.shared_output, expected.shared_output, 2.0e-2)
     assert_all_close(actual.routed_output, expected.routed_output, 2.0e-2)
     assert_all_close(actual.output, expected.output, 2.0e-2)
+
+    override_expert =
+      actual.top_k_indices
+      |> Nx.slice([0, 0], [1, 1])
+      |> Nx.squeeze()
+      |> Nx.to_number()
+
+    {_, override_params} = MoeLayerArtifact.load!(artifact, Torchx.Backend)
+
+    override_input =
+      Nx.tensor(
+        [
+          [0.25, -0.5, 0.75, 1.0],
+          [-1.0, 0.125, 0.5, -0.25]
+        ],
+        type: :bf16
+      )
+
+    override_output = standalone_expert_output(override_input, override_params, override_expert)
+
+    overridden =
+      ExtractedMoeLayer.forward_with_override(
+        override_input,
+        override_params,
+        override_expert,
+        override_output,
+        top_k: @top_k,
+        eps: @eps,
+        router_scalar: @hidden ** -0.5
+      )
+
+    expected_routes =
+      actual.top_k_indices
+      |> Nx.equal(override_expert)
+      |> Nx.as_type(:s64)
+      |> Nx.sum()
+      |> Nx.to_number()
+
+    assert Nx.to_number(overridden.override_route_count) == expected_routes
+    assert_all_close(overridden.baseline_output, actual.output, 2.0e-2)
+    assert_all_close(overridden.output, actual.output, 2.0e-2)
+
+    ablated =
+      ExtractedMoeLayer.forward_with_override(
+        override_input,
+        override_params,
+        override_expert,
+        Nx.broadcast(0.0, Nx.shape(override_input)),
+        top_k: @top_k,
+        eps: @eps,
+        router_scalar: @hidden ** -0.5
+      )
+
+    assert max_abs_difference(ablated.output, ablated.baseline_output) > 0.0
   end
 
   defp synthetic_tensors do
@@ -239,6 +293,25 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
     Nx.dot(hidden, Nx.transpose(down))
   end
 
+  defp standalone_expert_output(input, params, expert_index) do
+    gate_up =
+      params.experts_gate_up
+      |> Nx.slice_along_axis(expert_index, 1, axis: 0)
+      |> Nx.squeeze(axes: [0])
+
+    gate = Nx.slice_along_axis(gate_up, 0, @expert, axis: 0)
+    up = Nx.slice_along_axis(gate_up, @expert, @expert, axis: 0)
+
+    down =
+      params.experts_down
+      |> Nx.slice_along_axis(expert_index, 1, axis: 0)
+      |> Nx.squeeze(axes: [0])
+
+    input
+    |> rms_norm(params.norm_pre_experts)
+    |> expert_forward(gate, up, down)
+  end
+
   defp rms_norm(input, weight) do
     input
     |> rms_norm_without_scale()
@@ -267,15 +340,18 @@ defmodule Gemma4MicTranscribe.Gemma4.MoeLayerArtifactTest do
   end
 
   defp assert_all_close(left, right, tolerance \\ 1.0e-6) do
-    max_difference =
-      left
-      |> Nx.as_type(:f32)
-      |> Nx.subtract(Nx.as_type(right, :f32))
-      |> Nx.abs()
-      |> Nx.reduce_max()
-      |> Nx.to_number()
+    max_difference = max_abs_difference(left, right)
 
     assert max_difference <= tolerance,
            "maximum absolute difference #{max_difference} exceeds #{tolerance}"
+  end
+
+  defp max_abs_difference(left, right) do
+    left
+    |> Nx.as_type(:f32)
+    |> Nx.subtract(Nx.as_type(right, :f32))
+    |> Nx.abs()
+    |> Nx.reduce_max()
+    |> Nx.to_number()
   end
 end

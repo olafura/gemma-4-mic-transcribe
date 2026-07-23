@@ -108,6 +108,77 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
     }
   end
 
+  @doc """
+  Runs the complete shell while replacing one routed expert's raw output.
+
+  `override_output` has shape `[tokens, hidden]`. It is inserted only where
+  `override_expert` occurs in the router's top-k selection. The unchanged
+  baseline is returned from the same routed-expert calculation for comparison.
+  """
+  defn forward_with_override(input, params, override_expert, override_output, opts \\ []) do
+    top_k = opts[:top_k]
+    eps = opts[:eps]
+    router_scalar = opts[:router_scalar]
+    residual = input
+
+    shared_input = rms_norm(residual, params.norm_pre_shared, eps)
+
+    shared =
+      expert_forward(shared_input, params.shared_gate, params.shared_up, params.shared_down)
+
+    shared = rms_norm(shared, params.norm_post_shared, eps)
+
+    routing =
+      route(residual, params,
+        top_k: top_k,
+        eps: eps,
+        router_scalar: router_scalar
+      )
+
+    routed_input = rms_norm(residual, params.norm_pre_experts, eps)
+
+    expert_outputs =
+      routed_expert_outputs(
+        routed_input,
+        routing.top_k_indices,
+        params
+      )
+
+    override_mask = Nx.equal(routing.top_k_indices, override_expert)
+
+    overridden_expert_outputs =
+      Nx.select(
+        override_mask |> Nx.new_axis(-1) |> Nx.broadcast(Nx.shape(expert_outputs)),
+        override_output |> Nx.new_axis(1) |> Nx.broadcast(Nx.shape(expert_outputs)),
+        expert_outputs
+      )
+
+    baseline_routed =
+      expert_outputs
+      |> combine_routed_expert_outputs(routing.top_k_weights, Nx.type(input))
+      |> rms_norm(params.norm_post_experts, eps)
+
+    overridden_routed =
+      overridden_expert_outputs
+      |> combine_routed_expert_outputs(routing.top_k_weights, Nx.type(input))
+      |> rms_norm(params.norm_post_experts, eps)
+
+    baseline_combined = rms_norm(shared + baseline_routed, params.norm_post_combined, eps)
+    overridden_combined = rms_norm(shared + overridden_routed, params.norm_post_combined, eps)
+
+    %{
+      output: (residual + overridden_combined) * params.layer_scalar,
+      baseline_output: (residual + baseline_combined) * params.layer_scalar,
+      shared_output: shared,
+      routed_output: overridden_routed,
+      baseline_routed_output: baseline_routed,
+      router_probabilities: routing.router_probabilities,
+      top_k_indices: routing.top_k_indices,
+      top_k_weights: routing.top_k_weights,
+      override_route_count: override_mask |> Nx.as_type(:s64) |> Nx.sum()
+    }
+  end
+
   @doc false
   defn route(input, params, opts \\ []) do
     top_k = opts[:top_k]
@@ -132,6 +203,12 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
   end
 
   defnp routed_experts(input, indices, weights, params) do
+    input
+    |> routed_expert_outputs(indices, params)
+    |> combine_routed_expert_outputs(weights, Nx.type(input))
+  end
+
+  defnp routed_expert_outputs(input, indices, params) do
     selected_gate_up = Nx.take(params.experts_gate_up, indices, axis: 0)
     selected_down = Nx.take(params.experts_down, indices, axis: 0)
     token_count = Nx.axis_size(input, 0)
@@ -156,15 +233,16 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer do
       (Bumblebee.Layers.gelu_approx_tanh(gate) * up)
       |> Nx.new_axis(-1)
 
-    expert_outputs =
-      Nx.dot(selected_down, [3], [0, 1], hidden, [2], [0, 1])
-      |> Nx.squeeze(axes: [3])
+    Nx.dot(selected_down, [3], [0, 1], hidden, [2], [0, 1])
+    |> Nx.squeeze(axes: [3])
+  end
 
+  defnp combine_routed_expert_outputs(expert_outputs, weights, output_type) do
     expert_outputs
     |> Nx.as_type(:f32)
     |> Nx.multiply(Nx.new_axis(weights, -1))
     |> Nx.sum(axes: [1])
-    |> Nx.as_type(Nx.type(input))
+    |> Nx.as_type(output_type)
   end
 
   defnp expert_forward(input, gate_weight, up_weight, down_weight) do

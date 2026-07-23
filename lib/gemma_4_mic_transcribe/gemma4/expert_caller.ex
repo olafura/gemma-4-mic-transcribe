@@ -23,14 +23,30 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
     :moe_params,
     :expert,
     :predict_fun,
+    :layer_predict_fun,
     :backend,
     :moe_artifact
   ]
 
   @doc "Loads the extracted attention prefix, MoE caller tensors, and expert."
   def load!(caller_artifact, moe_artifact, expert_artifact, backend) do
+    load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, :caller)
+  end
+
+  @doc "Loads the attention prefix, complete MoE shell, and standalone expert override."
+  def load_layer!(caller_artifact, moe_artifact, expert_artifact, backend) do
+    load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, :complete_layer)
+  end
+
+  defp load_with_mode!(caller_artifact, moe_artifact, expert_artifact, backend, mode) do
     {manifest, attention_params} = ExpertCallerArtifact.load!(caller_artifact, backend)
-    {moe_manifest, moe_params} = MoeLayerArtifact.load_caller!(moe_artifact, backend)
+
+    {moe_manifest, moe_params} =
+      case mode do
+        :caller -> MoeLayerArtifact.load_caller!(moe_artifact, backend)
+        :complete_layer -> MoeLayerArtifact.load!(moe_artifact, backend)
+      end
+
     expert = ExtractedExpert.load!(expert_artifact, backend)
 
     unless manifest.layer_index == moe_manifest.layer_index and
@@ -43,23 +59,70 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
     router_scalar = manifest.hidden_size ** -0.5
     embedding_scalar = manifest.hidden_size ** 0.5
 
+    forward_opts = [
+      top_k: top_k,
+      eps: eps,
+      router_scalar: router_scalar,
+      embedding_scalar: embedding_scalar,
+      heads: manifest.num_attention_heads,
+      kv_heads: manifest.num_key_value_heads,
+      head_dim: manifest.head_dim,
+      rope_theta: manifest.rope_theta,
+      sliding_window: Map.get(manifest, :sliding_window, 1024)
+    ]
+
     predict_fun =
       Nx.Defn.jit(
         fn embeddings, attention_params, moe_params ->
-          forward(embeddings, attention_params, moe_params,
-            top_k: top_k,
-            eps: eps,
-            router_scalar: router_scalar,
-            embedding_scalar: embedding_scalar,
-            heads: manifest.num_attention_heads,
-            kv_heads: manifest.num_key_value_heads,
-            head_dim: manifest.head_dim,
-            rope_theta: manifest.rope_theta,
-            sliding_window: Map.get(manifest, :sliding_window, 1024)
-          )
+          forward(embeddings, attention_params, moe_params, forward_opts)
         end,
         build_opts(backend)
       )
+
+    layer_predict_fun =
+      if mode == :complete_layer do
+        expert_index = expert.manifest.expert_index
+
+        Nx.Defn.jit(
+          fn embeddings, attention_params, moe_params, expert_params, expert_scale ->
+            capture = forward(embeddings, attention_params, moe_params, forward_opts)
+
+            standalone_output =
+              capture.expert_input
+              |> ExtractedExpert.forward(expert_params)
+              |> Nx.as_type(:f32)
+              |> Nx.multiply(expert_scale)
+              |> Nx.as_type(Nx.type(capture.expert_input))
+
+            layer =
+              ExtractedMoeLayer.forward_with_override(
+                capture.residual_after_attention,
+                moe_params,
+                expert_index,
+                standalone_output,
+                top_k: top_k,
+                eps: eps,
+                router_scalar: router_scalar
+              )
+
+            %{
+              output: layer.output,
+              baseline_output: layer.baseline_output,
+              shared_output: layer.shared_output,
+              routed_output: layer.routed_output,
+              baseline_routed_output: layer.baseline_routed_output,
+              router_probabilities: layer.router_probabilities,
+              top_k_indices: layer.top_k_indices,
+              top_k_weights: layer.top_k_weights,
+              override_route_count: layer.override_route_count,
+              expert_input: capture.expert_input,
+              standalone_output: standalone_output,
+              residual_after_attention: capture.residual_after_attention
+            }
+          end,
+          build_opts(backend)
+        )
+      end
 
     %__MODULE__{
       manifest: manifest,
@@ -68,21 +131,82 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       moe_params: moe_params,
       expert: expert,
       predict_fun: predict_fun,
+      layer_predict_fun: layer_predict_fun,
       backend: backend,
       moe_artifact: Path.expand(moe_artifact)
     }
   end
 
+  @doc """
+  Runs text through layer 0 and inserts the standalone expert into the MoE shell.
+
+  `:expert_scale` defaults to `1.0`. Other values provide a simple controlled
+  Frankenstein-model experiment while retaining the unchanged baseline output.
+  """
+  def call_layer_text!(
+        %__MODULE__{layer_predict_fun: layer_predict_fun} = caller,
+        text,
+        opts \\ []
+      )
+      when is_function(layer_predict_fun) do
+    embedding_data = embedding_inputs!(caller, text, opts)
+
+    embeddings =
+      embedding_data.input
+      |> Nx.as_type(:bf16)
+      |> transfer(caller.backend)
+
+    expert_scale =
+      opts
+      |> Keyword.get(:expert_scale, 1.0)
+      |> Nx.tensor(type: :f32)
+      |> transfer(caller.backend)
+
+    result =
+      layer_predict_fun.(
+        embeddings,
+        caller.attention_params,
+        caller.moe_params,
+        caller.expert.params,
+        expert_scale
+      )
+      |> Nx.backend_copy(Nx.BinaryBackend)
+
+    expert_index = caller.expert.manifest.expert_index
+    selected = selected_calls(result, embedding_data.tokens, expert_index)
+    positions = Enum.map(selected, & &1.position)
+
+    delta =
+      result.output
+      |> Nx.as_type(:f32)
+      |> Nx.subtract(Nx.as_type(result.baseline_output, :f32))
+
+    %{
+      text: text,
+      tokens: embedding_data.tokens,
+      expert: expert_index,
+      expert_scale: Keyword.get(opts, :expert_scale, 1.0),
+      selected_calls: selected,
+      expert_inputs: take_rows(result.expert_input, positions),
+      expert_outputs: take_rows(result.standalone_output, positions),
+      layer_output: result.output,
+      baseline_layer_output: result.baseline_output,
+      layer_output_delta_mean_abs: delta |> Nx.abs() |> Nx.mean() |> Nx.to_number(),
+      layer_output_delta_max_abs: delta |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number(),
+      override_route_count: Nx.to_number(result.override_route_count),
+      shared_output: result.shared_output,
+      routed_output: result.routed_output,
+      baseline_routed_output: result.baseline_routed_output,
+      residual_after_attention: result.residual_after_attention,
+      router_probabilities: result.router_probabilities,
+      top_k_indices: result.top_k_indices,
+      top_k_weights: result.top_k_weights
+    }
+  end
+
   @doc "Tokenizes text, captures real layer-0 expert inputs, and calls the selected expert."
   def call_text!(%__MODULE__{} = caller, text, opts \\ []) do
-    embedding_data =
-      MathExpertProfiler.embedding_inputs!(
-        caller.moe_artifact,
-        [text],
-        opts
-        |> Keyword.put_new(:prepend_bos, true)
-        |> Keyword.put_new(:max_concurrency, 8)
-      )
+    embedding_data = embedding_inputs!(caller, text, opts)
 
     embeddings =
       embedding_data.input
@@ -119,6 +243,16 @@ defmodule Gemma4MicTranscribe.Gemma4.ExpertCaller do
       top_k_indices: capture.top_k_indices,
       top_k_weights: capture.top_k_weights
     }
+  end
+
+  defp embedding_inputs!(caller, text, opts) do
+    MathExpertProfiler.embedding_inputs!(
+      caller.moe_artifact,
+      [text],
+      opts
+      |> Keyword.put_new(:prepend_bos, true)
+      |> Keyword.put_new(:max_concurrency, 8)
+    )
   end
 
   defp expert_inputs(caller, input, positions) do
