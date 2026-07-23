@@ -37,8 +37,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
           layer_artifact(prefix, 0, "caller"),
           layer_artifact(prefix, 0, "moe"),
           expert_artifact,
-          backend,
-          verify_checksum: false
+          backend
         )
 
       embedding_data = ExpertCaller.prepare_embeddings!(first_layer, input_text)
@@ -56,6 +55,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         offset: 0,
         cache_length: prompt_length + max_new_tokens,
         caches: %{},
+        sparse_layers: %{},
         generated_ids: [],
         steps: [],
         override_route_count: 0,
@@ -87,6 +87,8 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
       generated_ids = Enum.reverse(state.generated_ids)
       Nx.backend_deallocate(state.input)
       Nx.backend_deallocate(state.caches)
+      unload_first_layer(state.first_layer)
+      Enum.each(state.sparse_layers, fn {_index, layer} -> unload_decoder_layer(layer) end)
 
       %{
         input_tokens: embedding_data.tokens,
@@ -106,7 +108,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
   defp decode_one!(
          state,
          prefix,
-         expert_artifact,
+         _expert_artifact,
          head,
          tokenizer,
          backend,
@@ -115,14 +117,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
        ) do
     started_at = System.monotonic_time(:microsecond)
 
-    first_layer =
-      state.first_layer ||
-        ExpertCaller.load_layer!(
-          layer_artifact(prefix, 0, "caller"),
-          layer_artifact(prefix, 0, "moe"),
-          expert_artifact,
-          backend
-        )
+    first_layer = state.first_layer
 
     first_cache =
       Map.get_lazy(state.caches, 0, fn ->
@@ -143,28 +138,41 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
       |> Nx.backend_copy(Nx.BinaryBackend)
       |> Nx.to_number()
 
-    unload_first_layer(first_layer)
     Nx.backend_deallocate(first.override_route_count)
 
     caches = put_cache(state.caches, 0, first_cache, first)
 
-    {final_output, caches} =
-      Enum.reduce(1..29, {first.output, caches}, fn layer_index, {input, caches} ->
-        {layer, cache, result} =
-          run_later_layer!(
-            prefix,
-            layer_index,
-            backend,
-            input,
-            caches,
-            state.offset,
-            state.cache_length
-          )
+    {final_output, caches, sparse_layers} =
+      Enum.reduce(
+        1..29,
+        {first.output, caches, state.sparse_layers},
+        fn layer_index, {input, caches, sparse_layers} ->
+          {layer, cache, result, retain?} =
+            run_later_layer!(
+              prefix,
+              layer_index,
+              backend,
+              input,
+              caches,
+              sparse_layers,
+              state.offset,
+              state.cache_length
+            )
 
-        unload_decoder_layer(layer)
-        Nx.backend_deallocate(input)
-        {result.output, put_cache(caches, layer_index, cache, result)}
-      end)
+          unless retain?, do: unload_decoder_layer(layer)
+
+          sparse_layers =
+            if retain?, do: Map.put(sparse_layers, layer_index, layer), else: sparse_layers
+
+          Nx.backend_deallocate(input)
+
+          {
+            result.output,
+            put_cache(caches, layer_index, cache, result),
+            sparse_layers
+          }
+        end
+      )
 
     prediction = ExtractedOutputHead.run(head, final_output, top_k: 5)
     candidates = prediction_rows(prediction, tokenizer)
@@ -192,10 +200,11 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         offset: next_offset,
         cache_length: state.cache_length,
         caches: caches,
+        sparse_layers: sparse_layers,
         generated_ids: [token.id | state.generated_ids],
         steps: [Map.put(token, :candidates, candidates) | state.steps],
         override_route_count: state.override_route_count + route_count,
-        first_layer: nil
+        first_layer: first_layer
       }
     }
   end
@@ -211,6 +220,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
          backend,
          input,
          caches,
+         _sparse_layers,
          0,
          cache_length
        ) do
@@ -226,7 +236,7 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
         ExtractedDecoderLayer.init_cache(layer, cache_length)
       end)
 
-    {layer, cache, ExtractedDecoderLayer.run_cached(layer, input, cache, 0)}
+    {layer, cache, ExtractedDecoderLayer.run_cached(layer, input, cache, 0), false}
   end
 
   defp run_later_layer!(
@@ -235,23 +245,26 @@ defmodule Gemma4MicTranscribe.Gemma4.ExtractedGenerator do
          backend,
          input,
          caches,
+         sparse_layers,
          offset,
          cache_length
        ) do
     layer =
-      ExtractedSparseDecoderLayer.load!(
-        layer_artifact(prefix, layer_index, "caller"),
-        layer_artifact(prefix, layer_index, "moe"),
-        backend,
-        verify_checksum: false
-      )
+      Map.get_lazy(sparse_layers, layer_index, fn ->
+        ExtractedSparseDecoderLayer.load!(
+          layer_artifact(prefix, layer_index, "caller"),
+          layer_artifact(prefix, layer_index, "moe"),
+          backend,
+          verify_checksum: false
+        )
+      end)
 
     cache =
       Map.get_lazy(caches, layer_index, fn ->
         ExtractedSparseDecoderLayer.init_cache(layer, cache_length)
       end)
 
-    {layer, cache, ExtractedSparseDecoderLayer.run_cached(layer, input, cache, offset)}
+    {layer, cache, ExtractedSparseDecoderLayer.run_cached(layer, input, cache, offset), true}
   end
 
   defp prediction_rows(result, tokenizer) do
