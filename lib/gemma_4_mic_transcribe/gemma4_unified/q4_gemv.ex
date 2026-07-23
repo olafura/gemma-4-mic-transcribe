@@ -138,23 +138,30 @@ defimpl EXLA.CustomCall, for: Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
     with {:bf, 16} <- Nx.type(x),
          {:s, 32} <- Nx.type(packed),
          {:bf, 16} <- Nx.type(scales) do
-      # Decode passes one token as {k}; prefill passes {seq, k}.
+      # Decode passes one token as {k}; prefill passes {seq, k}. CUDA's
+      # generic rank-2 path uses its tuned GEMM implementation and is faster
+      # than our simple packed kernel, while packed GEMV wins decisively.
       target =
-        case Nx.rank(x) do
-          1 -> "exla_q4_gemv"
-          2 -> "exla_q4_gemm"
+        case {platform, Nx.rank(x)} do
+          {_, 1} -> "exla_q4_gemv"
+          {:rocm, 2} -> "exla_q4_gemm"
+          {:cuda, 2} -> nil
         end
 
-      Logger.info(fn ->
-        "q4_gemv: #{target} selected for #{inspect(Nx.shape(packed))} " <>
-          "x=#{inspect(Nx.shape(x))} group_size=#{group_size}"
-      end)
+      if target do
+        Logger.info(fn ->
+          "q4_gemv: #{target} selected for #{inspect(Nx.shape(packed))} " <>
+            "x=#{inspect(Nx.shape(x))} group_size=#{group_size}"
+        end)
 
-      {:ok,
-       %EXLA.CustomCall.Spec{
-         call_target_name: target,
-         attributes: [{"group_size", "#{group_size} : i64"}]
-       }}
+        {:ok,
+         %EXLA.CustomCall.Spec{
+           call_target_name: target,
+           attributes: [{"group_size", "#{group_size} : i64"}]
+         }}
+      else
+        :skip
+      end
     else
       _other ->
         # Silent fallback here costs the whole point of the kernel, so say so.
