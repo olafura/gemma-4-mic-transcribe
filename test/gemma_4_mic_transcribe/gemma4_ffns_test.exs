@@ -62,10 +62,16 @@ defmodule Gemma4MicTranscribe.Gemma4.FFNsTest do
     end
   end
 
-  test "accounts for double-wide FFNs" do
-    config = put_in(@dense_config, ["text_config", "use_double_wide_mlp"], true)
+  test "uses double-wide FFNs only in the KV-sharing suffix" do
+    config =
+      @dense_config
+      |> put_in(["text_config", "use_double_wide_mlp"], true)
+      |> put_in(["text_config", "num_kv_shared_layers"], 1)
 
-    assert [%{intermediate_size: 32, parameter_count: 768} | _] = FFNs.list(config)
+    assert [
+             %{layer_index: 0, intermediate_size: 16, parameter_count: 384},
+             %{layer_index: 1, intermediate_size: 32, parameter_count: 768}
+           ] = FFNs.list(config)
   end
 
   test "identifies the dense FFN in an MoE layer as the shared expert" do

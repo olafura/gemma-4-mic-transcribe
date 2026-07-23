@@ -84,7 +84,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
         name: join(name, "self_attention_norm")
       )
 
-    {attention_output, block_cache, key, value} =
+    {attention_output, block_cache, shared_kv} =
       self_attention(
         normed,
         position_ids,
@@ -108,7 +108,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
     hidden_state =
       hidden_state
       |> rms_norm(spec.layer_norm_epsilon, name: join(name, "pre_ffn_norm"))
-      |> gated_ffn(spec, name: join(name, "ffn"))
+      |> gated_ffn(spec, index, name: join(name, "ffn"))
       |> rms_norm(spec.layer_norm_epsilon, name: join(name, "post_ffn_norm"))
       |> then(&Axon.add(shortcut, &1))
 
@@ -126,7 +126,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
       shared:
         if(shared?,
           do: state.shared,
-          else: Map.put(state.shared, layer_type, {key, value})
+          else: Map.put(state.shared, layer_type, shared_kv)
         )
     }
   end
@@ -145,9 +145,6 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
        ) do
     name = opts[:name]
 
-    {self_attention_cache, cross_attention_cache} =
-      Layers.Decoder.get_attention_caches(block_cache)
-
     full? = layer_type == :full_attention
     head_size = if full?, do: spec.global_attention_head_size, else: spec.attention_head_size
     num_kv_heads = spec.num_key_value_heads
@@ -161,13 +158,28 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
       |> Layers.split_heads(spec.num_attention_heads)
       |> rms_norm(spec.layer_norm_epsilon, name: join(name, "query_norm"))
 
-    {key, value} =
+    {rotary_query, cached_key, cached_value, block_cache, shared_kv} =
       if shared? and shared_kv != nil do
-        # The checkpoint keeps k_proj and v_proj for these blocks, so sharing
-        # is of the cached state rather than of the weights: the block reuses
-        # what the last computing block of the same type put in the cache.
-        shared_kv
+        # Shared layers consume the complete, already-rotated K/V state from
+        # the last non-sharing layer of this attention type. They must not put
+        # that state into their one-token placeholder cache.
+        {rotary_query, _unused_key} =
+          rotary_embedding(
+            query,
+            query,
+            position_ids,
+            attention_mask,
+            layer_type,
+            head_size,
+            spec
+          )
+
+        {cached_key, cached_value} = shared_kv
+        {rotary_query, cached_key, cached_value, block_cache, shared_kv}
       else
+        {self_attention_cache, cross_attention_cache} =
+          Layers.Decoder.get_attention_caches(block_cache)
+
         key =
           hidden_state
           |> Axon.dense(num_kv_heads * head_size, use_bias: false, name: join(name, "key"))
@@ -195,23 +207,39 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
             |> Nx.as_type(Nx.type(value))
           end)
 
-        {key, value}
+        {rotary_query, rotary_key} =
+          rotary_embedding(
+            query,
+            key,
+            position_ids,
+            attention_mask,
+            layer_type,
+            head_size,
+            spec
+          )
+
+        groups = div(spec.num_attention_heads, num_kv_heads)
+        repeated_key = repeat_kv(rotary_key, groups)
+        repeated_value = repeat_kv(value, groups)
+
+        {cached_key, cached_value, self_attention_cache} =
+          Layers.Decoder.cached_attention_key_values(
+            repeated_key,
+            repeated_value,
+            self_attention_cache,
+            offset
+          )
+
+        block_cache =
+          Layers.Decoder.put_attention_caches(
+            block_cache,
+            self_attention_cache,
+            cross_attention_cache
+          )
+
+        shared_kv = {cached_key, cached_value}
+        {rotary_query, cached_key, cached_value, block_cache, shared_kv}
       end
-
-    {rotary_query, rotary_key} =
-      rotary_embedding(query, key, position_ids, attention_mask, layer_type, head_size, spec)
-
-    groups = div(spec.num_attention_heads, num_kv_heads)
-    repeated_key = repeat_kv(rotary_key, groups)
-    repeated_value = repeat_kv(value, groups)
-
-    {cached_key, cached_value, self_attention_cache} =
-      Layers.Decoder.cached_attention_key_values(
-        repeated_key,
-        repeated_value,
-        self_attention_cache,
-        offset
-      )
 
     window_size =
       case layer_type do
@@ -238,16 +266,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
       |> Layers.flatten_trailing()
       |> Axon.dense(spec.hidden_size, use_bias: false, name: join(name, "output"))
 
-    block_cache =
-      Layers.Decoder.put_attention_caches(
-        block_cache,
-        self_attention_cache,
-        cross_attention_cache
-      )
-
-    # Pass the pre-rotary key and the value on, so a shared block reuses the
-    # same projections rather than positions already baked in.
-    {attention_output, block_cache, key, value}
+    {attention_output, block_cache, shared_kv}
   end
 
   # The checkpoint carries per_layer_input_gate (hidden -> per_layer_size),
@@ -285,11 +304,13 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Decoder do
     )
   end
 
-  defp gated_ffn(hidden_state, spec, opts) do
+  defp gated_ffn(hidden_state, spec, layer_index, opts) do
     name = opts[:name]
 
     intermediate =
-      if spec.use_double_wide_mlp, do: 2 * spec.intermediate_size, else: spec.intermediate_size
+      if Spec.double_wide_mlp_layer?(spec, layer_index),
+        do: 2 * spec.intermediate_size,
+        else: spec.intermediate_size
 
     gate =
       hidden_state

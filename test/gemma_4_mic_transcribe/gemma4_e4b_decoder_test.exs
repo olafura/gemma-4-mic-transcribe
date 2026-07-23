@@ -92,6 +92,68 @@ defmodule Gemma4MicTranscribe.Gemma4E4BDecoderTest do
     assert Nx.shape(outputs.hidden_state) == {1, 4, spec.hidden_size}
   end
 
+  test "shared blocks leave their placeholder caches untouched" do
+    spec = tiny_spec()
+    sequence = 3
+    max_length = 8
+
+    hidden_state = Axon.input("hidden_state", shape: {nil, nil, spec.hidden_size})
+    per_layer = Axon.input("per_layer_inputs", shape: {nil, nil, nil, nil})
+    position_ids = Axon.input("position_ids", shape: {nil, nil})
+    attention_mask = Axon.input("attention_mask", shape: {nil, nil})
+    cache = Axon.input("cache", optional: true)
+
+    outputs =
+      Decoder.decode(hidden_state, per_layer, position_ids, attention_mask, cache, spec)
+
+    model = Axon.container(%{hidden_state: outputs.hidden_state, cache: outputs.cache})
+    {init_fun, predict_fun} = Axon.build(model)
+
+    computing_cache = fn ->
+      zeros = Nx.broadcast(0.0, {1, max_length, spec.num_attention_heads, 4})
+      cross = Nx.broadcast(0.0, {1, 1, 1, 1})
+
+      %{
+        self_attention: %{key: zeros, value: zeros},
+        cross_attention: %{key: cross, value: cross}
+      }
+    end
+
+    placeholder_cache = fn ->
+      zeros = Nx.broadcast(0.0, {1, 1, 1, 1})
+
+      %{
+        self_attention: %{key: zeros, value: zeros},
+        cross_attention: %{key: zeros, value: zeros}
+      }
+    end
+
+    decoder_cache = %{
+      blocks:
+        {computing_cache.(), computing_cache.(), placeholder_cache.(), placeholder_cache.()},
+      offset: Nx.tensor(0),
+      attention_mask: Nx.broadcast(0, {1, max_length})
+    }
+
+    inputs = %{
+      "hidden_state" => Nx.broadcast(0.1, {1, sequence, spec.hidden_size}),
+      "per_layer_inputs" =>
+        Nx.broadcast(0.05, {1, sequence, spec.num_blocks, spec.hidden_size_per_layer_input}),
+      "position_ids" => Nx.iota({1, sequence}, axis: 1, type: :s64),
+      "attention_mask" => Nx.broadcast(1, {1, sequence}),
+      "cache" => decoder_cache
+    }
+
+    params = init_fun.(inputs, Axon.ModelState.empty())
+    result = predict_fun.(params, inputs)
+
+    for index <- 2..3 do
+      shared_key = elem(result.cache.blocks, index).self_attention.key
+      assert Nx.shape(shared_key) == {1, 1, 1, 1}
+      assert Nx.to_number(Nx.sum(Nx.abs(shared_key))) == 0.0
+    end
+  end
+
   test "per-layer inputs are gated against the block state" do
     spec = tiny_spec()
     {_outputs, params} = build(spec, 3)

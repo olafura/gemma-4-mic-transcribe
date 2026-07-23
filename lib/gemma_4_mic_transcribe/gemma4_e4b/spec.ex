@@ -97,6 +97,13 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.Spec do
 
   def kv_shared_layer?(_spec, _index), do: false
 
+  @doc "Returns whether a decoder block uses Gemma 4's double-wide FFN."
+  def double_wide_mlp_layer?(%__MODULE__{use_double_wide_mlp: true} = spec, index) do
+    kv_shared_layer?(spec, index)
+  end
+
+  def double_wide_mlp_layer?(_spec, _index), do: false
+
   @doc """
   Index of the block whose key/value state a shared block reuses: the last
   block before the shared suffix begins.

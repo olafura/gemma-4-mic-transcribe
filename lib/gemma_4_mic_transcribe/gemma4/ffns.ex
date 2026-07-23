@@ -73,13 +73,6 @@ defmodule Gemma4MicTranscribe.Gemma4.FFNs do
     hidden_size = positive_field!(config, :hidden_size)
     configured_intermediate_size = positive_field!(config, :intermediate_size)
 
-    intermediate_size =
-      if field(config, :use_double_wide_mlp, false) do
-        2 * configured_intermediate_size
-      else
-        configured_intermediate_size
-      end
-
     activation = field(config, :activation, field(config, :hidden_activation, :gelu_approx_tanh))
     kind = if field(config, :enable_moe_block, false), do: :shared, else: :dense
 
@@ -87,12 +80,30 @@ defmodule Gemma4MicTranscribe.Gemma4.FFNs do
 
     Enum.map(requested_layers, fn layer_index ->
       validate_layer!(layer_index, num_layers)
+
+      intermediate_size =
+        intermediate_size(config, layer_index, num_layers, configured_intermediate_size)
+
       descriptor(layer_index, kind, hidden_size, intermediate_size, activation)
     end)
   end
 
   @doc "Returns the operation performed by every listed FFN."
   def operation, do: @operation
+
+  # Gemma 4's flag applies only to the KV-sharing suffix, not every decoder
+  # block. The first blocks retain the configured intermediate size.
+  defp intermediate_size(config, layer_index, num_layers, configured_size) do
+    shared_layers = field(config, :num_kv_shared_layers, 0)
+    first_shared_layer = num_layers - shared_layers
+
+    if field(config, :use_double_wide_mlp, false) and shared_layers > 0 and
+         layer_index >= first_shared_layer do
+      2 * configured_size
+    else
+      configured_size
+    end
+  end
 
   defp descriptor(layer, kind, hidden_size, intermediate_size, activation) do
     checkpoint_prefix = "model.language_model.layers.#{layer}"

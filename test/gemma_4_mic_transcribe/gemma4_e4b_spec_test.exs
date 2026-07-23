@@ -109,6 +109,14 @@ defmodule Gemma4MicTranscribe.Gemma4E4BSpecTest do
     assert Spec.kv_source_layer(spec) == 23
   end
 
+  test "double-wide MLPs are restricted to the KV-sharing suffix" do
+    spec = %{load() | use_double_wide_mlp: true}
+
+    refute Spec.double_wide_mlp_layer?(spec, 23)
+    assert Spec.double_wide_mlp_layer?(spec, 24)
+    assert Spec.double_wide_mlp_layer?(spec, 41)
+  end
+
   test "audio subsampling halves the time axis once per conv" do
     spec = load()
 
