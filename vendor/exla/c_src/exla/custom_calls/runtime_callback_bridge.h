@@ -39,6 +39,7 @@ struct OutputBuffer {
   uint8_t *data = nullptr;
   size_t size = 0;
 
+  OutputBuffer() = default;
   OutputBuffer(const xla::ffi::AnyBuffer &buf);
 };
 
@@ -186,5 +187,4 @@ template <> struct Encoder<xla::ffi::DataType> {
 };
 
 } // namespace fine
-
 
