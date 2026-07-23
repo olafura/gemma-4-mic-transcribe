@@ -143,6 +143,45 @@ matrix-level building block, not meaningful text by itself. The current full
 Axon runtime still rejects complete MoE inference until those surrounding MoE
 operations are implemented.
 
+To preserve those surrounding operations, extract a complete MoE feed-forward
+layer instead:
+
+```bash
+./expert_tool extract-layer \
+  --artifact artifacts/gemma4-26b-layer0-moe \
+  --layer 0
+
+./expert_tool inspect-layer \
+  --artifact artifacts/gemma4-26b-layer0-moe
+
+mix gemma.expert run-layer \
+  --artifact artifacts/gemma4-26b-layer0-moe \
+  --backend exla:rocm --tokens 1 --runs 5
+```
+
+`Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer.run/2` accepts the residual stream
+immediately after attention as a `{tokens, 2816}` tensor. It executes the
+always-on shared FFN and the router, selects and renormalizes eight of the 128
+routed experts for each token, applies the per-expert scales, and combines both
+paths with the five feed-forward RMS norms, residual connection, and layer
+scalar. It returns the output plus router probabilities, selected expert
+indices, selected weights, and the separate shared/routed outputs.
+
+The layer-0 artifact has 779,485,825 loaded BF16 parameters. Its contiguous
+source range is 1,558,982,914 bytes, compared with the complete 51,611,872,412
+byte checkpoint. A one-token ROCm run over a constant `0.01` residual selected
+experts `[126, 34, 101, 84, 79, 114, 56, 55]` and measured 1.18 ms median after
+warmup. Negating that input selected a disjoint set
+`[53, 122, 90, 74, 117, 2, 124, 41]`, demonstrating that the extracted router
+is active rather than replaying fixed experts.
+
+This is specifically a language-model MoE experiment. The 26B-A4B checkpoint
+does not contain Gemma 4's audio encoder, so the artifact cannot isolate or
+transcribe audio. It is useful for studying, replacing, and eventually
+recombining the router and expert mechanism. The CLI benchmark uses synthetic
+residual states; meaningful text still requires embeddings, attention, every
+decoder layer, final normalization, and the language-model head.
+
 Dense models expose their always-active feed-forward networks separately:
 
 ```elixir

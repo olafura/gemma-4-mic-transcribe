@@ -3,6 +3,8 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
   alias Gemma4MicTranscribe.Gemma4.ExpertArtifact
   alias Gemma4MicTranscribe.Gemma4.ExtractedExpert
+  alias Gemma4MicTranscribe.Gemma4.ExtractedMoeLayer
+  alias Gemma4MicTranscribe.Gemma4.MoeLayerArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
 
   @switches [
@@ -38,6 +40,26 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
       {:inspect, artifact} ->
         print_manifest("expert_artifact", artifact, ExpertArtifact.read_manifest!(artifact))
+        0
+
+      {:extract_layer, opts} ->
+        manifest =
+          MoeLayerArtifact.extract!(opts.artifact,
+            repo: opts.repo,
+            revision: opts.revision,
+            layer: opts.layer
+          )
+
+        print_layer_manifest("moe_layer_extracted", opts.artifact, manifest)
+        0
+
+      {:inspect_layer, artifact} ->
+        print_layer_manifest(
+          "moe_layer_artifact",
+          artifact,
+          MoeLayerArtifact.read_manifest!(artifact)
+        )
+
         0
 
       {:run, opts} ->
@@ -89,6 +111,58 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
 
         0
 
+      {:run_layer, opts} ->
+        {:ok, backend} = Runtime.resolve_backend(opts.backend)
+        layer = ExtractedMoeLayer.load!(opts.artifact, backend)
+
+        input =
+          Nx.broadcast(
+            Nx.tensor(opts.input_value, type: :f32),
+            {opts.tokens, layer.manifest.hidden_size}
+          )
+
+        Enum.each(1..3, fn _ -> :ok = ExtractedMoeLayer.warmup(layer, opts.tokens) end)
+
+        {times, result} =
+          Enum.map_reduce(1..opts.runs, nil, fn _run, _last_result ->
+            started_at = System.monotonic_time(:microsecond)
+
+            result =
+              layer
+              |> ExtractedMoeLayer.run(input)
+              |> Nx.backend_copy(Nx.BinaryBackend)
+
+            elapsed = System.monotonic_time(:microsecond) - started_at
+            {elapsed, result}
+          end)
+
+        output_f32 = Nx.as_type(result.output, :f32)
+        sorted_times = Enum.sort(times)
+
+        IO.puts(
+          Jason.encode!(%{
+            event: "moe_layer_run",
+            artifact: Path.expand(opts.artifact),
+            backend: opts.backend,
+            layer: layer.manifest.layer_index,
+            experts: layer.manifest.num_experts,
+            top_k: layer.manifest.top_k_experts,
+            tokens: opts.tokens,
+            runs: opts.runs,
+            mean_us: Enum.sum(times) / length(times),
+            min_us: Enum.min(times),
+            median_us: percentile(sorted_times, 0.5),
+            p95_us: percentile(sorted_times, 0.95),
+            selected_experts: Nx.to_list(result.top_k_indices),
+            selected_weights: Nx.to_list(result.top_k_weights),
+            output_shape: Tuple.to_list(Nx.shape(result.output)),
+            output_mean_abs: output_f32 |> Nx.abs() |> Nx.mean() |> Nx.to_number(),
+            output_max_abs: output_f32 |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+          })
+        )
+
+        0
+
       {:error, reason} ->
         IO.puts(:stderr, "error: #{reason}")
         1
@@ -126,6 +200,31 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     end
   end
 
+  def parse(["extract-layer" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts),
+         :ok <- non_negative(opts[:layer] || 0, "--layer") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:extract_layer,
+         %{
+           artifact: opts[:artifact],
+           repo: opts[:repo] || "google/gemma-4-26B-A4B-it",
+           revision: opts[:revision] || "main",
+           layer: opts[:layer] || 0
+         }}
+      end
+    end
+  end
+
+  def parse(["inspect-layer" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts) do
+      if opts[:help], do: {:help, usage()}, else: {:inspect_layer, opts[:artifact]}
+    end
+  end
+
   def parse(["run" | argv]) do
     with {:ok, opts} <- parse_options(argv),
          :ok <- require_artifact(opts),
@@ -135,6 +234,26 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
         {:help, usage()}
       else
         {:run,
+         %{
+           artifact: opts[:artifact],
+           backend: opts[:backend] || "exla:rocm",
+           tokens: opts[:tokens] || 1,
+           runs: opts[:runs] || 3,
+           input_value: opts[:input_value] || 0.01
+         }}
+      end
+    end
+  end
+
+  def parse(["run-layer" | argv]) do
+    with {:ok, opts} <- parse_options(argv),
+         :ok <- require_artifact(opts),
+         :ok <- positive(opts[:tokens] || 1, "--tokens"),
+         :ok <- positive(opts[:runs] || 3, "--runs") do
+      if opts[:help] do
+        {:help, usage()}
+      else
+        {:run_layer,
          %{
            artifact: opts[:artifact],
            backend: opts[:backend] || "exla:rocm",
@@ -191,12 +310,35 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     )
   end
 
+  defp print_layer_manifest(event, artifact, manifest) do
+    IO.puts(
+      Jason.encode!(%{
+        event: event,
+        artifact: Path.expand(artifact),
+        source_repo: manifest.source_repo,
+        layer: manifest.layer_index,
+        hidden_size: manifest.hidden_size,
+        shared_intermediate_size: manifest.shared_intermediate_size,
+        expert_intermediate_size: manifest.expert_intermediate_size,
+        experts: manifest.num_experts,
+        top_k: manifest.top_k_experts,
+        parameter_count: manifest.parameter_count,
+        parameter_bytes: manifest.parameter_bytes,
+        downloaded_bytes: manifest.downloaded_bytes,
+        source_checkpoint_bytes: manifest.source_checkpoint_bytes
+      })
+    )
+  end
+
   defp usage do
     """
     Usage:
       expert_tool extract --artifact PATH [options]
       expert_tool inspect --artifact PATH
       expert_tool run --artifact PATH [options]
+      expert_tool extract-layer --artifact PATH [options]
+      expert_tool inspect-layer --artifact PATH
+      expert_tool run-layer --artifact PATH [options]
 
     extract range-downloads one routed expert from Gemma 4 26B-A4B. It does
     not download or save the complete checkpoint.
@@ -210,6 +352,12 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
     run executes only the extracted gated FFN over synthetic hidden states.
     Router weighting, the shared expert, norms, and residual are not included.
 
+    extract-layer range-downloads a complete language-model MoE feed-forward
+    layer: all 128 routed expert banks, the router, shared FFN, norms, and layer
+    scalar. run-layer executes that standalone shell and reports which experts
+    each synthetic residual-state row selected. Attention and token embedding
+    are not included. The 26B-A4B checkpoint has no audio encoder.
+
       --backend BACKEND     Default exla:rocm
       --tokens N            Input rows, default 1
       --runs N              Timed runs after warmup, default 3
@@ -220,11 +368,11 @@ defmodule Gemma4MicTranscribe.ExpertCLI do
   defmodule Escript do
     @moduledoc false
 
-    def main(["run" | _argv]) do
+    def main([command | _argv]) when command in ["run", "run-layer"] do
       IO.puts(
         :stderr,
-        "error: native expert execution requires real application priv paths; " <>
-          "use `mix gemma.expert run ...`"
+        "error: native execution requires real application priv paths; " <>
+          "use `mix gemma.expert #{command} ...`"
       )
 
       System.halt(1)

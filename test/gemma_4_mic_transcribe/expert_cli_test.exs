@@ -43,4 +43,38 @@ defmodule Gemma4MicTranscribe.ExpertCLITest do
     assert {:error, "--expert must be non-negative"} =
              ExpertCLI.parse(["extract", "--artifact", "expert", "--expert", "-1"])
   end
+
+  test "parses complete MoE layer extraction and execution commands" do
+    assert {:extract_layer, extract} =
+             ExpertCLI.parse([
+               "extract-layer",
+               "--artifact",
+               "moe-layer",
+               "--layer",
+               "12"
+             ])
+
+    assert extract.layer == 12
+    assert extract.repo == "google/gemma-4-26B-A4B-it"
+
+    assert {:inspect_layer, "moe-layer"} =
+             ExpertCLI.parse(["inspect-layer", "--artifact", "moe-layer"])
+
+    assert {:run_layer, run} =
+             ExpertCLI.parse([
+               "run-layer",
+               "--artifact",
+               "moe-layer",
+               "--backend",
+               "exla:rocm",
+               "--tokens",
+               "3",
+               "--runs",
+               "5"
+             ])
+
+    assert run.backend == "exla:rocm"
+    assert run.tokens == 3
+    assert run.runs == 5
+  end
 end
