@@ -97,8 +97,51 @@ first_routed.id
 #=> "language_model.layer.0.expert.0"
 ```
 
-This change only catalogs the experts. The current Axon runtime still rejects
-MoE inference until routing and the expert forward pass are implemented.
+The `expert_tool` escript can range-extract one routed expert directly from the
+official 26B-A4B safetensors checkpoint. The leading expert axis is contiguous,
+so it downloads only the two selected slices and writes separate gate, up, and
+down matrices:
+
+```bash
+GEMMA4_ESCRIPT=expert mix escript.build
+
+./expert_tool extract \
+  --artifact artifacts/gemma4-26b-layer0-expert0 \
+  --layer 0 --expert 0
+
+./expert_tool inspect \
+  --artifact artifacts/gemma4-26b-layer0-expert0
+
+mix gemma.expert run \
+  --artifact artifacts/gemma4-26b-layer0-expert0 \
+  --backend exla:rocm --tokens 1 --runs 20
+```
+
+Extraction and inspection are pure BEAM escript operations. Native execution
+runs as a started Mix application so EXLA resolves its NIF from the real
+application directory through `:code.priv_dir(:exla)`. A production service
+should use an OTP release for the same reason; it should not discover native
+libraries from a hard-coded `_build` path.
+
+The real layer-0/expert-0 artifact contains 5,947,392 BF16 parameters
+(11,894,784 bytes). Extraction transferred 12,024,592 bytes including the
+safetensors header instead of the complete 51,611,872,412-byte checkpoint. A
+warmed one-token standalone expert call measured 170 microseconds median
+(150 microseconds minimum) on the local ROCm GPU and returned a nonzero
+`{1, 2816}` hidden-state matrix.
+
+The standalone operation exactly matches the official expert body:
+
+```text
+down(gelu_tanh(gate(x)) * up(x))
+```
+
+Its input must be the pre-FFN-normalized layer state. Router selection and
+weighting, the always-on shared FFN, surrounding norms, and the residual
+connection remain outside the artifact. Consequently its output is a useful
+matrix-level building block, not meaningful text by itself. The current full
+Axon runtime still rejects complete MoE inference until those surrounding MoE
+operations are implemented.
 
 Dense models expose their always-active feed-forward networks separately:
 

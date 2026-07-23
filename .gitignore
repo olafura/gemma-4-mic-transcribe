@@ -23,4 +23,5 @@ __pycache__/
 /decoder_block
 /single_word_bench
 /handoff_probe
+/expert_tool
 /artifacts/

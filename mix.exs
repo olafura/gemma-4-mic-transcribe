@@ -24,6 +24,9 @@ defmodule Gemma4MicTranscribe.MixProject do
         "handoff_probe" ->
           {Gemma4MicTranscribe.HandoffProbeCLI.Escript, "handoff_probe"}
 
+        "expert" ->
+          {Gemma4MicTranscribe.ExpertCLI.Escript, "expert_tool"}
+
         _other ->
           {Gemma4MicTranscribe.DecoderPipelineBenchmark.Escript, "decoder_pipeline_bench"}
       end
