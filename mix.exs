@@ -27,6 +27,9 @@ defmodule Gemma4MicTranscribe.MixProject do
         "expert" ->
           {Gemma4MicTranscribe.ExpertCLI.Escript, "expert_tool"}
 
+        "language_id" ->
+          {Gemma4MicTranscribe.LanguageIdCLI.Escript, "language_id"}
+
         _other ->
           {Gemma4MicTranscribe.DecoderPipelineBenchmark.Escript, "decoder_pipeline_bench"}
       end

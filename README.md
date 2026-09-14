@@ -904,6 +904,94 @@ the regression corpus has only one seeded clip per language. Skipping six FFNs
 passed that small gate but truncated the journal transcript, demonstrating why
 both checks are required.
 
+## Spoken language identification from the E2B audio tower
+
+`language_id` builds the smallest spoken-language detector this repo can get
+out of Gemma 4 E2B: the audio tower's subsampling stack, the first N of its 12
+conformer blocks, a masked mean-plus-standard-deviation pooling over the
+encoder frames, and a 34-way softmax head trained on the Common Voice
+single-word corpus. Nothing from the language model is used, and the exported
+artifact loads without the original checkpoint.
+
+```bash
+GEMMA4_ESCRIPT=language_id mix escript.build
+
+# one pooled vector per depth for a seeded sample of every language
+./language_id extract --split train --per-language 800 --pooling mean_std \
+  --output artifacts/language-id/features-train-large-meanstd-seed42
+./language_id extract --split test --per-language 200 --pooling mean_std \
+  --output artifacts/language-id/features-test-large-meanstd-seed42
+
+# train a head per depth and compare
+./language_id sweep \
+  --train artifacts/language-id/features-train-large-meanstd-seed42 \
+  --test artifacts/language-id/features-test-large-meanstd-seed42
+
+# keep five blocks and save the detector
+./language_id export --depth 5 \
+  --train artifacts/language-id/features-train-large-meanstd-seed42 \
+  --test artifacts/language-id/features-test-large-meanstd-seed42 \
+  --artifact artifacts/language-id/detector-e2b-depth5
+
+./language_id detect --artifact artifacts/language-id/detector-e2b-depth5 \
+  --input clip.mp3
+```
+
+Extraction runs the full tower once on `exla:rocm` with every depth captured,
+so the sweep never touches the GPU again: 10,353 training clips take about 90
+seconds and each head trains in six seconds on the host. Clips are decoded with
+`ffmpeg`, padded or cut to a four second window, and only encoder frames backed
+by real audio enter the pooled statistics. The tower is causal with a bounded
+left context, so padding frames never change the frames that are kept.
+
+Measured on the seed 42 sample (34 languages, up to 800 train and 200 test
+clips per language, bf16 tower):
+
+| depth | tower params | tower bf16 | test accuracy, mean pooling | test accuracy, mean+std |
+| ----- | ------------ | ---------- | --------------------------- | ----------------------- |
+| 3     | 76.6M        | 153 MB     | 39.3%                       | 43.1%                   |
+| 4     | 101.8M       | 204 MB     | 51.8%                       | 56.1%                   |
+| 5     | 127.0M       | 254 MB     | 69.8%                       | 74.7%                   |
+| 6     | 152.2M       | 304 MB     | 73.3%                       | 75.2%                   |
+| 9     | 227.7M       | 455 MB     | 72.2%                       | 75.1%                   |
+| 11    | 278.1M       | 556 MB     | 76.4%                       | 78.8%                   |
+| 12    | 303.3M       | 606 MB     | 74.7%                       | 77.1%                   |
+
+Depth 5 is the knee: one block fewer loses nearly twenty points, and the full
+tower only adds two or three. The exported depth-5 detector holds 127.1M
+parameters (254 MB), 73,762 of them in the head, and classifies a four second
+clip in about 225 ms on Torchx CPU. The absolute numbers are bounded by the
+corpus rather than the tower: every clip is a single word, and two of the
+fourteen words ("Hey", "Firefox") are the same in every language. Languages
+with only a handful of clips (`lg`, `or`, `th`, `tt`, `zh-TW`, `sv-SE`) sit at
+or near zero and drag the macro average to 57%. Sentence-length audio in the
+same languages will score higher than these tables suggest.
+
+The classifier head is a standardized multinomial logistic regression trained
+full batch with Adam and L2 weight decay (`--steps`, `--learning-rate`,
+`--weight-decay`). Stronger weight decay did not close the train and test gap
+at any depth, so more speakers are the lever, not the head. Icelandic is not in
+the corpus and therefore not among the 34 languages the head can name.
+
+### One second windows
+
+The detector is meant to answer from a one second snippet, so the same
+pipeline was rerun with `--seconds 1`. Common Voice single-word clips carry
+0.7-1.2 s of leading silence, which a one second window would spend entirely
+on nothing (27% at depth 5 before this fix), so `Corpus.decode!/3` now decodes
+three extra seconds, finds the first 30 ms of frames above one percent of the
+peak energy, and starts the window 100 ms before that onset. With that trim
+the one second detector matches the four second one:
+
+| depth | tower bf16 | test accuracy, 1 s | macro |
+| ----- | ---------- | ------------------ | ----- |
+| 2     | 103 MB     | 40.2%              | 27.9% |
+| 3     | 153 MB     | 51.0%              | 36.5% |
+| 4     | 204 MB     | 63.1%              | 47.0% |
+| 5     | 254 MB     | 75.0%              | 59.6% |
+| 6     | 304 MB     | 77.4%              | 61.9% |
+| 12    | 606 MB     | 74.3%              | 61.2% |
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text

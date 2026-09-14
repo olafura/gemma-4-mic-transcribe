@@ -47,7 +47,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
   # Two strided convolutions over {batch, frames, mel} treated as a single
   # channel image, each halving the time axis, then a projection into the
   # encoder width.
-  defp subsample(features, %Spec{} = spec, opts) do
+  @doc false
+  def subsample(features, %Spec{} = spec, opts) do
     name = opts[:name]
     [first_channels, second_channels] = spec.audio_subsampling_conv_channels
 
@@ -77,7 +78,8 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     )
   end
 
-  defp conformer_block(hidden_state, %Spec{} = spec, opts) do
+  @doc false
+  def conformer_block(hidden_state, %Spec{} = spec, opts) do
     name = opts[:name]
 
     hidden_state

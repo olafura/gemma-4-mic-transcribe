@@ -24,4 +24,5 @@ __pycache__/
 /single_word_bench
 /handoff_probe
 /expert_tool
+/language_id
 /artifacts/
