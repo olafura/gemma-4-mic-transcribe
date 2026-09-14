@@ -12,6 +12,39 @@ defmodule Gemma4MicTranscribe.LanguageId.Corpus do
 
   @sample_rate 16_000
 
+  @doc """
+  What kind of corpus a root holds: `:single_word` when its language
+  directories carry `<split>.tsv` files, `:parquet` when they hold Common
+  Voice parquet shards (the layout `CommonVoice` reads), `:unknown` otherwise.
+  """
+  def kind(corpus) do
+    cond do
+      Path.wildcard(Path.join([corpus, "*", "*.tsv"])) != [] -> :single_word
+      Path.wildcard(Path.join([corpus, "*", "**", "*.parquet"])) != [] -> :parquet
+      true -> :unknown
+    end
+  end
+
+  @doc """
+  Samples clips from either kind of corpus (`kind/1`). Parquet clips carry
+  their audio in `:bytes` instead of an MP3 `:path` on disk; `decode_clip!/3`
+  handles both. Options: `:seed`, `:languages`, `:shards` (parquet only).
+  """
+  def sample_any(corpus, split, per_language, opts \\ []) do
+    case kind(corpus) do
+      :parquet -> Gemma4MicTranscribe.LanguageId.CommonVoice.sample(corpus, split, per_language, opts)
+      _other -> sample(corpus, split, per_language, Keyword.take(opts, [:seed, :languages]))
+    end
+  end
+
+  @doc "Decodes a clip from `sample_any/4`, whether it is a file or bytes."
+  def decode_clip!(clip, seconds, opts \\ [])
+
+  def decode_clip!(%{bytes: bytes} = clip, seconds, opts) when is_binary(bytes),
+    do: Gemma4MicTranscribe.LanguageId.CommonVoice.decode!(clip, seconds, opts)
+
+  def decode_clip!(%{path: path}, seconds, opts), do: decode!(path, seconds, opts)
+
   @doc "Sorted language codes present in the corpus."
   def languages(corpus) do
     corpus

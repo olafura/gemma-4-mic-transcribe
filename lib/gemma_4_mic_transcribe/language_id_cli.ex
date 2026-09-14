@@ -226,7 +226,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   defp extract!(opts) do
     corpus = Path.expand(opts.corpus)
     languages = Corpus.languages(corpus)
-    clips = Corpus.sample(corpus, opts.split, opts.per_language, seed: opts.seed)
+    clips = Corpus.sample_any(corpus, opts.split, opts.per_language, seed: opts.seed, shards: opts.shards)
 
     IO.puts(
       "extracting #{length(clips)} #{opts.split} clips across #{length(languages)} languages " <>
@@ -378,7 +378,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       artifact.languages
       |> Enum.filter(&(Reference.text_label(&1) in text.languages))
 
-    clips = Corpus.sample(corpus, opts.split, opts.per_language, seed: opts.seed, languages: shared)
+    clips = Corpus.sample_any(corpus, opts.split, opts.per_language, seed: opts.seed, languages: shared, shards: opts.shards)
     reference = opts.reference && load_reference!(opts.reference, clips)
 
     IO.puts(
@@ -762,13 +762,26 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     started = System.monotonic_time(:millisecond)
     Artifact.detect(artifact, runtime, List.duplicate(0.0, 1_600))
     IO.puts("warmed up in #{elapsed(started)}; listening on http://0.0.0.0:#{opts.port}")
-    Server.run!(artifact, runtime, opts.port)
+    Server.run!(artifact, runtime, opts.port, candidates: candidates(opts, artifact))
+  end
+
+  # --candidates restricts answers to languages the caller knows can occur;
+  # names the detector does not know are dropped with a warning, and a set
+  # with nothing left is an error rather than a silent no-op.
+  defp candidates(%{candidates: nil}, _artifact), do: nil
+
+  defp candidates(%{candidates: list}, artifact) do
+    known = MapSet.new(artifact.languages)
+    {kept, unknown} = Enum.split_with(list, &MapSet.member?(known, &1))
+    unknown != [] && IO.puts(:stderr, "ignoring --candidates the detector does not know: #{Enum.join(unknown, ", ")}")
+    kept == [] && abort("none of --candidates is a language of the detector")
+    kept
   end
 
   defp inputs!(opts) do
     corpus = Path.expand(opts.corpus)
     languages = Corpus.languages(corpus)
-    clips = Corpus.sample(corpus, opts.split, opts.per_language, seed: opts.seed)
+    clips = Corpus.sample_any(corpus, opts.split, opts.per_language, seed: opts.seed, shards: opts.shards)
     {:ok, spec} = Bumblebee.load_spec({:hf, opts.model_name}, module: Gemma4MicTranscribe.LanguageId.Encoder, architecture: :audio_encoder)
 
     IO.puts("preparing #{length(clips)} #{opts.split} clips across #{length(languages)} languages, #{opts.seconds} s window")
@@ -924,8 +937,9 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     audio file in the request body.
 
     Options:
-      --corpus PATH          Common Voice single-word corpus (default ~/Downloads/cv-corpus-7.0-singleword);
-                             validate: parquet corpus root (default /data/common_voice)
+      --corpus PATH          Common Voice single-word corpus (default ~/Downloads/cv-corpus-7.0-singleword)
+                             or a parquet corpus root as validate reads (sentence clips, onset window);
+                             validate defaults to /data/common_voice
       --split NAME           train, dev, or test (default train; validate: test)
       --per-language N       clips sampled per language (default 200)
       --seed N               sampling seed (default 42)

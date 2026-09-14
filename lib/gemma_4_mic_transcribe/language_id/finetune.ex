@@ -49,7 +49,7 @@ defmodule Gemma4MicTranscribe.LanguageId.Finetune do
       clips
       |> Task.async_stream(
         fn clip ->
-          samples = Corpus.decode!(clip.path, seconds)
+          samples = Corpus.decode_clip!(clip, seconds)
           Runtime.prepare(window, samples)
         end,
         max_concurrency: concurrency,

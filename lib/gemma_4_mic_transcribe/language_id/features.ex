@@ -44,7 +44,7 @@ defmodule Gemma4MicTranscribe.LanguageId.Features do
       clips
       |> Task.async_stream(
         fn clip ->
-          samples = Corpus.decode!(clip.path, runtime.seconds)
+          samples = Corpus.decode_clip!(clip, runtime.seconds)
           Runtime.prepare(runtime, samples)
         end,
         max_concurrency: concurrency,

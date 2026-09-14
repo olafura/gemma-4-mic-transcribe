@@ -434,6 +434,11 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
       assert clip.sentence =~ "sentence"
     end
 
+    # a parquet root is recognised, so extract/inputs sample it the same way
+    assert Corpus.kind(root) == :parquet
+    assert Corpus.sample_any(root, "train", 2, seed: 7) |> Enum.map(& &1.key) == CommonVoice.sample(root, "train", 2, seed: 7) |> Enum.map(& &1.key)
+    assert Corpus.sample_any(root, "train", 2, seed: 7) |> Enum.all?(&is_binary(&1.bytes))
+
     # one shard per language by default, chosen by the seed; both with --shards 2
     de_keys = fn clips -> clips |> Enum.filter(&(&1.directory == "de")) |> Enum.map(& &1.key) end
     assert CommonVoice.sample(root, "test", 3, seed: 7) |> de_keys.() == de_keys.(clips)
@@ -494,6 +499,7 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
       for i <- 1..4, do: File.write!(Path.join([root, language, "clips", "clip_#{i}.mp3"]), "x")
     end
 
+    assert Corpus.kind(root) == :single_word
     assert Corpus.languages(root) == ["aa", "bb"]
     # clip_5 is listed but missing on disk
     assert length(Corpus.cases(root, "aa", "test")) == 4
