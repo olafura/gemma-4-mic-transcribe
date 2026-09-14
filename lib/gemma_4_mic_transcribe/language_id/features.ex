@@ -159,6 +159,64 @@ defmodule Gemma4MicTranscribe.LanguageId.Features do
     }
   end
 
+  @doc """
+  Loads one feature set, or several given as a comma-separated list of
+  paths, merged with `merge/1`.
+  """
+  def load_all!(spec) when is_binary(spec) do
+    spec |> String.split(",", trim: true) |> Enum.map(&load!/1) |> merge()
+  end
+
+  @doc """
+  Concatenates feature sets extracted with the same pooling and window,
+  possibly over different languages: the merged label space is the sorted
+  union, every depth both sets have is kept, and the clips of a language
+  present in several sets are pooled. This is how a head learns single
+  words and sentence onsets at once.
+  """
+  def merge([%__MODULE__{} = single]), do: single
+
+  def merge([first | _rest] = sets) do
+    for set <- sets, set.meta["pooling"] != first.meta["pooling"] do
+      raise ArgumentError, "cannot merge features pooled differently (#{inspect(set.meta["pooling"])} vs #{inspect(first.meta["pooling"])})"
+    end
+
+    languages = sets |> Enum.flat_map(& &1.languages) |> Enum.uniq() |> Enum.sort()
+
+    keys =
+      sets
+      |> Enum.map(&MapSet.new(Map.keys(&1.depths)))
+      |> Enum.reduce(&MapSet.intersection/2)
+
+    depths = Map.new(keys, fn key -> {key, sets |> Enum.map(& &1.depths[key]) |> Nx.concatenate()} end)
+
+    %__MODULE__{
+      depths: depths,
+      labels: sets |> Enum.map(&relabel(&1, languages).labels) |> Nx.concatenate(),
+      languages: languages,
+      keys: Enum.flat_map(sets, & &1.keys),
+      meta: Map.put(first.meta, "merged", Enum.map(sets, & &1.meta))
+    }
+  end
+
+  @doc """
+  Re-indexes labels into `languages`, which must contain every language of
+  the set, so a test set can be scored against a head trained over more
+  languages than it holds.
+  """
+  def relabel(%__MODULE__{languages: languages} = features, languages), do: features
+
+  def relabel(%__MODULE__{} = features, languages) do
+    index = languages |> Enum.with_index() |> Map.new()
+
+    mapping =
+      Enum.map(features.languages, fn language ->
+        index[language] || raise(ArgumentError, "language #{language} is not among #{inspect(languages)}")
+      end)
+
+    %{features | labels: Nx.take(Nx.tensor(mapping, type: :s64), features.labels), languages: languages}
+  end
+
   @doc "Features of one depth, as `{x, labels}`."
   def depth(%__MODULE__{} = features, depth) when is_integer(depth) do
     depth(features, Encoder.depth_key(depth))

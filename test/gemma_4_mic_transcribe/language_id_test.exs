@@ -2,6 +2,7 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
   use ExUnit.Case, async: true
 
   alias Gemma4MicTranscribe.LanguageId.Artifact
+  alias Gemma4MicTranscribe.LanguageId.Features
   alias Gemma4MicTranscribe.LanguageId.CommonVoice
   alias Gemma4MicTranscribe.LanguageId.Corpus
   alias Gemma4MicTranscribe.LanguageId.Finetune
@@ -467,6 +468,37 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
       assert length(samples) == 4800
       assert Enum.any?(samples, &(abs(&1) > 0.1))
     end
+  end
+
+  test "feature sets over different languages merge into one label space" do
+    words = %Features{
+      depths: %{"depth_1" => Nx.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])},
+      labels: Nx.tensor([0, 1, 1], type: :s64),
+      languages: ["de", "en"],
+      keys: ["w1", "w2", "w3"],
+      meta: %{"pooling" => "mean_std", "split" => "train"}
+    }
+
+    sentences = %Features{
+      depths: %{"depth_1" => Nx.tensor([[2.0, 2.0], [3.0, 3.0]]), "depth_2" => Nx.tensor([[9.0], [9.0]])},
+      labels: Nx.tensor([0, 1], type: :s64),
+      languages: ["ar", "en"],
+      keys: ["s1", "s2"],
+      meta: %{"pooling" => "mean_std", "split" => "train"}
+    }
+
+    merged = Features.merge([words, sentences])
+    assert merged.languages == ["ar", "de", "en"]
+    assert Map.keys(merged.depths) == ["depth_1"]
+    assert Nx.to_flat_list(merged.labels) == [1, 2, 2, 0, 2]
+    assert Nx.shape(merged.depths["depth_1"]) == {5, 2}
+    assert merged.keys == ["w1", "w2", "w3", "s1", "s2"]
+    assert merged.meta["pooling"] == "mean_std"
+
+    relabeled = Features.relabel(sentences, merged.languages)
+    assert Nx.to_flat_list(relabeled.labels) == [0, 2]
+    assert_raise ArgumentError, fn -> Features.relabel(sentences, ["de", "en"]) end
+    assert_raise ArgumentError, fn -> Features.merge([words, %{sentences | meta: %{"pooling" => "mean"}}]) end
   end
 
   test "a ranking can be restricted to candidate languages" do

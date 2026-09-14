@@ -270,8 +270,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   end
 
   defp sweep!(opts) do
-    train = Features.load!(opts.train)
-    test = Features.load!(opts.test)
+    train = Features.load_all!(opts.train)
+    test = opts.test |> Features.load_all!() |> Features.relabel(train.languages)
 
     if train.languages != test.languages do
       abort("train and test feature sets list different languages")
@@ -311,14 +311,14 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   end
 
   defp export!(opts) do
-    train = Features.load!(opts.train)
+    train = Features.load_all!(opts.train)
     {x, y} = Features.depth(train, opts.depth)
     started = System.monotonic_time(:millisecond)
     head = train_head(x, y, train.languages, opts)
-    IO.puts("trained depth #{opts.depth} head on #{Features.count(train)} clips in #{elapsed(started)}")
+    IO.puts("trained depth #{opts.depth} head on #{Features.count(train)} clips (#{length(train.languages)} languages) in #{elapsed(started)}")
 
     if opts.test do
-      test = Features.load!(opts.test)
+      test = opts.test |> Features.load_all!() |> Features.relabel(train.languages)
       {xt, yt} = Features.depth(test, opts.depth)
       evaluation = Head.evaluate(head, xt, yt)
       IO.puts("test accuracy #{percent(evaluation.accuracy)} (macro #{percent(evaluation.macro_accuracy)}) on #{evaluation.samples} clips")
@@ -794,7 +794,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   defp finetune!(opts) do
     train_inputs = Finetune.load_inputs!(opts.inputs_train)
     test_inputs = if opts.inputs_test, do: Finetune.load_inputs!(opts.inputs_test)
-    features = Features.load!(opts.train)
+    features = Features.load_all!(opts.train)
 
     if features.languages != train_inputs.languages do
       abort("--train features and --inputs-train were sampled over different language sets")
@@ -910,8 +910,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     """
     Usage:
       language_id extract --output DIR [--split train|dev|test] [--per-language N] [options]
-      language_id sweep --train DIR --test DIR [--depths 0,1,2] [options]
-      language_id export --train DIR --depth N --artifact DIR [--test DIR] [options]
+      language_id sweep --train DIR[,DIR] --test DIR[,DIR] [--depths 0,1,2] [options]
+      language_id export --train DIR[,DIR] --depth N --artifact DIR [--test DIR[,DIR]] [options]
       language_id detect --artifact DIR --input AUDIO [--top-k N] [--candidates LIST] [--backend NAME]
       language_id compare --artifact DIR (--whisper-model GGML | --reference JSON) [--per-language N] [--output JSON]
       language_id inputs --output DIR [--split train|dev|test] [--per-language N] [--seconds N]
