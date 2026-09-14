@@ -242,6 +242,12 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     assert serve.port == 7860
     assert {:error, "serve requires --artifact"} = LanguageIdCLI.parse(["serve", "--port", "8080"])
 
+    assert {:ok, :validate, %{candidates: ["known"]}} =
+             LanguageIdCLI.parse(["validate", "--artifact", "a", "--candidates", "known"])
+
+    assert {:ok, :serve, %{candidates: ["de", "en"]}} =
+             LanguageIdCLI.parse(["serve", "--artifact", "a", "--candidates", "de,en"])
+
     assert {:help, usage} = LanguageIdCLI.parse([])
     assert usage =~ "language_id detect"
     assert {:error, _} = LanguageIdCLI.parse(["unknown"])
@@ -458,6 +464,25 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     end
   end
 
+  test "a ranking can be restricted to candidate languages" do
+    ranked = [
+      %{language: "de", probability: 0.5},
+      %{language: "rw", probability: 0.3},
+      %{language: "en", probability: 0.2}
+    ]
+
+    assert Artifact.restrict(ranked, nil) == ranked
+    assert Artifact.restrict(ranked, ["xx"]) == ranked
+
+    assert [%{language: "de", probability: de}, %{language: "en", probability: en}] =
+             Artifact.restrict(ranked, ["en", "de"])
+
+    assert_in_delta de, 0.5 / 0.7, 1.0e-9
+    assert_in_delta en, 0.2 / 0.7, 1.0e-9
+
+    assert [%{language: "rw", probability: 1.0}] = Artifact.restrict(ranked, ["rw"])
+  end
+
   test "corpus cases come from the split tsv and are sampled by seed" do
     root = Path.join(System.tmp_dir!(), "language-id-corpus-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(root) end)
@@ -494,6 +519,7 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     assert Jason.decode!(body) == %{"status" => "ok"}
     assert {404, _type, _body} = Server.handle(:GET, "/missing", "", %{})
     assert {400, _type, _body} = Server.handle(:POST, "/detect", "", %{})
+    assert {400, _type, _body} = Server.handle(:POST, "/detect?languages=de,en", "", %{})
     assert {200, "text/html; charset=utf-8", page} = Server.handle(:GET, "/", "", %{artifact: artifact})
     assert page =~ "xx, yy"
     assert IO.iodata_to_binary(Server.encode({404, "text/plain", "no"})) =~ "HTTP/1.1 404 Not Found\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n"

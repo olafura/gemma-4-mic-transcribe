@@ -44,6 +44,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     freeze: :string,
     shards: :integer,
     languages: :string,
+    candidates: :string,
     port: :integer,
     help: :boolean
   ]
@@ -120,6 +121,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       freeze: opts[:freeze] |> to_string() |> String.split(",", trim: true),
       shards: Keyword.get(opts, :shards, 1),
       languages: opts[:languages] && String.split(opts[:languages], ",", trim: true),
+      candidates: opts[:candidates] && String.split(opts[:candidates], ",", trim: true),
       port: Keyword.get(opts, :port, 7860)
     }
 
@@ -353,7 +355,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
 
     samples = Corpus.decode!(Path.expand(opts.input), artifact.seconds)
     started = System.monotonic_time(:millisecond)
-    ranked = Artifact.detect(artifact, runtime, samples)
+    ranked = Artifact.detect(artifact, runtime, samples, candidates: candidates(opts, artifact))
     IO.puts("detected in #{elapsed(started)}")
 
     ranked
@@ -571,6 +573,16 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     languages = opts.languages || CommonVoice.languages(corpus)
     known = MapSet.new(artifact.languages)
 
+    # --candidates known: the languages of the corpus the detector knows,
+    # i.e. the answer set a caller who knows the corpus would pass
+    candidates =
+      case opts.candidates do
+        ["known"] -> Enum.filter(languages, &MapSet.member?(known, &1))
+        _other -> candidates(opts, artifact)
+      end
+
+    candidates && IO.puts("answers restricted to #{length(candidates)} candidates: #{Enum.join(candidates, ", ")}")
+
     started = System.monotonic_time(:millisecond)
 
     clips =
@@ -596,8 +608,9 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       |> Enum.map(fn {clip, index} ->
         samples = CommonVoice.decode!(clip, artifact.seconds)
         started = System.monotonic_time(:millisecond)
-        ranked = Artifact.detect(artifact, runtime, samples)
+        full = Artifact.detect(artifact, runtime, samples)
         ms = System.monotonic_time(:millisecond) - started
+        ranked = Artifact.restrict(full, candidates)
         top = Enum.map(ranked, & &1.language)
 
         if rem(index, 50) == 0, do: IO.puts("  #{index}/#{length(clips)}")
@@ -612,6 +625,9 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
           predicted: hd(top),
           top3: Enum.take(top, 3),
           probability: hd(ranked).probability,
+          # the whole distribution, so any candidate set can be scored later
+          # from the JSON without running the detector again
+          probabilities: Map.new(full, &{&1.language, &1.probability}),
           ms: ms
         }
       end)
@@ -632,6 +648,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
             per_language: opts.per_language,
             seed: opts.seed,
             shards: opts.shards,
+            candidates: candidates,
             languages: summary.languages,
             summary: summary.overall,
             rows: rows
@@ -882,12 +899,12 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       language_id extract --output DIR [--split train|dev|test] [--per-language N] [options]
       language_id sweep --train DIR --test DIR [--depths 0,1,2] [options]
       language_id export --train DIR --depth N --artifact DIR [--test DIR] [options]
-      language_id detect --artifact DIR --input AUDIO [--top-k N] [--backend NAME]
+      language_id detect --artifact DIR --input AUDIO [--top-k N] [--candidates LIST] [--backend NAME]
       language_id compare --artifact DIR (--whisper-model GGML | --reference JSON) [--per-language N] [--output JSON]
       language_id inputs --output DIR [--split train|dev|test] [--per-language N] [--seconds N]
       language_id finetune --inputs-train DIR --train FEATURES --depth N --artifact DIR [--inputs-test DIR] [options]
-      language_id validate --artifact DIR [--corpus DIR] [--split test] [--per-language N] [--shards N] [--output JSON]
-      language_id serve --artifact DIR [--port 7860] [--backend NAME]
+      language_id validate --artifact DIR [--corpus DIR] [--split test] [--per-language N] [--shards N] [--candidates LIST|known] [--output JSON]
+      language_id serve --artifact DIR [--port 7860] [--candidates LIST] [--backend NAME]
 
     extract runs the Gemma 4 audio tower over Common Voice single-word clips and
     saves one pooled feature vector per conformer depth. sweep trains a softmax
@@ -935,6 +952,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
                              (finetune --learning-rate defaults to 2.0e-5)
       --shards N             validate: parquet shards read per language (default 1)
       --languages LIST       validate: comma-separated language directories (default all)
+      --candidates LIST      detect/serve/validate: only answer from these languages, renormalised;
+                             validate also takes "known" (the corpus languages the detector has)
       --port N               serve: HTTP port (default 7860)
     """
   end

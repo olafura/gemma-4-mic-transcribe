@@ -9,7 +9,9 @@ defmodule Gemma4MicTranscribe.LanguageId.Server do
     * `GET /health` - `{"status":"ok"}` once the detector is loaded
     * `POST /detect` - the request body is an audio file in any format ffmpeg
       reads; the response lists every language with its probability, best
-      first, plus the detector's window and the time spent
+      first, plus the detector's window and the time spent. `?languages=de,en`
+      restricts the answer to those languages (renormalised), as does the
+      `:candidates` option given to the server for every request.
 
   The server is plain `:gen_tcp` in `:http_bin` packet mode: one process per
   connection, the request body bounded by `:max_body` (default 16 MB).
@@ -30,7 +32,7 @@ defmodule Gemma4MicTranscribe.LanguageId.Server do
     {:ok, socket} =
       :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 64])
 
-    state = %{artifact: artifact, runtime: runtime, max_body: max_body}
+    state = %{artifact: artifact, runtime: runtime, max_body: max_body, candidates: Keyword.get(opts, :candidates)}
     parent = self()
     spawn_link(fn -> accept_loop(socket, state, parent) end)
     socket
@@ -115,21 +117,37 @@ defmodule Gemma4MicTranscribe.LanguageId.Server do
   end
 
   @doc false
-  def handle(:GET, "/health", _body, _state), do: {200, "application/json", Jason.encode!(%{status: "ok"})}
+  def handle(method, path, body, state) do
+    {route, query} =
+      case String.split(path, "?", parts: 2) do
+        [route] -> {route, %{}}
+        [route, query] -> {route, URI.decode_query(query)}
+      end
 
-  def handle(:GET, "/", _body, state), do: {200, "text/html; charset=utf-8", page(state.artifact)}
+    route(method, route, query, body, state)
+  end
 
-  def handle(:POST, "/detect", "", _state),
+  defp route(:GET, "/health", _query, _body, _state), do: {200, "application/json", Jason.encode!(%{status: "ok"})}
+
+  defp route(:GET, "/", _query, _body, state), do: {200, "text/html; charset=utf-8", page(state.artifact)}
+
+  defp route(:POST, "/detect", _query, "", _state),
     do: {400, "application/json", Jason.encode!(%{error: "send the audio file as the request body"})}
 
-  def handle(:POST, "/detect", body, %{artifact: artifact, runtime: runtime}) do
+  defp route(:POST, "/detect", query, body, %{artifact: artifact, runtime: runtime} = state) do
     file = Path.join(System.tmp_dir!(), "language-id-serve-#{System.unique_integer([:positive])}")
     File.write!(file, body)
+
+    candidates =
+      case query do
+        %{"languages" => list} -> String.split(list, ",", trim: true)
+        _none -> Map.get(state, :candidates)
+      end
 
     try do
       samples = Corpus.decode!(file, artifact.seconds)
       started = System.monotonic_time(:millisecond)
-      ranked = Artifact.detect(artifact, runtime, samples)
+      ranked = Artifact.detect(artifact, runtime, samples, candidates: candidates)
 
       {200, "application/json",
        Jason.encode!(%{
@@ -144,7 +162,7 @@ defmodule Gemma4MicTranscribe.LanguageId.Server do
     end
   end
 
-  def handle(_method, _path, _body, _state), do: {404, "text/plain", "not found\n"}
+  defp route(_method, _path, _query, _body, _state), do: {404, "text/plain", "not found\n"}
 
   @doc false
   def encode({status, type, body}) do
@@ -184,6 +202,7 @@ defmodule Gemma4MicTranscribe.LanguageId.Server do
     <div id="out"></div>
     <p>From anywhere else:</p>
     <pre>curl --data-binary @clip.mp3 $URL/detect</pre>
+    <pre>curl --data-binary @clip.mp3 "$URL/detect?languages=de,en,fr"</pre>
     <p>Languages: #{Enum.join(artifact.languages, ", ")}</p>
     <script>
       document.getElementById("go").onclick = async () => {

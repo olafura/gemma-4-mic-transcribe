@@ -184,8 +184,12 @@ defmodule Gemma4MicTranscribe.LanguageId.Artifact do
   @doc """
   Ranks languages for mono 16 kHz f32 `samples`. Returns a list of
   `%{language: code, probability: p}` sorted by probability.
+
+  With `candidates: [codes]` the ranking is restricted to those languages
+  and renormalised over them (see `restrict/2`), for callers that know
+  which languages can occur.
   """
-  def detect(%__MODULE__{} = artifact, %Runtime{} = runtime, samples) when is_list(samples) do
+  def detect(%__MODULE__{} = artifact, %Runtime{} = runtime, samples, opts \\ []) when is_list(samples) do
     prepared = Runtime.prepare(runtime, samples)
     features = runtime |> Runtime.encode([prepared]) |> Map.fetch!(Encoder.depth_key(artifact.depth))
 
@@ -196,6 +200,26 @@ defmodule Gemma4MicTranscribe.LanguageId.Artifact do
     |> Enum.zip(artifact.languages)
     |> Enum.map(fn {probability, language} -> %{language: language, probability: probability} end)
     |> Enum.sort_by(& &1.probability, :desc)
+    |> restrict(Keyword.get(opts, :candidates))
+  end
+
+  @doc """
+  Restricts a ranking to `candidates` and renormalises the probabilities
+  over them, which is the softmax over the candidate logits alone. `nil`
+  or a set naming none of the ranked languages leaves the ranking as is.
+  """
+  def restrict(ranked, nil), do: ranked
+
+  def restrict(ranked, candidates) do
+    allowed = MapSet.new(candidates)
+    kept = Enum.filter(ranked, &MapSet.member?(allowed, &1.language))
+    total = kept |> Enum.map(& &1.probability) |> Enum.sum()
+
+    cond do
+      kept == [] -> ranked
+      total <= 0.0 -> Enum.map(kept, &%{&1 | probability: 1.0 / length(kept)})
+      true -> Enum.map(kept, &%{&1 | probability: &1.probability / total})
+    end
   end
 
   @doc "Seconds of audio the detector listens to."
