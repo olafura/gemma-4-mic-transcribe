@@ -239,7 +239,7 @@ defmodule EXLA.MixProject do
 
     if cached? do
       Mix.shell().info("Using libexla.so from #{cached_so}")
-      File.cp!(cached_so, "cache/libexla.so")
+      copy_if_changed!(cached_so, "cache/libexla.so")
     end
 
     result = Mix.Tasks.Compile.ElixirMake.run(args)
@@ -251,6 +251,20 @@ defmodule EXLA.MixProject do
     end
 
     result
+  end
+
+  # Every compile re-copies the cached library. Overwriting the file in
+  # place corrupts the code pages of any VM that already has it mapped (a
+  # long extraction in another shell dies with SIGSEGV inside an EXLA NIF),
+  # so leave an identical file alone and otherwise replace it atomically.
+  defp copy_if_changed!(source, target) do
+    if File.exists?(target) and File.read!(source) == File.read!(target) do
+      :ok
+    else
+      tmp = "#{target}.#{System.unique_integer([:positive])}.tmp"
+      File.cp!(source, tmp)
+      File.rename!(tmp, target)
+    end
   end
 
   defp xla_cache_dir() do
