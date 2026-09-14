@@ -25,15 +25,17 @@ curl --data-binary @clip.mp3 https://<space-host>/detect
 ```
 
 The same image validates a detector against Common Voice 17 parquet shards
-mounted from the `olafura/gemma_language_detection` bucket. Docker Spaces need
-a PRO account, so until then the image lives on Docker Hub and runs as a job:
+mounted from the `olafura/gemma_language_detection` bucket:
 
 ```sh
-hf jobs run --flavor cpu-upgrade --timeout 2h \
+hf jobs run --flavor cpu-upgrade --timeout 3h \
   -v hf://buckets/olafura/gemma_language_detection:/data \
-  olafurara/gemma-language-id \
+  IMAGE \
   language_id validate --artifact /data/artifacts/ft-depth5-1s-e2 \
   --per-language 30 --output /data/validation/ft-depth5-1s-e2.json
 ```
 
-Pull it anywhere with `docker run -p 7860:7860 olafurara/gemma-language-id`.
+where IMAGE is this Space's image or any public registry copy of the
+Dockerfile build; the project README shows the same job run from the public
+hexpm Elixir image with the built runtime synced into the bucket, which needs
+neither a Space nor a public image.

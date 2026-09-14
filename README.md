@@ -1119,7 +1119,7 @@ Every number above comes from the single-word corpus the detector was
 trained on, so it says nothing about a different recording: full sentences,
 speakers the head never saw, or languages outside the 34. `validate` answers
 that from the Common Voice 17 parquet shards
-(`fsicoli/common_voice_17_0`, mirrored under `common_voice/` in the
+(`fixie-ai/common_voice_17_0`, mirrored under `common_voice/` in the
 `olafura/gemma_language_detection` bucket, one directory per language). It
 reads only the metadata columns of a seeded choice of shards, picks
 `--per-language` clips by the same hash ordering the single-word corpus uses,
@@ -1149,6 +1149,52 @@ none of these voices. Hausa maps to Kinyarwanda, the nearest thing in the
 head, which is the expected failure for an out-of-set language. Latency is
 unchanged at p50 116 ms, p95 127 ms per clip.
 
+On Hugging Face, 30 clips from a seeded test shard of each of the 51
+bucket languages (49 to 50 readable per run, see below), 18 of them in the
+head, scored on a `cpu-upgrade` job:
+
+<!-- hf-validation-table -->
+| language | clips | speakers | tuned 1 s top-1 | frozen 1 s top-1 | frozen 4 s top-1 | tuned 1 s top-3 | frozen 1 s top-3 | frozen 4 s top-3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ar | 30 | 29 | 43.3% | - | 86.7% | 56.7% | - | 96.7% |
+| br | 30 | 6 | 0.0% | - | 0.0% | 0.0% | - | 0.0% |
+| cs | 30 | 12 | 26.7% | - | 20.0% | 56.7% | - | 43.3% |
+| cy | 30 | 26/21 | 20.0% | - | 43.3% | 46.7% | - | 70.0% |
+| de | 30 | 30 | 36.7% | - | 40.0% | 63.3% | - | 56.7% |
+| en | 30 | 30 | 6.7% | - | 13.3% | 13.3% | - | 26.7% |
+| es | 30 | 30 | 33.3% | - | 40.0% | 53.3% | - | 66.7% |
+| fr | 30/60 | 30/60 | 40.0% | - | 80.0% | 66.7% | - | 90.0% |
+| ja | 30 | 30 | 13.3% | - | 6.7% | 26.7% | - | 10.0% |
+| ka | 30 | 15/29 | 23.3% | - | 63.3% | 46.7% | - | 90.0% |
+| nl | 30 | 23 | 43.3% | - | 30.0% | 66.7% | - | 63.3% |
+| pl | 30 | 29 | 50.0% | - | 70.0% | 56.7% | - | 96.7% |
+| pt | 30 | 30 | 13.3% | - | 50.0% | 36.7% | - | 76.7% |
+| ru | 30 | 30 | 43.3% | - | 63.3% | 66.7% | - | 90.0% |
+| sv-SE | 30 | 20 | 10.0% | - | 13.3% | 23.3% | - | 46.7% |
+| ta | 30 | 16/13 | 43.3% | - | 100.0% | 73.3% | - | 100.0% |
+| th | 30 | 29 | 3.3% | - | 0.0% | 3.3% | - | 6.7% |
+| tr | 30 | 26/30 | 13.3% | - | 13.3% | 30.0% | - | 50.0% |
+| **all known** | 540/-/570 | | 25.7% | - | 42.8% | 43.7% | - | 61.6% |
+<!-- /hf-validation-table -->
+
+Clip and speaker counts differ between runs where a run fell back to
+another shard, and `fr` is 60 clips in the 4 s run because the `frnew`
+directory (locale `fr`) was readable there and not in the 1 s run.
+Sentences from unseen speakers are a different task from the single words
+the head was fitted on: the tuned 1 s detector, at 78% on single words,
+answers 26% of sentence onsets and gets 44% into its top three. Four
+seconds of the frozen tower nearly doubles that (43% top-1, 62% top-3) and
+is close to perfect on Tamil, Arabic and French, so the information is in
+the tower and the 1 s head is what does not transfer. Some languages fail
+at any window: Breton is heard as French (the speakers are French), Thai
+as Cantonese, English scatters. Outside the head the answers are sensible
+neighbours where one exists (Galician and Asturian to Spanish, Slovak and
+Ukrainian to Polish, Hindi, Malayalam, Marathi and Urdu to Tamil, Danish
+to German, Korean to Japanese) and otherwise fall into Kinyarwanda, the
+head's catch-all class for unfamiliar voices. Latency on the job's CPU is
+ten times the local number (1.3 s per 1 s clip against 116 ms), so the
+flavor matters more than the window.
+
 The detector, the validation and the frozen sweep all run without EXLA:
 `MIX_TARGET=language_id` compiles only the language-ID slice of the project
 (no Boombox, no vendored EXLA, Torchx on CPU) and `Dockerfile` builds it
@@ -1163,20 +1209,40 @@ docker run --rm -p 7860:7860 gemma-language-id
 curl --data-binary @clip.mp3 localhost:7860/detect
 ```
 
-The same image validates against the bucket on Hugging Face's own machines.
-Docker Spaces on the free tier need a PRO subscription, so the image is
-pushed to Docker Hub instead and run as a job with the bucket mounted at
-`/data`; the job writes its JSON back into the bucket:
+The validation runs on Hugging Face's own machines with `hf jobs run` and
+the bucket mounted at `/data`. Docker Spaces on the free tier need a PRO
+subscription, and a job can only pull public images, so the job does not
+use the image at all: the built escript, compiled deps and libtorch are
+copied out of the image into the bucket once (`runtime/`, 600 MB) and the
+job starts from the public hexpm Elixir image, installs ffmpeg and runs
+the escript from there. The job writes its JSON back into the bucket:
 
 ```bash
-docker push olafurara/gemma-language-id:latest
-hf jobs run --flavor cpu-upgrade --timeout 2h \
+docker create --name lid gemma-language-id && docker cp lid:/home/user/app runtime && docker rm lid
+rm -rf runtime/artifacts
+hf buckets sync runtime hf://buckets/olafura/gemma_language_detection/runtime
+hf jobs run --flavor cpu-upgrade --timeout 3h -d \
   -v hf://buckets/olafura/gemma_language_detection:/data \
-  olafurara/gemma-language-id \
-  language_id validate --artifact /data/artifacts/ft-depth5-1s-e2 \
-  --per-language 30 --output /data/validation/ft-depth5-1s-e2.json
+  hexpm/elixir:1.20.2-erlang-29.0.3-debian-bookworm-20260713-slim \
+  bash -c "apt-get update -qq && apt-get install -y -qq ffmpeg && cp -r /data/runtime /app && cd /app && \
+    ./language_id validate --artifact /data/artifacts/ft-depth5-1s-e2 --per-language 30 \
+    --output /data/validation/ft-depth5-1s-e2.json"
 hf buckets cp hf://buckets/olafura/gemma_language_detection/validation/ft-depth5-1s-e2.json .
 ```
+
+With a public image the same command is just `hf jobs run ... IMAGE
+language_id validate ...`, which is what the Dockerfile's layout (the
+escript on `PATH`, the build directory beside it) is for.
+
+Two things about the mounted bucket shaped the command. Reads through the
+mount fail now and then with a parquet "Invalid thrift: bad data" error on
+a file that is fine (the same shard reads in one job and not in another),
+so the sampler retries a shard three times and, failing that, reports it
+on stderr and takes the next shard in seeded order; and the mount does not
+create directories, so `--output` creates its parent and the table is
+printed before the file is written. Sampling the metadata of one shard
+per language takes 12 to 14 minutes over the mount; scoring 1400 clips
+takes about an hour on `cpu-upgrade`.
 
 `hf-space/` keeps the Space front matter and an upload script for the day a
 PRO account is available; the Space would build the identical Dockerfile.
