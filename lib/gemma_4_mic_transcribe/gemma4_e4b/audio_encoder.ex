@@ -101,7 +101,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
     hidden_state
     |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "pre_norm"))
     |> dense_maybe_clipped(4 * spec.audio_hidden_size, spec, name: join(name, "intermediate"))
-    |> Axon.activation(spec.audio_activation)
+    |> activation(spec.audio_activation)
     |> dense_maybe_clipped(spec.audio_hidden_size, spec, name: join(name, "output"))
     |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "post_norm"))
     |> Axon.nx(&Nx.multiply(&1, weight))
@@ -182,7 +182,7 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       half = div(Nx.axis_size(state, 2), 2)
       signal = Nx.slice_along_axis(state, 0, half, axis: 2)
       gate = Nx.slice_along_axis(state, half, half, axis: 2)
-      Nx.multiply(signal, Nx.sigmoid(gate))
+      Nx.multiply(signal, stable_sigmoid(gate))
     end)
     # causal padding: the encoder never looks right of the current frame.
     # Computed as shifted adds rather than a conv op, keeping the graph off
@@ -191,9 +191,24 @@ defmodule Gemma4MicTranscribe.Gemma4E4B.AudioEncoder do
       name: join(name, "depthwise_conv1d")
     )
     |> rms_norm(spec.audio_rms_norm_epsilon, name: join(name, "conv_norm"))
-    |> Axon.activation(spec.audio_activation)
+    |> activation(spec.audio_activation)
     |> dense_maybe_clipped(hidden_size, spec, name: join(name, "linear_end"))
     |> then(&Axon.add(residual, &1))
+  end
+
+  # Nx differentiates `sigmoid` as `exp(-x) * s * s`, which is `inf * 0` for
+  # the strongly negative pre-activations this tower produces (hundreds after
+  # conv_norm), so fine-tuning through the stock activation yields NaN
+  # gradients. The forward pass is unchanged; only the derivative is rewritten
+  # as `s * (1 - s)`.
+  defp activation(input, :silu), do: Axon.nx(input, &stable_silu/1, op_name: :silu)
+  defp activation(input, other), do: Axon.activation(input, other)
+
+  defn stable_silu(x), do: x * stable_sigmoid(x)
+
+  defn stable_sigmoid(x) do
+    s = Nx.sigmoid(x)
+    custom_grad(s, [x], fn g -> [g * s * (1 - s)] end)
   end
 
   # The checkpoint stores input_min/input_max and output_min/output_max beside
