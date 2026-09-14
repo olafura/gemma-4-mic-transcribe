@@ -5,9 +5,10 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   alias Gemma4MicTranscribe.LanguageId.Corpus
   alias Gemma4MicTranscribe.LanguageId.Features
   alias Gemma4MicTranscribe.LanguageId.Head
+  alias Gemma4MicTranscribe.LanguageId.Reference
   alias Gemma4MicTranscribe.LanguageId.Runtime
 
-  @commands ["extract", "sweep", "export", "detect"]
+  @commands ["extract", "sweep", "export", "detect", "compare"]
 
   @switches [
     corpus: :string,
@@ -30,6 +31,9 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     backend: :string,
     model_name: :string,
     pooling: :string,
+    whisper_model: :string,
+    whisper_cli: :string,
+    reference: :string,
     help: :boolean
   ]
 
@@ -41,6 +45,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       {:ok, :sweep, opts} -> sweep!(opts)
       {:ok, :export, opts} -> export!(opts)
       {:ok, :detect, opts} -> detect!(opts)
+      {:ok, :compare, opts} -> compare!(opts)
       {:help, usage} -> IO.puts(usage)
       {:error, message} -> abort(message)
     end
@@ -89,7 +94,10 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       top_k: Keyword.get(opts, :top_k, 5),
       backend: Keyword.get(opts, :backend, default_backend(mode)),
       model_name: Keyword.get(opts, :model_name, "google/gemma-4-E2B-it"),
-      pooling: Keyword.get(opts, :pooling, "mean")
+      pooling: Keyword.get(opts, :pooling, "mean"),
+      whisper_model: opts[:whisper_model],
+      whisper_cli: opts[:whisper_cli],
+      reference: opts[:reference]
     }
 
     with :ok <- required(mode, values),
@@ -109,6 +117,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   end
 
   defp default_backend(:detect), do: "torchx:cpu"
+  defp default_backend(:compare), do: "torchx:cpu"
   defp default_backend(_mode), do: "exla:rocm"
 
   defp parse_depths(nil), do: nil
@@ -132,6 +141,9 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   defp required(:export, %{artifact: nil}), do: {:error, "export requires --artifact"}
   defp required(:detect, %{artifact: nil}), do: {:error, "detect requires --artifact"}
   defp required(:detect, %{input: nil}), do: {:error, "detect requires --input"}
+  defp required(:compare, %{artifact: nil}), do: {:error, "compare requires --artifact"}
+  defp required(:compare, %{whisper_model: nil, reference: nil}),
+    do: {:error, "compare requires --whisper-model or --reference"}
   defp required(_mode, _values), do: :ok
 
   defp positive(value, _flag) when is_integer(value) and value > 0, do: :ok
@@ -306,6 +318,198 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     end)
   end
 
+  # Runs the Gemma detector, Whisper's own language detection, and the
+  # Whisper-transcript-into-XLM-RoBERTa chain over the same seeded test clips,
+  # restricted to the languages the text detector can name.
+  defp compare!(opts) do
+    artifact = Artifact.load!(opts.artifact)
+    runtime = Artifact.runtime(artifact, backend: opts.backend)
+    text = Reference.text_detector()
+    corpus = Path.expand(opts.corpus)
+
+    shared =
+      artifact.languages
+      |> Enum.filter(&(Reference.text_label(&1) in text.languages))
+
+    clips = Corpus.sample(corpus, opts.split, opts.per_language, seed: opts.seed, languages: shared)
+    reference = opts.reference && load_reference!(opts.reference, clips)
+
+    IO.puts(
+      "comparing #{length(clips)} #{opts.split} clips across #{length(shared)} shared languages " <>
+        "(#{Enum.join(shared, ", ")}), #{artifact.seconds} s window" <>
+        if(reference, do: ", whisper answers from #{opts.reference}", else: "")
+    )
+
+    whisper_model = if reference, do: reference.whisper_model, else: opts.whisper_model
+    whisper_opts = [model: whisper_model && Path.expand(whisper_model), binary: opts.whisper_cli]
+    shared_set = MapSet.new(shared)
+
+    # warm every path once so compile time stays out of the latency columns
+    warm = Corpus.decode!(hd(clips).path, artifact.seconds)
+    Artifact.detect(artifact, runtime, warm)
+    Reference.detect_text(text, "warm up")
+
+    rows =
+      clips
+      |> Enum.with_index(1)
+      |> Enum.map(fn {clip, index} ->
+        samples = Corpus.decode!(clip.path, artifact.seconds)
+        wav = Path.join(System.tmp_dir!(), "language-id-compare-#{System.unique_integer([:positive])}.wav")
+        write_wav!(wav, samples)
+
+        started = System.monotonic_time(:millisecond)
+        ranked = Artifact.detect(artifact, runtime, samples)
+        gemma_ms = System.monotonic_time(:millisecond) - started
+        gemma_shared = ranked |> Enum.filter(&MapSet.member?(shared_set, &1.language)) |> hd()
+
+        whisper_columns =
+          if reference do
+            File.rm(wav)
+            Map.fetch!(reference.rows, clip.key)
+          else
+            whisper = Reference.whisper(wav, whisper_opts)
+            File.rm(wav)
+
+            chained =
+              if whisper.text == "",
+                do: %{ranked: [], ms: 0},
+                else: Reference.detect_text(text, whisper.text)
+
+            %{
+              whisper: whisper.language,
+              whisper_text: whisper.text,
+              whisper_ms: whisper.ms,
+              chained: chained.ranked |> List.first() |> then(&(&1 && &1.language)),
+              chained_ms: whisper.ms + chained.ms
+            }
+          end
+
+        expected = Reference.text_label(clip.language)
+
+        row =
+          Map.merge(whisper_columns, %{
+            key: clip.key,
+            language: clip.language,
+            expected: expected,
+            gemma: Reference.text_label(hd(ranked).language),
+            gemma_shared: Reference.text_label(gemma_shared.language),
+            gemma_ms: gemma_ms
+          })
+
+        if rem(index, 25) == 0, do: IO.puts("  #{index}/#{length(clips)}")
+        row
+      end)
+
+    if opts.output do
+      File.write!(Path.expand(opts.output), Jason.encode!(%{artifact: Path.expand(opts.artifact), whisper_model: whisper_model, rows: rows}, pretty: true))
+    end
+
+    print_comparison(rows)
+
+    if reference do
+      previous = Enum.count(clips, &(Map.fetch!(reference.rows, &1.key).gemma_shared == Reference.text_label(&1.language)))
+      current = Enum.count(rows, &(&1.gemma_shared == &1.expected))
+      IO.puts("")
+      IO.puts("shared-language accuracy: reference #{percent(previous / length(rows))}, this artifact #{percent(current / length(rows))}")
+    end
+  end
+
+  # Loads a compare JSON so its Whisper and XLM-RoBERTa answers can be reused
+  # for a new artifact over the same clips. Every sampled clip must be present.
+  defp load_reference!(path, clips) do
+    %{"rows" => rows} = decoded = path |> Path.expand() |> File.read!() |> Jason.decode!()
+
+    rows =
+      Map.new(rows, fn row ->
+        {row["key"],
+         %{
+           gemma_shared: row["gemma_shared"],
+           whisper: row["whisper"],
+           whisper_text: row["whisper_text"],
+           whisper_ms: row["whisper_ms"],
+           chained: row["chained"],
+           chained_ms: row["chained_ms"]
+         }}
+      end)
+
+    missing = Enum.reject(clips, &Map.has_key?(rows, &1.key))
+
+    if missing != [] do
+      abort("#{length(missing)} sampled clips are not in #{path}; pass the same --split, --per-language and --seed")
+    end
+
+    %{rows: rows, whisper_model: decoded["whisper_model"]}
+  end
+
+  defp print_comparison(rows) do
+    systems = [
+      {"gemma (34-way)", :gemma, :gemma_ms},
+      {"gemma (shared)", :gemma_shared, :gemma_ms},
+      {"whisper detect", :whisper, :whisper_ms},
+      {"whisper -> xlm-r", :chained, :chained_ms}
+    ]
+
+    IO.puts("")
+    IO.puts(String.pad_trailing("system", 18) <> String.pad_leading("accuracy", 10) <> String.pad_leading("macro", 8) <> String.pad_leading("p50 ms", 8) <> String.pad_leading("p90 ms", 8))
+
+    for {name, field, ms_field} <- systems do
+      hits = Enum.count(rows, &(Map.fetch!(&1, field) == &1.expected))
+
+      macro =
+        rows
+        |> Enum.group_by(& &1.expected)
+        |> Enum.map(fn {_language, group} -> Enum.count(group, &(Map.fetch!(&1, field) == &1.expected)) / length(group) end)
+        |> then(&(Enum.sum(&1) / length(&1)))
+
+      latencies = rows |> Enum.map(&Map.fetch!(&1, ms_field)) |> Enum.sort()
+
+      IO.puts(
+        String.pad_trailing(name, 18) <>
+          String.pad_leading(percent(hits / length(rows)), 10) <>
+          String.pad_leading(percent(macro), 8) <>
+          String.pad_leading("#{percentile(latencies, 0.5)}", 8) <>
+          String.pad_leading("#{percentile(latencies, 0.9)}", 8)
+      )
+    end
+
+    IO.puts("")
+    IO.puts(String.pad_trailing("language", 10) <> String.pad_leading("n", 5) <> String.pad_leading("gemma", 9) <> String.pad_leading("shared", 9) <> String.pad_leading("whisper", 9) <> String.pad_leading("chain", 9))
+
+    rows
+    |> Enum.group_by(& &1.expected)
+    |> Enum.sort()
+    |> Enum.each(fn {language, group} ->
+      accuracy = fn field -> percent(Enum.count(group, &(Map.fetch!(&1, field) == language)) / length(group)) end
+
+      IO.puts(
+        String.pad_trailing(language, 10) <>
+          String.pad_leading("#{length(group)}", 5) <>
+          String.pad_leading(accuracy.(:gemma), 9) <>
+          String.pad_leading(accuracy.(:gemma_shared), 9) <>
+          String.pad_leading(accuracy.(:whisper), 9) <>
+          String.pad_leading(accuracy.(:chained), 9)
+      )
+    end)
+  end
+
+  defp percentile([], _fraction), do: 0
+
+  defp percentile(sorted, fraction) do
+    index = min(round(fraction * (length(sorted) - 1)), length(sorted) - 1)
+    Enum.at(sorted, index)
+  end
+
+  defp write_wav!(path, samples) do
+    pcm = for sample <- samples, into: <<>>, do: <<round(max(min(sample, 1.0), -1.0) * 32767)::little-signed-16>>
+    data_size = byte_size(pcm)
+
+    header =
+      <<"RIFF", 36 + data_size::little-32, "WAVE", "fmt ", 16::little-32, 1::little-16, 1::little-16,
+        16_000::little-32, 32_000::little-32, 2::little-16, 16::little-16, "data", data_size::little-32>>
+
+    File.write!(path, header <> pcm)
+  end
+
   defp train_head(x, y, languages, opts) do
     Head.train(x, y, languages,
       steps: opts.steps,
@@ -344,13 +548,16 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       language_id sweep --train DIR --test DIR [--depths 0,1,2] [options]
       language_id export --train DIR --depth N --artifact DIR [--test DIR] [options]
       language_id detect --artifact DIR --input AUDIO [--top-k N] [--backend NAME]
+      language_id compare --artifact DIR (--whisper-model GGML | --reference JSON) [--per-language N] [--output JSON]
 
     extract runs the Gemma 4 audio tower over Common Voice single-word clips and
     saves one pooled feature vector per conformer depth. sweep trains a softmax
     head per depth and reports test accuracy so the shallowest useful depth can
     be picked. export trains the head for one depth and saves a self-contained
     detector: subsampling stack, the first N conformer blocks, head, languages.
-    detect classifies one audio file with a saved detector.
+    detect classifies one audio file with a saved detector. compare runs the
+    detector, whisper.cpp language detection, and Whisper transcripts fed to
+    papluca/xlm-roberta-base-language-detection over the same test clips.
 
     Options:
       --corpus PATH          Common Voice single-word corpus (default ~/Downloads/cv-corpus-7.0-singleword)
@@ -368,7 +575,10 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       --backend NAME         torchx:cpu, exla:host, exla:cuda, exla:rocm (extract default exla:rocm, detect default torchx:cpu)
       --model-name NAME      Hugging Face repo of the Gemma 4 checkpoint (default google/gemma-4-E2B-it)
       --pooling MODE         mean or mean_std frame pooling for extract (default mean)
-      --output PATH          extract: output directory
+      --whisper-model PATH   ggml Whisper model for compare
+      --whisper-cli PATH     whisper-cli binary for compare (default $WHISPER_CLI or whisper-cli)
+      --reference JSON       compare: reuse Whisper and XLM-RoBERTa answers from an earlier --output
+      --output PATH          extract: output directory; compare: JSON with every row
     """
   end
 end

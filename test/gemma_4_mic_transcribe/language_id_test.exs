@@ -190,6 +190,18 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     assert detect.backend == "torchx:cpu"
     assert detect.top_k == 5
 
+    assert {:ok, :compare, compare} =
+             LanguageIdCLI.parse(["compare", "--artifact", "out", "--whisper-model", "ggml-base.bin", "--split", "test"])
+
+    assert compare.backend == "torchx:cpu"
+    assert {:error, "compare requires --whisper-model or --reference"} =
+             LanguageIdCLI.parse(["compare", "--artifact", "out"])
+
+    assert {:ok, :compare, gated} =
+             LanguageIdCLI.parse(["compare", "--artifact", "out", "--reference", "base.json"])
+
+    assert gated.reference == "base.json"
+
     assert {:help, usage} = LanguageIdCLI.parse([])
     assert usage =~ "language_id detect"
     assert {:error, _} = LanguageIdCLI.parse(["unknown"])

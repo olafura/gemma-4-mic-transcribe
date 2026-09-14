@@ -992,6 +992,47 @@ the one second detector matches the four second one:
 | 6     | 304 MB     | 77.4%              | 61.9% |
 | 12    | 606 MB     | 74.3%              | 61.2% |
 
+### Against Whisper and XLM-RoBERTa
+
+`compare` runs the exported detector, `whisper-cli` with language
+auto-detection, and the transcript through
+[papluca/xlm-roberta-base-language-detection](https://huggingface.co/papluca/xlm-roberta-base-language-detection)
+on the same seeded test clips, restricted to the 13 languages all three
+systems can name (the three Chinese variants collapse to `zh`). Whisper
+predicts from the same one second window with `-l auto`, and XLM-RoBERTa runs
+through Bumblebee on the host. 403 clips, ggml-base and ggml-small on CPU,
+detector on Torchx CPU:
+
+```bash
+./language_id compare --split test --per-language 30 \
+  --artifact artifacts/language-id/detector-e2b-depth5-1s \
+  --whisper-model ~/dev/whisper.cpp/models/ggml-base.bin \
+  --whisper-cli ~/dev/whisper.cpp/build/bin/whisper-cli \
+  --output artifacts/language-id/compare-base-1s-test.json
+```
+
+| system                          | accuracy | macro | p50     | p90     |
+| ------------------------------- | -------- | ----- | ------- | ------- |
+| E2B depth 5, 1 s (shared langs) | 74.7%    | 67.8% | 112 ms  | 129 ms  |
+| E2B depth 5, 1 s (all 34)       | 69.5%    | 62.9% | 112 ms  | 129 ms  |
+| whisper base, `-l auto`         | 24.3%    | 23.7% | 419 ms  | 440 ms  |
+| whisper base -> XLM-RoBERTa     | 10.2%    | 10.1% | 726 ms  | 761 ms  |
+| whisper small, `-l auto`        | 33.0%    | 32.0% | 1398 ms | 1433 ms |
+| whisper small -> XLM-RoBERTa    | 13.9%    | 13.4% | 1708 ms | 1743 ms |
+
+One second of a single word is far too little for Whisper: both sizes answer
+"en" for most clips (96.7% on English, 0-30% elsewhere), and the transcript is
+usually a fragment XLM-RoBERTa cannot place. The comparison is not a knock on
+either model at their intended sentence-length input; it shows that the
+truncated tower with a head trained on exactly this task is the right tool for
+the snippet case, at a quarter of Whisper base's latency. Whisper's times
+include starting `whisper-cli` and loading its model for every clip, since
+that is how the installed binary runs; a resident whisper.cpp would cut its
+fixed cost but not its answers. The JSON output keeps
+every per-clip prediction from all three systems, so a re-exported detector can
+be checked for regressions against the same Whisper answers without rerunning
+Whisper.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text
