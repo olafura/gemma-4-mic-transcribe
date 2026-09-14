@@ -40,7 +40,8 @@ defmodule Gemma4MicTranscribe.LanguageId.CommonVoice do
   language directory (or the given `:languages`).
 
   Options: `:seed` (default 42), `:languages`, and `:shards`, the number of
-  shards read per language (default 1, chosen from the seed). Clips are
+  shards read per language (default 1, chosen from the seed; a shard that
+  does not parse is skipped with a warning). Clips are
   ordered by a hash of the seed and clip key, as the single-word corpus is.
   Each clip is a map with `:key`, `:language` (the row's locale, falling back
   to the directory name), `:directory`, `:client_id`, `:sentence`, `:path`
@@ -52,15 +53,13 @@ defmodule Gemma4MicTranscribe.LanguageId.CommonVoice do
     languages = Keyword.get(opts, :languages) || languages(root)
 
     Enum.flat_map(languages, fn language ->
-      shards = root |> shards(language, split) |> pick_shards(language, seed, shard_count)
-
       chosen =
-        shards
-        |> Enum.flat_map(fn shard ->
-          shard
-          |> DF.from_parquet!(columns: @meta_columns)
-          |> DF.to_rows()
-          |> Enum.with_index(fn row, index -> Map.merge(row, %{"shard" => shard, "index" => index}) end)
+        root
+        |> shards(language, split)
+        |> pick_shards(language, seed)
+        |> readable_shards(shard_count)
+        |> Enum.flat_map(fn {shard, rows} ->
+          Enum.with_index(rows, fn row, index -> Map.merge(row, %{"shard" => shard, "index" => index}) end)
         end)
         |> Enum.map(fn row ->
           %{
@@ -120,13 +119,29 @@ defmodule Gemma4MicTranscribe.LanguageId.CommonVoice do
     end
   end
 
-  # A seeded choice of shards so different seeds see different speakers
+  # A seeded order of shards so different seeds see different speakers
   # while the same seed always reads the same files.
-  defp pick_shards([], _language, _seed, _count), do: []
+  defp pick_shards(shards, language, seed) do
+    Enum.sort_by(shards, fn shard -> :crypto.hash(:sha256, "#{seed}:#{language}:#{Path.basename(shard)}") end)
+  end
 
-  defp pick_shards(shards, language, seed, count) do
+  # The first `count` shards in seeded order whose metadata reads. A shard
+  # that fails to parse (a truncated upload, typically) is reported on
+  # stderr and the next one in the order takes its place, so one bad file
+  # does not stop a run over a whole bucket.
+  defp readable_shards(shards, count) do
     shards
-    |> Enum.sort_by(fn shard -> :crypto.hash(:sha256, "#{seed}:#{language}:#{Path.basename(shard)}") end)
+    |> Stream.map(fn shard ->
+      case DF.from_parquet(shard, columns: @meta_columns) do
+        {:ok, frame} ->
+          {shard, DF.to_rows(frame)}
+
+        {:error, error} ->
+          IO.puts(:stderr, "skipping unreadable shard #{shard}: #{Exception.message(error)}")
+          nil
+      end
+    end)
+    |> Stream.reject(&is_nil/1)
     |> Enum.take(count)
   end
 

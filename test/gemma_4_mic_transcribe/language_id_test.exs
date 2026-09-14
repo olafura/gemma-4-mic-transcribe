@@ -436,6 +436,21 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     assert CommonVoice.sample(root, "test", 10, seed: 7, languages: ["de"]) |> length() < 10
     assert CommonVoice.sample(root, "test", 2, seed: 7, languages: ["missing"]) == []
 
+    # a shard that does not parse (a truncated upload) is skipped with a
+    # warning and the next shard in seeded order stands in for it
+    File.write!(Path.join(root, "de/test-00002-of-00002.parquet"), "PAR1 not really parquet")
+    assert length(CommonVoice.shards(root, "de", "test")) == 3
+
+    warning =
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        send(self(), {:clips, CommonVoice.sample(root, "test", 10, seed: 7, shards: 3, languages: ["de"])})
+      end)
+
+    assert_receive {:clips, all_again}
+    assert warning =~ "skipping unreadable shard"
+    assert warning =~ "test-00002-of-00002.parquet"
+    assert Enum.sort(Enum.map(all_again, & &1.key)) == Enum.sort(Enum.map(all, & &1.key))
+
     if System.find_executable("ffmpeg") do
       samples = CommonVoice.decode!(%{bytes: wav(300), path: "tone.wav"}, 1)
       assert length(samples) == 4800
