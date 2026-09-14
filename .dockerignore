@@ -9,7 +9,8 @@
 !lib/gemma_4_mic_transcribe/language_id/
 !lib/gemma_4_mic_transcribe/language_id_cli.ex
 !lib/gemma_4_mic_transcribe/rocm_preflight.ex
-!vendor/exla/mix.exs
-!vendor/xla/mix.exs
+!vendor/exla/
+vendor/exla/cache/
+!vendor/xla/
 !vendor/ex_libsrt/mix.exs
 !artifacts/language-id/ft-depth5-1s-e2/
