@@ -110,7 +110,8 @@ defmodule Gemma4MicTranscribe.Audio do
          audio_channels: 1,
          audio_format: :f32le}
     )
-    |> Stream.filter(&match?(%Boombox.Packet{kind: :audio}, &1))
+    # a map match so builds without Boombox (MIX_TARGET=language_id) compile
+    |> Stream.filter(&match?(%{__struct__: Boombox.Packet, kind: :audio}, &1))
     |> Stream.map(& &1.payload)
   end
 

@@ -1,0 +1,15 @@
+# The image compiles only the language-ID slice; keep the context to it.
+*
+!Dockerfile
+!mix.exs
+!mix.lock
+!config/config.exs
+!lib/gemma_4_mic_transcribe/audio.ex
+!lib/gemma_4_mic_transcribe/gemma4_e4b/
+!lib/gemma_4_mic_transcribe/language_id/
+!lib/gemma_4_mic_transcribe/language_id_cli.ex
+!lib/gemma_4_mic_transcribe/rocm_preflight.ex
+!vendor/exla/mix.exs
+!vendor/xla/mix.exs
+!vendor/ex_libsrt/mix.exs
+!artifacts/language-id/ft-depth5-1s-e2/

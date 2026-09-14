@@ -7,10 +7,33 @@ defmodule Gemma4MicTranscribe.MixProject do
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.target()),
+      elixirc_options: elixirc_options(Mix.target()),
       escript: escript(),
       deps: deps()
     ]
   end
+
+  # MIX_TARGET=language_id builds only the spoken-language detector: the
+  # audio tower, the LanguageId modules and their CLI, on Torchx CPU. It is
+  # what the Dockerfile compiles, so the image needs neither the vendored
+  # EXLA/XLA build nor the WebRTC and Boombox stack.
+  defp elixirc_paths(:language_id) do
+    [
+      "lib/gemma_4_mic_transcribe/audio.ex",
+      "lib/gemma_4_mic_transcribe/gemma4_e4b",
+      "lib/gemma_4_mic_transcribe/language_id",
+      "lib/gemma_4_mic_transcribe/language_id_cli.ex",
+      "lib/gemma_4_mic_transcribe/rocm_preflight.ex"
+    ]
+  end
+
+  defp elixirc_paths(_target), do: ["lib"]
+
+  # Boombox is only reached from the transcription pipeline; the language-ID
+  # build leaves it out, so its remote calls are expected to be undefined.
+  defp elixirc_options(:language_id), do: [no_warn_undefined: [Boombox]]
+  defp elixirc_options(_target), do: []
 
   defp escript do
     {main_module, name} =
@@ -51,16 +74,16 @@ defmodule Gemma4MicTranscribe.MixProject do
 
   defp deps do
     [
-      {:boombox, "~> 0.2.11", runtime: false},
+      {:boombox, "~> 0.2.11", runtime: false, targets: [:host]},
       {:bumblebee, "~> 0.7.0"},
-      {:ex_webrtc, "~> 0.15.0", runtime: false},
+      {:ex_webrtc, "~> 0.15.0", runtime: false, targets: [:host]},
       {:explorer, "~> 0.12.0"},
       # override: ratio 4.0.1 (via membrane) declares decimal ~> 2.0 while
       # numbers 5.2.5 and explorer need ~> 3.x; ratio only pattern-matches the
       # unchanged %Decimal{} struct fields, so 3.x is fine
       {:decimal, "~> 3.1", override: true},
-      {:exla, path: "vendor/exla", override: true, runtime: false},
-      {:ex_libsrt, path: "vendor/ex_libsrt", override: true},
+      {:exla, path: "vendor/exla", override: true, runtime: false, targets: [:host]},
+      {:ex_libsrt, path: "vendor/ex_libsrt", override: true, targets: [:host]},
       {:jason, "~> 1.4"},
       # override: bumblebee 0.7.0 (latest) pins nx ~> 0.12.0, but nx 0.13
       # works with it and is required by exla/torchx 0.13
@@ -69,7 +92,7 @@ defmodule Gemma4MicTranscribe.MixProject do
       # for CVE-2026-49755 and the multipart injection advisory are 0.6-only
       {:req, "~> 0.6.3", override: true},
       {:torchx, "~> 0.13.0"},
-      {:xla, path: "vendor/xla", override: true, runtime: false}
+      {:xla, path: "vendor/xla", override: true, runtime: false, targets: [:host]}
     ]
   end
 end
