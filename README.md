@@ -1247,6 +1247,33 @@ takes about an hour on `cpu-upgrade`.
 `hf-space/` keeps the Space front matter and an upload script for the day a
 PRO account is available; the Space would build the identical Dockerfile.
 
+### Telling the detector which languages to expect
+
+Most callers know more than the detector does: an app ships in a handful
+of languages, a meeting has two. The head's softmax spreads its mass over
+all 34 languages, so `--candidates de,en,fr` (and `?languages=de,en,fr`
+on the server's `/detect`) restricts the answer to a set and renormalises
+the probabilities over it, which is the softmax of those languages' logits
+alone. `validate` takes `--candidates known` for the corpus languages the
+detector has, and its JSON keeps every clip's full distribution, so any
+other set can be scored offline without rerunning the detector. Locally,
+on the same 18 languages and 30 test sentences each (one shard per
+language from the bucket, seed 42):
+
+| detector    | 34-way | 18 candidates | random pair | random 5 | en,de,fr,es | fr,es,pt |
+| ----------- | ------ | ------------- | ----------- | -------- | ----------- | -------- |
+| frozen 1 s  | 22.0%  | 31.3% / 54.8% | 78.1%       | 54.6%    | 64.2%       | 76.7%    |
+| tuned 1 s   | 28.0%  | 35.0% / 56.1% | 80.3%       | 57.2%    | 65.8%       | 82.2%    |
+| frozen 4 s  | 42.6%  | 50.2% / 69.3% | 86.0%       | 69.0%    | 85.0%       | 95.6%    |
+
+Top-1 throughout, top-3 after the slash; the random sets average 200
+draws over the 18 languages. Restriction is worth seven to nine points at
+every size and a pair of languages is told apart four times in five, but
+the numbers say the same thing as the 34-way ones: a detector fitted on
+single words does not transfer to sentence onsets, and no post-processing
+closes a gap that size. The fix is training data of the same kind, which
+the next section takes up.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text
