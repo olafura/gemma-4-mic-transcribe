@@ -1113,6 +1113,74 @@ on the CPU without running Whisper again:
 | frozen depth 3    | 53.8%           | 49.1%  |
 | fine-tuned depth 2 | 47.4%          | 43.4%  |
 
+### Validating on Common Voice sentences, anywhere
+
+Every number above comes from the single-word corpus the detector was
+trained on, so it says nothing about a different recording: full sentences,
+speakers the head never saw, or languages outside the 34. `validate` answers
+that from the Common Voice 17 parquet shards
+(`fsicoli/common_voice_17_0`, mirrored under `common_voice/` in the
+`olafura/gemma_language_detection` bucket, one directory per language). It
+reads only the metadata columns of a seeded choice of shards, picks
+`--per-language` clips by the same hash ordering the single-word corpus uses,
+then reads the MP3 bytes of just those rows, trims each clip to the
+detector's window at the first sound and scores it:
+
+```bash
+./language_id validate --corpus /data/common_voice --per-language 30 \
+  --artifact artifacts/language-id/ft-depth5-1s-e2 --output validation.json
+```
+
+The table has a row per language directory: clips, distinct speakers, top-1
+and top-3 accuracy for languages the detector knows, and the three most
+frequent answers, which is the only thing to report for the 33 bucket
+languages outside the head. On the two shards kept locally (the first
+`de` and `ha` test shards, 1 s window, CPU):
+
+| detector           | de top-1 | de top-3 | ha (not in the head) |
+| ------------------ | -------- | -------- | -------------------- |
+| fine-tuned depth 5 | 36.7%    | 50.0%    | rw 24, ta 2, ar 1    |
+| frozen depth 5     | 36.7%    | 53.3%    | rw 22, ru 1, cs 1    |
+
+30 clips from 30 speakers each. Sentence onsets from unseen speakers land at
+half the single-word accuracy: the first second of a read sentence is
+often a breath, a filler or a proper noun, and the single-word head has seen
+none of these voices. Hausa maps to Kinyarwanda, the nearest thing in the
+head, which is the expected failure for an out-of-set language. Latency is
+unchanged at p50 116 ms, p95 127 ms per clip.
+
+The detector, the validation and the frozen sweep all run without EXLA:
+`MIX_TARGET=language_id` compiles only the language-ID slice of the project
+(no Boombox, no vendored EXLA, Torchx on CPU) and `Dockerfile` builds it
+into an image that follows the Hugging Face Docker Space conventions
+(user 1000, port 7860). `serve` is the default command, a plain
+`:gen_tcp` server answering `GET /health`, a browser page at `/` and
+`POST /detect` with the audio file as the body:
+
+```bash
+docker build -t gemma-language-id .
+docker run --rm -p 7860:7860 gemma-language-id
+curl --data-binary @clip.mp3 localhost:7860/detect
+```
+
+The same image validates against the bucket on Hugging Face's own machines.
+Docker Spaces on the free tier need a PRO subscription, so the image is
+pushed to Docker Hub instead and run as a job with the bucket mounted at
+`/data`; the job writes its JSON back into the bucket:
+
+```bash
+docker push olafurara/gemma-language-id:latest
+hf jobs run --flavor cpu-upgrade --timeout 2h \
+  -v hf://buckets/olafura/gemma_language_detection:/data \
+  olafurara/gemma-language-id \
+  language_id validate --artifact /data/artifacts/ft-depth5-1s-e2 \
+  --per-language 30 --output /data/validation/ft-depth5-1s-e2.json
+hf buckets cp hf://buckets/olafura/gemma_language_detection/validation/ft-depth5-1s-e2.json .
+```
+
+`hf-space/` keeps the Space front matter and an upload script for the day a
+PRO account is available; the Space would build the identical Dockerfile.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text
