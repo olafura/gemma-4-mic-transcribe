@@ -1033,6 +1033,86 @@ every per-clip prediction from all three systems, so a re-exported detector can
 be checked for regressions against the same Whisper answers without rerunning
 Whisper.
 
+### Fine-tuning shallow towers
+
+The frozen sweep asks how much each pretrained block contributes to a linear
+head. The follow-up question is whether a shallow tower can *learn* what the
+deeper blocks provide when the blocks themselves are trained on the task.
+`inputs` caches the 1 s mel features for the seeded train and test samples,
+and `finetune` trains the truncated tower and softmax head end-to-end with
+`Axon.Loop` and Polaris Adam, starting from the pretrained tower and a
+logistic head fitted on the frozen features, then exports the result as a
+normal detector:
+
+```bash
+./language_id inputs --split train --seconds 1 --output artifacts/language-id/inputs-train-1s-seed42
+./language_id inputs --split test --per-language 30 --seconds 1 --output artifacts/language-id/inputs-test-1s-seed42
+./language_id finetune --depth 4 --epochs 3 --batch-size 32 --learning-rate 2e-5 \
+  --freeze audio_encoder.subsample \
+  --inputs-train artifacts/language-id/inputs-train-1s-seed42 \
+  --inputs-test artifacts/language-id/inputs-test-1s-seed42 \
+  --train artifacts/language-id/features-train-1s-meanstd-seed42 \
+  --artifact artifacts/language-id/ft-depth4-1s
+```
+
+10353 training clips, 403 test clips, three epochs each, f32 on the ROCm
+client. "Frozen" is the epoch-0 evaluation of the pretrained tower with the
+fitted head, matching the 1 s sweep above to within a fraction of a point:
+
+| depth | frozen | epoch 1 | epoch 2 | epoch 3 | bf16 size | s/epoch |
+| ----- | ------ | ------- | ------- | ------- | --------- | ------- |
+| 2     | 40.0%  | 44.2%   | 45.4%   | 45.6%   | 103 MB    | 130     |
+| 3     | 51.0%  | 56.6%   | 57.2%   | 56.1%   | 153 MB    | 180     |
+| 4     | 63.1%  | 68.4%   | 70.2%   | 70.4%   | 204 MB    | 230     |
+| 5     | 75.0%  | 78.5%   | 78.5%   | 76.4%   | 254 MB    | 300     |
+
+Training each tower adds five to seven points at every depth and then
+saturates: the train loss keeps falling (0.06 after one epoch, 0.02 after
+three) while test accuracy stops moving, so the limit is the number of
+speakers in the single-word corpus, not the model. The blocks cannot be
+replaced by training: fine-tuned depth 3 (57%) stays well below frozen depth 4
+(63%), and fine-tuned depth 4 (70%) below frozen depth 5 (75%). Depth 4 does
+become a reasonable trade if 50 MB matter, since it lands within five points
+of the frozen depth-5 detector at four fifths of the size. Depth 5 gains the same three to four points and is the
+best detector here at 78.5% after two epochs; the third epoch costs two points
+back, so the exported `ft-depth5-1s-e2` artifact is a separate two-epoch run
+(78.6% after its first epoch, 78.2% at the end; run-to-run noise comes from
+the skipped steps described below).
+
+Two things had to be fixed before the loop ran at all. Nx differentiates
+`sigmoid` as `exp(-x) * s * s`, which overflows to NaN for the strongly
+negative inputs the conformer convolution norm produces (values reach a few
+hundred); the encoder now wraps SiLU and the GLU gate in a `custom_grad`
+sigmoid whose backward is `s * (1 - s)`. The clip bounds on the dense layers
+(`input_min` and friends) are frozen by default and gradients are clipped to a
+global norm of 1. After that a small fraction of steps on the ROCm client
+still returned NaN in a single gradient buffer, nondeterministically: the same
+batch and the same parameters replay clean on both the ROCm and host clients,
+so it is a device fault rather than a numerical one. The optimizer is wrapped
+so any step with a non-finite gradient applies no update and leaves Adam's
+moments untouched; the run reports how many steps were dropped (between 0 and
+24 of 972 per run here) and the results above are unaffected by them.
+
+`compare --reference` rescores a new artifact over the same clips while
+reusing the stored Whisper and XLM-RoBERTa answers, so any re-exported or
+fine-tuned detector can be gated against the table above in about a minute
+on the CPU without running Whisper again:
+
+```bash
+./language_id compare --split test --per-language 30 \
+  --artifact artifacts/language-id/ft-depth4-1s \
+  --reference artifacts/language-id/compare-base-1s-test.json
+```
+
+| detector          | shared accuracy | 34-way |
+| ----------------- | --------------- | ------ |
+| frozen depth 5    | 74.7%           | 69.5%  |
+| fine-tuned depth 5 | 79.4%          | 73.9%  |
+| fine-tuned depth 4 | 72.0%          | 66.7%  |
+| fine-tuned depth 3 | 59.6%          | 54.6%  |
+| frozen depth 3    | 53.8%           | 49.1%  |
+| fine-tuned depth 2 | 47.4%          | 43.4%  |
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text

@@ -4,11 +4,12 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   alias Gemma4MicTranscribe.LanguageId.Artifact
   alias Gemma4MicTranscribe.LanguageId.Corpus
   alias Gemma4MicTranscribe.LanguageId.Features
+  alias Gemma4MicTranscribe.LanguageId.Finetune
   alias Gemma4MicTranscribe.LanguageId.Head
   alias Gemma4MicTranscribe.LanguageId.Reference
   alias Gemma4MicTranscribe.LanguageId.Runtime
 
-  @commands ["extract", "sweep", "export", "detect", "compare"]
+  @commands ["extract", "sweep", "export", "detect", "compare", "inputs", "finetune"]
 
   @switches [
     corpus: :string,
@@ -34,6 +35,11 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     whisper_model: :string,
     whisper_cli: :string,
     reference: :string,
+    inputs_train: :string,
+    inputs_test: :string,
+    epochs: :integer,
+    max_grad_norm: :float,
+    freeze: :string,
     help: :boolean
   ]
 
@@ -46,6 +52,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       {:ok, :export, opts} -> export!(opts)
       {:ok, :detect, opts} -> detect!(opts)
       {:ok, :compare, opts} -> compare!(opts)
+      {:ok, :inputs, opts} -> inputs!(opts)
+      {:ok, :finetune, opts} -> finetune!(opts)
       {:help, usage} -> IO.puts(usage)
       {:error, message} -> abort(message)
     end
@@ -86,7 +94,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       depth: opts[:depth],
       depths: parse_depths(opts[:depths]),
       steps: Keyword.get(opts, :steps, 400),
-      learning_rate: Keyword.get(opts, :learning_rate, 0.01),
+      learning_rate: Keyword.get(opts, :learning_rate, default_learning_rate(mode)),
       weight_decay: Keyword.get(opts, :weight_decay, 0.01),
       artifact: opts[:artifact],
       output: opts[:output],
@@ -97,7 +105,12 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       pooling: Keyword.get(opts, :pooling, "mean"),
       whisper_model: opts[:whisper_model],
       whisper_cli: opts[:whisper_cli],
-      reference: opts[:reference]
+      reference: opts[:reference],
+      inputs_train: opts[:inputs_train],
+      inputs_test: opts[:inputs_test],
+      epochs: Keyword.get(opts, :epochs, 3),
+      max_grad_norm: Keyword.get(opts, :max_grad_norm, 1.0),
+      freeze: opts[:freeze] |> to_string() |> String.split(",", trim: true)
     }
 
     with :ok <- required(mode, values),
@@ -105,6 +118,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
          :ok <- positive(values.seconds, "--seconds"),
          :ok <- positive(values.batch_size, "--batch-size"),
          :ok <- positive(values.steps, "--steps"),
+         :ok <- positive(values.epochs, "--epochs"),
          :ok <- positive(values.top_k, "--top-k"),
          :ok <- positive_number(values.learning_rate, "--learning-rate"),
          :ok <- non_negative_number(values.weight_decay, "--weight-decay"),
@@ -119,6 +133,9 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   defp default_backend(:detect), do: "torchx:cpu"
   defp default_backend(:compare), do: "torchx:cpu"
   defp default_backend(_mode), do: "exla:rocm"
+
+  defp default_learning_rate(:finetune), do: 2.0e-5
+  defp default_learning_rate(_mode), do: 0.01
 
   defp parse_depths(nil), do: nil
 
@@ -140,6 +157,11 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   defp required(:export, %{depth: nil}), do: {:error, "export requires --depth"}
   defp required(:export, %{artifact: nil}), do: {:error, "export requires --artifact"}
   defp required(:detect, %{artifact: nil}), do: {:error, "detect requires --artifact"}
+  defp required(:inputs, %{output: nil}), do: {:error, "inputs requires --output"}
+  defp required(:finetune, %{inputs_train: nil}), do: {:error, "finetune requires --inputs-train"}
+  defp required(:finetune, %{train: nil}), do: {:error, "finetune requires --train"}
+  defp required(:finetune, %{depth: nil}), do: {:error, "finetune requires --depth"}
+  defp required(:finetune, %{artifact: nil}), do: {:error, "finetune requires --artifact"}
   defp required(:detect, %{input: nil}), do: {:error, "detect requires --input"}
   defp required(:compare, %{artifact: nil}), do: {:error, "compare requires --artifact"}
   defp required(:compare, %{whisper_model: nil, reference: nil}),
@@ -510,6 +532,103 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     File.write!(path, header <> pcm)
   end
 
+  defp inputs!(opts) do
+    corpus = Path.expand(opts.corpus)
+    languages = Corpus.languages(corpus)
+    clips = Corpus.sample(corpus, opts.split, opts.per_language, seed: opts.seed)
+    {:ok, spec} = Bumblebee.load_spec({:hf, opts.model_name}, module: Gemma4MicTranscribe.LanguageId.Encoder, architecture: :audio_encoder)
+
+    IO.puts("preparing #{length(clips)} #{opts.split} clips across #{length(languages)} languages, #{opts.seconds} s window")
+    started = System.monotonic_time(:millisecond)
+    inputs = Finetune.prepare_inputs(spec, clips, opts.seconds, languages: languages)
+    path = Finetune.save_inputs!(inputs, opts.output)
+    IO.puts("saved #{Finetune.Inputs.count(inputs)} clips (#{inspect(Nx.shape(inputs.features))} mel) to #{path} in #{elapsed(started)}")
+  end
+
+  defp finetune!(opts) do
+    train_inputs = Finetune.load_inputs!(opts.inputs_train)
+    test_inputs = if opts.inputs_test, do: Finetune.load_inputs!(opts.inputs_test)
+    features = Features.load!(opts.train)
+
+    if features.languages != train_inputs.languages do
+      abort("--train features and --inputs-train were sampled over different language sets")
+    end
+
+    {x, y} = Features.depth(features, opts.depth)
+    head = Head.train(x, y, features.languages, steps: opts.steps, learning_rate: 0.01, weight_decay: opts.weight_decay)
+    pooling = pooling_atom(features.meta["pooling"] || "mean")
+    seconds = train_inputs.seconds
+
+    IO.puts(
+      "fine-tuning depth #{opts.depth} on #{Finetune.Inputs.count(train_inputs)} clips " <>
+        "(#{opts.epochs} epochs, batch #{opts.batch_size}, lr #{opts.learning_rate}, " <>
+        "frozen: #{if opts.freeze == [], do: "none", else: Enum.join(opts.freeze, ", ")})"
+    )
+
+    runtime =
+      Runtime.load(
+        repo: {:hf, opts.model_name},
+        backend: opts.backend,
+        depth: opts.depth,
+        pooling: pooling,
+        seconds: seconds,
+        type: {:f, 32}
+      )
+
+    started = System.monotonic_time(:millisecond)
+
+    result =
+      Finetune.train(train_inputs, opts.depth,
+        runtime: runtime,
+        head: head,
+        test: test_inputs,
+        epochs: opts.epochs,
+        batch_size: opts.batch_size,
+        learning_rate: opts.learning_rate,
+        freeze: opts.freeze,
+        max_grad_norm: if(opts.max_grad_norm > 0, do: opts.max_grad_norm),
+        seed: opts.seed,
+        compiler_opts: compiler_opts(opts.backend),
+        log: fn progress ->
+          loss = if progress.loss, do: " loss #{format_loss(progress.loss)}", else: ""
+          accuracy = if progress.accuracy, do: " test #{percent(progress.accuracy)}", else: ""
+          skipped = if progress.skipped > 0, do: " skipped #{progress.skipped} steps", else: ""
+          IO.puts("  epoch #{progress.epoch}#{loss}#{accuracy}#{skipped} (#{elapsed(started)})")
+        end
+      )
+
+    if result.evaluation do
+      IO.puts("test accuracy #{percent(result.evaluation.accuracy)} (macro #{percent(result.evaluation.macro_accuracy)}) on #{result.evaluation.samples} clips")
+    end
+
+    artifact =
+      Finetune.to_artifact(runtime, result.model_state, opts.depth, train_inputs.languages, seconds,
+        meta: %{
+          model_name: opts.model_name,
+          finetuned: true,
+          epochs: opts.epochs,
+          learning_rate: opts.learning_rate,
+          train_clips: Finetune.Inputs.count(train_inputs),
+          test_accuracy: result.evaluation && result.evaluation.accuracy
+        }
+      )
+
+    path = Artifact.save!(artifact, opts.artifact)
+    size = Artifact.size(artifact)
+    IO.puts("saved #{path}")
+    IO.puts("  total: #{describe_size(size.total)}")
+  end
+
+  defp format_loss(loss) when is_float(loss), do: Float.round(loss, 4)
+  defp format_loss(other), do: inspect(other)
+
+  defp compiler_opts(backend) do
+    case Runtime.backend!(backend) do
+      {EXLA.Backend, backend_opts} -> [compiler: EXLA] ++ Keyword.take(backend_opts, [:client])
+      _other -> []
+    end
+  end
+
   defp train_head(x, y, languages, opts) do
     Head.train(x, y, languages,
       steps: opts.steps,
@@ -549,6 +668,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       language_id export --train DIR --depth N --artifact DIR [--test DIR] [options]
       language_id detect --artifact DIR --input AUDIO [--top-k N] [--backend NAME]
       language_id compare --artifact DIR (--whisper-model GGML | --reference JSON) [--per-language N] [--output JSON]
+      language_id inputs --output DIR [--split train|dev|test] [--per-language N] [--seconds N]
+      language_id finetune --inputs-train DIR --train FEATURES --depth N --artifact DIR [--inputs-test DIR] [options]
 
     extract runs the Gemma 4 audio tower over Common Voice single-word clips and
     saves one pooled feature vector per conformer depth. sweep trains a softmax
@@ -558,6 +679,10 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     detect classifies one audio file with a saved detector. compare runs the
     detector, whisper.cpp language detection, and Whisper transcripts fed to
     papluca/xlm-roberta-base-language-detection over the same test clips.
+    inputs caches mel features for end-to-end training; finetune trains the
+    truncated tower and head together (Axon.Loop, Adam) starting from the
+    pretrained tower and a logistic head fitted on --train features, then
+    exports the result as a detector.
 
     Options:
       --corpus PATH          Common Voice single-word corpus (default ~/Downloads/cv-corpus-7.0-singleword)
@@ -578,7 +703,13 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       --whisper-model PATH   ggml Whisper model for compare
       --whisper-cli PATH     whisper-cli binary for compare (default $WHISPER_CLI or whisper-cli)
       --reference JSON       compare: reuse Whisper and XLM-RoBERTa answers from an earlier --output
-      --output PATH          extract: output directory; compare: JSON with every row
+      --output PATH          extract/inputs: output directory; compare: JSON with every row
+      --inputs-train DIR     cached mel inputs for finetune (from inputs)
+      --inputs-test DIR      cached mel inputs evaluated after every epoch
+      --epochs N             finetune epochs (default 3)
+      --max-grad-norm X      finetune global gradient-norm clip (default 1.0, 0 disables)
+      --freeze LIST          finetune layer-name prefixes to keep fixed, e.g. audio_encoder.subsample
+                             (finetune --learning-rate defaults to 2.0e-5)
     """
   end
 end

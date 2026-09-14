@@ -3,6 +3,7 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
 
   alias Gemma4MicTranscribe.LanguageId.Artifact
   alias Gemma4MicTranscribe.LanguageId.Corpus
+  alias Gemma4MicTranscribe.LanguageId.Finetune
   alias Gemma4MicTranscribe.LanguageId.Encoder
   alias Gemma4MicTranscribe.LanguageId.Head
   alias Gemma4MicTranscribe.LanguageId.Runtime
@@ -202,6 +203,30 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
 
     assert gated.reference == "base.json"
 
+    assert {:ok, :inputs, inputs} = LanguageIdCLI.parse(["inputs", "--output", "mel", "--seconds", "1"])
+    assert inputs.seconds == 1
+    assert {:error, "inputs requires --output"} = LanguageIdCLI.parse(["inputs"])
+
+    assert {:ok, :finetune, finetune} =
+             LanguageIdCLI.parse([
+               "finetune",
+               "--inputs-train",
+               "mel",
+               "--train",
+               "feats",
+               "--depth",
+               "3",
+               "--artifact",
+               "out",
+               "--freeze",
+               "audio_encoder.subsample,audio_encoder.blocks.0"
+             ])
+
+    assert finetune.learning_rate == 2.0e-5
+    assert finetune.epochs == 3
+    assert finetune.freeze == ["audio_encoder.subsample", "audio_encoder.blocks.0"]
+    assert {:error, "finetune requires --depth"} = LanguageIdCLI.parse(["finetune", "--inputs-train", "mel", "--train", "f", "--artifact", "o"])
+
     assert {:help, usage} = LanguageIdCLI.parse([])
     assert usage =~ "language_id detect"
     assert {:error, _} = LanguageIdCLI.parse(["unknown"])
@@ -224,8 +249,95 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     assert Corpus.trim_onset(tone.(50)) == tone.(50)
   end
 
+  test "dense head parameters reproduce the standardized logistic head" do
+    key = Nx.Random.key(3)
+    {x, key} = Nx.Random.normal(key, shape: {40, 6}, type: :f32)
+    {labels, _key} = Nx.Random.randint(key, 0, 3, shape: {40})
+    head = Head.train(Nx.multiply(x, 3.0), labels, ["aa", "bb", "cc"], steps: 50)
+
+    dense = Finetune.head_parameters(head)
+    folded = x |> Nx.multiply(3.0) |> Nx.dot(dense["kernel"]) |> Nx.add(dense["bias"])
+    folded_log_probs = Nx.subtract(folded, Nx.logsumexp(folded, axes: [1], keep_axes: true))
+    assert_all_close(folded_log_probs, Head.log_probs(head, Nx.multiply(x, 3.0)))
+
+    back = Finetune.head_from_parameters(dense, head.languages)
+    assert_all_close(Head.log_probs(back, Nx.multiply(x, 3.0)), Head.log_probs(head, Nx.multiply(x, 3.0)))
+  end
+
+  test "fine-tuning model trains end to end on a tiny tower and exports an artifact" do
+    spec = tiny_encoder(depth: 1, pooling: :mean_std)
+    {_predict, params, tokens} = init(spec, 2, 16)
+    frames = 16
+
+    runtime = %Runtime{spec: spec, params: params, seconds: 1, frames: frames, tokens: tokens}
+    languages = ["aa", "bb"]
+
+    inputs = %Finetune.Inputs{
+      features: Nx.concatenate([Nx.broadcast(0.5, {4, frames, 8}), Nx.broadcast(-0.5, {4, frames, 8})]),
+      masks: Nx.broadcast(1, {8, tokens}),
+      labels: Nx.tensor([0, 0, 0, 0, 1, 1, 1, 1]),
+      languages: languages,
+      seconds: 1,
+      keys: Enum.map(1..8, &"clip#{&1}")
+    }
+
+    width = 2 * spec.audio_hidden_size
+
+    head = %Head{
+      mean: Nx.broadcast(0.0, {width}),
+      std: Nx.broadcast(1.0, {width}),
+      kernel: Nx.broadcast(0.0, {width, 2}),
+      bias: Nx.tensor([0.0, 0.0]),
+      languages: languages
+    }
+
+    log = fn progress -> send(self(), {:progress, progress}) end
+
+    result =
+      Finetune.train(inputs, 1,
+        runtime: runtime,
+        head: head,
+        test: inputs,
+        epochs: 2,
+        batch_size: 4,
+        learning_rate: 1.0e-2,
+        compiler_opts: [],
+        log: log
+      )
+
+    assert_received {:progress, %{epoch: 0, accuracy: initial}}
+    assert_received {:progress, %{epoch: 1, loss: loss}}
+    assert is_float(loss) and loss > 0
+    assert result.evaluation.accuracy >= initial
+    assert Map.keys(result.model_state.data) |> Enum.sort() |> List.last() == "head"
+
+    artifact = Finetune.to_artifact(runtime, result.model_state, 1, languages, 1)
+    assert artifact.depth == 1
+    assert artifact.languages == languages
+    {block_layer, tensors} = Enum.find(artifact.params.data, fn {name, _} -> String.starts_with?(name, "audio_encoder.blocks.0") end)
+    assert is_binary(block_layer)
+    assert Enum.all?(tensors, fn {_name, tensor} -> Nx.type(tensor) == {:bf, 16} end)
+    refute Map.has_key?(artifact.params.data, "head")
+  end
+
   defp assert_all_close(left, right) do
     assert Nx.all_close(left, right, atol: 1.0e-4, rtol: 1.0e-4) |> Nx.to_number() == 1,
            "tensors differ: #{inspect(left)} vs #{inspect(right)}"
+  end
+
+  test "non-finite gradients apply no update and are counted" do
+    {init, update} = Finetune.guard_non_finite(Polaris.Optimizers.sgd(learning_rate: 0.5))
+    params = %{"layer" => %{"kernel" => Nx.tensor([1.0, 2.0])}}
+    state = init.(params)
+
+    good = %{"layer" => %{"kernel" => Nx.tensor([1.0, 1.0])}}
+    {updates, state} = update.(good, state, params)
+    assert Nx.to_flat_list(updates["layer"]["kernel"]) == [-0.5, -0.5]
+    assert Nx.to_number(state.skipped) == 0
+
+    bad = %{"layer" => %{"kernel" => Nx.tensor([:nan, 1.0])}}
+    {updates, state} = update.(bad, state, params)
+    assert Nx.to_flat_list(updates["layer"]["kernel"]) == [0.0, 0.0]
+    assert Nx.to_number(state.skipped) == 1
   end
 end
