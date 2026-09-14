@@ -1,7 +1,7 @@
 defmodule Gemma4MicTranscribe.LanguageId.CommonVoice do
   @moduledoc """
   Samples full-sentence clips from Common Voice parquet shards, the layout of
-  `fsicoli/common_voice_17_0` mirrored into a Hugging Face bucket.
+  `fixie-ai/common_voice_17_0` mirrored into a Hugging Face bucket.
 
   The root holds one directory per language. A split is either a flat set of
   shards (`de/test-00000-of-00008.parquet`) or nested under chunk-range
@@ -125,14 +125,17 @@ defmodule Gemma4MicTranscribe.LanguageId.CommonVoice do
     Enum.sort_by(shards, fn shard -> :crypto.hash(:sha256, "#{seed}:#{language}:#{Path.basename(shard)}") end)
   end
 
-  # The first `count` shards in seeded order whose metadata reads. A shard
-  # that fails to parse (a truncated upload, typically) is reported on
-  # stderr and the next one in the order takes its place, so one bad file
-  # does not stop a run over a whole bucket.
+  # The first `count` shards in seeded order whose metadata reads. Reads
+  # over a mounted bucket fail now and then with a parquet "bad data" error
+  # on a file that is fine, so each shard gets a few attempts; one that
+  # still fails is reported on stderr and the next shard in the order takes
+  # its place, so one bad file does not stop a run over a whole bucket.
+  @read_attempts 3
+
   defp readable_shards(shards, count) do
     shards
     |> Stream.map(fn shard ->
-      case DF.from_parquet(shard, columns: @meta_columns) do
+      case read_meta(shard, @read_attempts) do
         {:ok, frame} ->
           {shard, DF.to_rows(frame)}
 
@@ -143,6 +146,21 @@ defmodule Gemma4MicTranscribe.LanguageId.CommonVoice do
     end)
     |> Stream.reject(&is_nil/1)
     |> Enum.take(count)
+  end
+
+  defp read_meta(shard, attempts) do
+    case DF.from_parquet(shard, columns: @meta_columns) do
+      {:ok, frame} ->
+        {:ok, frame}
+
+      {:error, error} when attempts > 1 ->
+        IO.puts(:stderr, "retrying shard #{shard}: #{Exception.message(error)}")
+        Process.sleep(2_000)
+        read_meta(shard, attempts - 1)
+
+      {:error, error} ->
+        {:error, error}
+    end
   end
 
   defp blank_to(nil, default), do: default

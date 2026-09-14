@@ -446,7 +446,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       end)
 
     if opts.output do
-      File.write!(Path.expand(opts.output), Jason.encode!(%{artifact: Path.expand(opts.artifact), whisper_model: whisper_model, rows: rows}, pretty: true))
+      write_output!(opts.output, Jason.encode!(%{artifact: Path.expand(opts.artifact), whisper_model: whisper_model, rows: rows}, pretty: true))
     end
 
     print_comparison(rows)
@@ -556,7 +556,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   end
 
   # Scores a saved detector on full-sentence Common Voice clips read straight
-  # from parquet shards (fsicoli/common_voice_17_0 mirrored into a bucket).
+  # from parquet shards (fixie-ai/common_voice_17_0 mirrored into a bucket).
   # Languages the detector was never trained on cannot be right or wrong, so
   # they are reported by what the detector calls them instead.
   defp validate!(opts) do
@@ -617,10 +617,12 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       end)
 
     summary = summarize_validation(rows)
+    # the table first: an hour of scoring must not be lost to a write error
+    print_validation(summary)
 
     if opts.output do
-      File.write!(
-        Path.expand(opts.output),
+      write_output!(
+        opts.output,
         Jason.encode!(
           %{
             artifact: Path.expand(opts.artifact),
@@ -638,8 +640,13 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
         )
       )
     end
+  end
 
-    print_validation(summary)
+  # Creates the parent directory, which a bucket mounted into a job may lack.
+  defp write_output!(output, contents) do
+    path = Path.expand(output)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, contents)
   end
 
   @doc false
@@ -894,7 +901,7 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     truncated tower and head together (Axon.Loop, Adam) starting from the
     pretrained tower and a logistic head fitted on --train features, then
     exports the result as a detector. validate scores a detector on
-    full-sentence Common Voice parquet shards (fsicoli/common_voice_17_0, one
+    full-sentence Common Voice parquet shards (fixie-ai/common_voice_17_0, one
     directory per language, as mounted from a Hugging Face bucket) and reports
     per-language accuracy; serve answers POST /detect with the ranking for the
     audio file in the request body.
