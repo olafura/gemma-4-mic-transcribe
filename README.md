@@ -1247,6 +1247,41 @@ takes about an hour on `cpu-upgrade`.
 `hf-space/` keeps the Space front matter and an upload script for the day a
 PRO account is available; the Space would build the identical Dockerfile.
 
+#### On an Nvidia GPU
+
+The same job runs on a GPU flavor with the EXLA build of the slice.
+`MIX_TARGET=language_id_cuda` compiles the same modules plus EXLA on the
+precompiled cuda12 XLA archive, which needs no CUDA toolkit at build time;
+what XLA loads at run time (cudart, cuBLAS, cuDNN, cuFFT, cuSPARSE, NVRTC,
+NCCL, NVSHMEM, `ptxas` and `libdevice`) comes from the `nvidia-*-cu12`
+wheels, which the Dockerfile installs into `/opt/nvidia` and
+`hf-space/job_cuda.sh` installs with pip at the start of the job. Only
+`libcuda.so.1` comes from the host driver. Two pins matter: XLA loads the
+NVSHMEM bootstrap and transport plugins by their `.so.3` names, which
+NVSHMEM 3.4 and later renamed to `.so.6` (the NIF then fails to load), and
+`libnvrtc-builtins.so.12.9` ties NVRTC to 12.9. `/usr/local/cuda` points at
+the nvcc wheel so XLA finds `bin/ptxas` and `nvvm/libdevice`. Torchx was
+tried first and dropped: its CUDA build wants the CUDA toolkit present when
+cmake configures the NIF.
+
+```bash
+docker build --build-arg MIX_TARGET=language_id_cuda -t gemma-language-id:cuda .
+docker create --name lidc gemma-language-id:cuda && docker cp lidc:/home/user/app runtime-cuda/app && docker rm lidc
+rm -rf runtime-cuda/app/artifacts
+hf buckets sync runtime-cuda hf://buckets/olafura/gemma_language_detection/runtime-cuda
+hf buckets cp hf-space/job_cuda.sh hf://buckets/olafura/gemma_language_detection/jobs/hf_job_cuda.sh
+hf jobs run --flavor t4-small --timeout 3h -d -e ARTIFACT=detector-sent49-depth5-1s \
+  -v hf://buckets/olafura/gemma_language_detection:/data \
+  hexpm/elixir:1.20.2-erlang-29.0.3-debian-bookworm-20260713-slim bash /data/jobs/hf_job_cuda.sh
+```
+
+The bucket drops execute bits, so the script `chmod +x` the escript after
+copying it. On a `t4-small` the 49-language head loads in 9 s and scores
+a 1 s clip in 172 ms p50 (226 ms p95), against 1.3 s on `cpu-upgrade` and
+116 ms on the local CPU; sampling the shards over the mount still takes
+12 to 15 minutes, so the GPU turns an hour of scoring into four minutes
+and the mount is what remains. Its results are in the next section.
+
 ### Telling the detector which languages to expect
 
 Most callers know more than the detector does: an app ships in a handful
@@ -1363,6 +1398,23 @@ to Japanese, Vietnamese to Thai, Hindi to Urdu, Malayalam to Tamil,
 Asturian and Occitan to Galician and Spanish. More shards fix the first
 group; the neighbour confusions are what one second of a frozen tower can
 tell apart.
+
+On Hugging Face the same head, scored on a T4 through EXLA (see "On an
+Nvidia GPU" above, 30 clips from a seeded test shard of each language,
+1436 clips), gets 48.7% top-1 and 66.4% top-3 49-way. On the 18 languages
+of the table above it answers 70.0% / 87.4% with all 49 open, against
+25.7% for the single-word head at 1 s and 42.8% for the frozen tower at
+4 s, and 76.1% / 90.9% when told the candidates; a random pair out of 49
+is 91.8% and a random five 80.0%. The languages with one to five test
+speakers in the sample (Asturian, Macedonian, Malayalam, Telugu,
+Vietnamese) score 0 to 20%, which says as much about the sample as the
+head. The mixed 34-language head on the same T4 sample gets 75.2% / 89.3%
+on its 18 sentence languages (120 ms p50 per clip on that run), three
+times the 25.7% of the single-word head that opened this validation, and
+the 31 languages it does not know go to a neighbour
+as before: Korean to Japanese, Vietnamese to Thai, Galician, Asturian and
+Occitan to Spanish, Belarusian and Ukrainian to Russian, Malayalam,
+Bengali and Marathi to Tamil.
 
 ## Splitting raw-audio inference
 
