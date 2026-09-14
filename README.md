@@ -1416,6 +1416,77 @@ as before: Korean to Japanese, Vietnamese to Thai, Galician, Asturian and
 Occitan to Spanish, Belarusian and Ukrainian to Russian, Malayalam,
 Bengali and Marathi to Tamil.
 
+### Against Ultravox
+
+[Ultravox](https://huggingface.co/fixie-ai/ultravox-v0_7-glm-4_6) is the
+other way to build a speech language detector: a Whisper encoder projected
+into a chat LLM, asked in words which language it heard. The comparison
+uses fixie-ai's own
+[language_detection-audio](https://huggingface.co/datasets/fixie-ai/language_detection-audio)
+set: 300 clips in 21 European languages (all of them in the 49-language
+head, nine of them in the mixed head), 1.2 to 39 s long, median 9 s, 53
+minutes in total. The clips are sentences read by many speakers, so this is
+the sentence-onset task of the previous section, not the single-word one.
+
+`hf-space/ultravox/` holds the harness. `gemma_lid_eval.py` posts each clip
+to a running `language_id serve` and records the probability map, either
+from the first second of the clip or from every full second of it with the
+log-probabilities summed (silent seconds skipped). `ultravox_lid.py` loads an
+Ultravox checkpoint with transformers, puts the whole clip (or its first
+second) behind a system prompt that lists the 21 names, and records two
+answers per clip: the greedy generation, and a ranking of the 21 names by
+the log-probability of the full name at the answer position, computed
+through the KV cache so the model does one prefill and one short
+continuation per name. The ranking gives Ultravox the same restricted
+candidate set and top-3 that the detector gets. `job.sh` runs it as a
+Hugging Face job on the bucket used for validation (`hf jobs run --flavor
+a100-large -e MODEL=... -e NAME=... -v hf://buckets/...:/data
+pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime bash /data/jobs/hf_job_ultravox.sh`),
+and `lid_compare.py` rescores any of the result files on a language subset.
+
+The v0.7 GLM-4.6 checkpoint in the link needs the 357B GLM-4.6 backbone
+(715 GB in bf16, an eight-H200 job); the numbers below are for
+[ultravox-v0_6-qwen-3-32b](https://huggingface.co/fixie-ai/ultravox-v0_6-qwen-3-32b),
+the largest non-gated variant that fits one A100, same encoder and
+projector design with a Qwen3-32B backbone. Detector times are Torchx on
+the CPU here; Ultravox times are on the A100, with the ranked answer
+costing one prefill plus 15 short continuations and the generated answer
+one prefill (131 ms p50) plus a few tokens.
+
+| system                                      | input        | 21 langs top-1 | top-3 | 9 langs top-1 | p50      |
+| ------------------------------------------- | ------------ | -------------- | ----- | ------------- | -------- |
+| 49-language head, 21 candidates             | first 1 s    | 46.0%          | 64.3% | 82.8%         | 168 ms   |
+| 49-language head, 1 s windows summed        | whole clip   | 57.7%          | 74.7% | 95.1%         | 1453 ms  |
+| mixed 34-language head, 9 candidates        | first 1 s    |                |       | 84.4%         | 165 ms   |
+| mixed 34-language head, 1 s windows summed  | whole clip   |                |       | 95.9%         | 1596 ms  |
+| Ultravox Qwen3-32B, ranked names            | first 1 s    | 47.0%          | 62.0% | 73.0%         | 1373 ms  |
+| Ultravox Qwen3-32B, generated answer        | first 1 s    | 45.0%          |       | 68.9%         | 388 ms   |
+| Ultravox Qwen3-32B, ranked names            | whole clip   | 90.3%          | 96.7% | 98.4%         | 1341 ms  |
+| Ultravox Qwen3-32B, generated answer        | whole clip   | 89.3%          |       | 96.7%         | 406 ms   |
+
+The "9 langs" column rescores the same rows on the clips of the nine
+languages both heads know (122 clips), with the candidates restricted to
+those nine. The 49-language head's open 49-way answer on all 300 clips is
+40.3% top-1 and 57.3% top-3.
+
+Given the same first second, the 32B Ultravox and the 3M-parameter head on
+the truncated tower are level: 47.0% against 46.0% on 21 candidates, and on
+the nine languages the head is ahead, 82.8% against 73.0%, at 168 ms on a
+CPU against 1.4 s on an A100. Ultravox's generated answers at 1 s are
+worse than its ranking (45.0%), and 11 of them are not a language name at
+all ("The text you provided appears to be a mix of..."); the parser takes
+the first candidate name found in the reply. Given the whole clip, Ultravox
+pulls away: 90.3% on 21 languages, 98.4% on the nine, while summing the
+head's one-second windows over the clip gets 57.7% and 95.1%. On the nine
+languages the frozen tower with a linear head is within three points of
+the 32B model at any length; the gap is on the twelve languages the heads
+saw at most a few hundred sentence clips of (Slovenian 0%, Estonian,
+Latvian, Lithuanian, Hungarian, Slovak, Bulgarian, Greek, Romanian,
+Danish, Finnish, Italian), where more shards are the obvious fix. Ultravox
+is not free of that either: Hungarian is its worst language at 42.3% ranked
+and 30.8% generated on the whole clip, mostly answered Portuguese and
+Polish.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text
