@@ -1454,7 +1454,7 @@ after another, not batched). Ultravox takes the whole clip in one prompt.
 | detector, 1 s windows, A100        | 57.7% | 74.7% | 0.8 s      |
 | Ultravox Qwen3-32B, A100           | 89.3% |       | 406 ms     |
 
-So at one second the 3M-parameter head on the truncated tower is level
+So at one second the 127M-parameter tower slice with its 100k-parameter head is level
 with a 32B model, at a quarter of its model time on the same GPU and a
 third of it on a CPU. Given a whole sentence the LLM wins clearly; summing
 the head's windows recovers a third of the gap. The whole-clip gap sits in
@@ -1473,6 +1473,11 @@ so most of what the server measures is not the GPU matmuls. The mixed
 34-language head, restricted to the nine languages it shares with the set,
 scores 84.4% at one second and 95.9% over the clip, the same as the
 49-language head on those languages.
+
+Both heads are on the Hub as a work-in-progress model repo,
+[olafura/gemma-language-detection](https://huggingface.co/olafura/gemma-language-detection)
+(`sent49/` and `mixed34/`, one `language_id` artifact each, private until
+the weak languages are fixed).
 
 `hf-space/ultravox/` holds the harness: `gemma_lid_eval.py` posts clips to
 a running `language_id serve` (first second, or `--windows`) and records
