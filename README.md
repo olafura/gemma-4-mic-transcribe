@@ -1274,6 +1274,96 @@ single words does not transfer to sentence onsets, and no post-processing
 closes a gap that size. The fix is training data of the same kind, which
 the next section takes up.
 
+### Heads fitted on sentence onsets
+
+The bucket holds the Common Voice `train` split as well, so the detector can
+be fitted on the recording it is judged on. `extract` reads a parquet corpus
+root the same way `validate` does (`--corpus DIR`, one language directory
+each, `--shards N` metadata shards per language), samples up to
+`--per-language` clips, trims each to the 1 s onset window and pools the
+frozen depth-5 features; `export` fits the head. The train and test shards
+have disjoint speakers, and the test features only report accuracy:
+
+```bash
+./language_id extract --corpus cv/common_voice --split train --per-language 1500 --shards 10 \
+  --seconds 1 --pooling mean_std --output artifacts/language-id/features-sent-train-1s-meanstd-1500-seed42
+./language_id extract --corpus cv/common_voice --split test --per-language 30 \
+  --seconds 1 --pooling mean_std --output artifacts/language-id/features-sent-test-1s-meanstd-seed42
+./language_id export --depth 5 \
+  --train artifacts/language-id/features-train-1s-meanstd-seed42,artifacts/language-id/features-sent-train-1s-meanstd-1500-seed42 \
+  --test artifacts/language-id/features-sent-test-1s-meanstd-seed42 \
+  --artifact artifacts/language-id/detector-mixed-depth5-1s
+```
+
+`--train` takes several feature sets and merges them (union of languages,
+same pooling), so one head can be fitted on single words and sentence
+onsets together. On the 18 languages and 540 test sentences of the previous
+section, 1 s windows, top-1 and top-3:
+
+| head fitted on                                     | clips | 18-way        | pair  | random 5 | en,de,fr,es | fr,es,pt |
+| -------------------------------------------------- | ----- | ------------- | ----- | -------- | ----------- | -------- |
+| single words, tower tuned (`ft-depth5-1s-e2`)      | 10353 | 28.0% / 46.3% | 80.3% | 57.2%    | 65.8%       | 82.2%    |
+| sentence onsets, 400 per language                  | 7200  | 72.0% / 87.2% | 94.1% | 84.8%    | 85.0%       | 97.8%    |
+| sentence onsets, 1500 per language                 | 27000 | 72.6% / 88.1% | 94.2% | 85.5%    | 82.5%       | 95.6%    |
+| sentence onsets, tower fine-tuned too              | 7200  | 72.2% / 87.0% | 93.6% | 84.9%    | 85.0%       | 95.6%    |
+| single words + sentence onsets (34 languages)      | 37353 | 73.7% / 89.4% | 94.6% | 86.6%    | 85.0%       | 93.3%    |
+
+The first row is the previous section's tuned detector restricted to the
+18 languages; the candidate columns are scored offline from the saved
+distributions as before. Fitting the head on 400 sentence onsets per
+language, tower untouched, takes accuracy from 28% to 72% and the random
+pair from 80% to 94%. Everything after that is flat: four times the data
+adds half a point, and fine-tuning the tower on the same 7200 clips (three
+epochs, batch 16, otherwise as above) moves the head-only 72.0% to 71.7%,
+72.2% and 72.2% while the training loss falls to 0.009. The 400-clip head
+is 0.2 MB. The tower's pooled features are the limit at this window, not the
+head, and so it is the data mix that decides what the head is good at.
+
+The mixed head keeps its single-word accuracy: 73.0% on the shared-language
+gate against 74.7% for the frozen detector it replaces (68.5% against 69.5%
+34-way), within the noise of 403 clips. It scores better on the sentence
+test than the sentence-only heads as well, so it is the detector to ship
+for either kind of input. Per language, the tuned single-word detector
+against the mixed head, top-1 and top-3:
+
+| language | words only    | words + sentences | language | words only    | words + sentences |
+| -------- | ------------- | ----------------- | -------- | ------------- | ----------------- |
+| ar       | 40.0% / 53.3% | 93.3% / 100.0%    | ka       | 33.3% / 66.7% | 63.3% / 90.0%     |
+| br       | 0.0% / 0.0%   | 56.7% / 83.3%     | nl       | 43.3% / 66.7% | 60.0% / 86.7%     |
+| cs       | 23.3% / 56.7% | 63.3% / 90.0%     | pl       | 40.0% / 56.7% | 46.7% / 80.0%     |
+| cy       | 33.3% / 50.0% | 86.7% / 93.3%     | pt       | 23.3% / 40.0% | 76.7% / 96.7%     |
+| de       | 36.7% / 50.0% | 73.3% / 96.7%     | ru       | 36.7% / 63.3% | 80.0% / 86.7%     |
+| en       | 13.3% / 23.3% | 60.0% / 73.3%     | sv-SE    | 6.7% / 26.7%  | 56.7% / 80.0%     |
+| es       | 36.7% / 66.7% | 96.7% / 100.0%    | ta       | 50.0% / 70.0% | 90.0% / 96.7%     |
+| fr       | 46.7% / 70.0% | 86.7% / 96.7%     | th       | 0.0% / 6.7%   | 93.3% / 93.3%     |
+| ja       | 20.0% / 30.0% | 83.3% / 90.0%     | tr       | 20.0% / 36.7% | 60.0% / 76.7%     |
+
+Breton and Thai, which the single-word head had never seen and mapped to
+French and Cantonese, are found more than half and nine times in ten;
+English, Polish and Swedish stay the weakest, still confused with their
+neighbours in one second of speech.
+
+The same recipe extends to every language the bucket has. One train and one
+test shard for each of the 31 languages outside the 18 (`hf buckets cp`,
+2.1 GB), features from up to 1500 onsets per language, and a head fitted on
+the two sentence sets together (`detector-sent49-depth5-1s`, 47569 clips,
+49 languages, head 0.4 MB) scores 45.8% top-1 and 62.7% top-3 49-way over
+1438 test sentences. Restricting it to the original 18 gives 73.9%, the same
+as the 18-language heads, so the extra languages cost nothing where the
+caller can name the candidates; a random pair out of 49 is 90.5% and a
+random five 76.3%. The 49-way number hides two kinds of language.
+Bengali, Hungarian, Swahili, Thai, Spanish, Arabic, Tamil, Latvian,
+Japanese and Welsh are at 80% or better, and all the languages with 1500
+training onsets except English and Polish land between 50% and 90%. Below
+that sit the languages
+one shard does not cover: Telugu has 8 training clips, Occitan 34, Asturian
+49, Korean 47, and they score 0%; Hausa has 241 clips and maps to Swahili; Macedonian, Slovenian, Serbian, Slovak and Bulgarian have
+a few hundred each and land on Belarusian, Ukrainian or Czech; Korean goes
+to Japanese, Vietnamese to Thai, Hindi to Urdu, Malayalam to Tamil,
+Asturian and Occitan to Galician and Spanish. More shards fix the first
+group; the neighbour confusions are what one second of a frozen tower can
+tell apart.
+
 ## Splitting raw-audio inference
 
 The model can also be partitioned at the tail boundary. The prefix owns text
