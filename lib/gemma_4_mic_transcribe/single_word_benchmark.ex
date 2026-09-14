@@ -6,6 +6,7 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
   alias Gemma4MicTranscribe.Gemma4.DecoderPipeline
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
+  alias Gemma4MicTranscribe.LanguageId.Corpus
 
   @sample_rate 16_000
 
@@ -51,17 +52,8 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     end
   end
 
-  def load_cases(corpus, split, languages, per_language, seed \\ 42) do
-    languages = languages || corpus_languages(corpus)
-
-    languages
-    |> Enum.flat_map(fn language ->
-      corpus
-      |> language_cases(language, split)
-      |> Enum.sort_by(fn sample -> :crypto.hash(:sha256, "#{seed}:#{sample.key}") end)
-      |> Enum.take(per_language)
-    end)
-  end
+  def load_cases(corpus, split, languages, per_language, seed \\ 42),
+    do: Corpus.load_cases(corpus, split, languages, per_language, seed)
 
   def normalize(text) do
     text
@@ -339,47 +331,6 @@ defmodule Gemma4MicTranscribe.SingleWordBenchmark do
     case System.cmd("ffmpeg", args, stderr_to_stdout: true) do
       {audio, 0} -> Audio.binary_to_f32_samples(audio)
       {message, status} -> abort("ffmpeg failed for #{path} (#{status}): #{message}")
-    end
-  end
-
-  defp corpus_languages(corpus) do
-    corpus
-    |> File.ls!()
-    |> Enum.filter(&File.dir?(Path.join(corpus, &1)))
-    |> Enum.sort()
-  end
-
-  defp language_cases(corpus, language, split) do
-    tsv = Path.join([corpus, language, split <> ".tsv"])
-
-    if File.regular?(tsv) do
-      [header | rows] = tsv |> File.read!() |> String.split("\n", trim: true)
-      columns = header |> String.split("\t") |> Enum.with_index() |> Map.new()
-      path_index = Map.fetch!(columns, "path")
-      sentence_index = Map.fetch!(columns, "sentence")
-
-      Enum.flat_map(rows, fn row ->
-        fields = String.split(row, "\t")
-        relative_path = Enum.at(fields, path_index)
-        expected = Enum.at(fields, sentence_index)
-        path = Path.join([corpus, language, "clips", relative_path || ""])
-
-        if relative_path && expected && File.regular?(path) do
-          [
-            %{
-              key: language <> "/" <> relative_path,
-              language: language,
-              relative_path: relative_path,
-              path: path,
-              expected: expected
-            }
-          ]
-        else
-          []
-        end
-      end)
-    else
-      []
     end
   end
 

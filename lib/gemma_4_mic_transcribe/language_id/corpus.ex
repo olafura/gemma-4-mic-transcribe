@@ -9,7 +9,6 @@ defmodule Gemma4MicTranscribe.LanguageId.Corpus do
   """
 
   alias Gemma4MicTranscribe.Audio
-  alias Gemma4MicTranscribe.SingleWordBenchmark
 
   @sample_rate 16_000
 
@@ -30,10 +29,61 @@ defmodule Gemma4MicTranscribe.LanguageId.Corpus do
     languages = Keyword.get(opts, :languages)
 
     corpus
-    |> SingleWordBenchmark.load_cases(split, languages, per_language, seed)
+    |> load_cases(split, languages, per_language, seed)
     |> Enum.map(fn sample ->
       %{key: sample.key, language: sample.language, path: sample.path, split: split}
     end)
+  end
+
+  @doc """
+  Seeded per-language sample of transcription cases: every clip listed in
+  `<language>/<split>.tsv` whose MP3 exists, ordered by a hash of the seed and
+  clip key so the same seed always picks the same clips.
+  """
+  def load_cases(corpus, split, languages, per_language, seed \\ 42) do
+    languages = languages || languages(corpus)
+
+    Enum.flat_map(languages, fn language ->
+      corpus
+      |> cases(language, split)
+      |> Enum.sort_by(fn sample -> :crypto.hash(:sha256, "#{seed}:#{sample.key}") end)
+      |> Enum.take(per_language)
+    end)
+  end
+
+  @doc "Every clip of one language and split with its expected transcript."
+  def cases(corpus, language, split) do
+    tsv = Path.join([corpus, language, split <> ".tsv"])
+
+    if File.regular?(tsv) do
+      [header | rows] = tsv |> File.read!() |> String.split("\n", trim: true)
+      columns = header |> String.split("\t") |> Enum.with_index() |> Map.new()
+      path_index = Map.fetch!(columns, "path")
+      sentence_index = Map.fetch!(columns, "sentence")
+
+      Enum.flat_map(rows, fn row ->
+        fields = String.split(row, "\t")
+        relative_path = Enum.at(fields, path_index)
+        expected = Enum.at(fields, sentence_index)
+        path = Path.join([corpus, language, "clips", relative_path || ""])
+
+        if relative_path && expected && File.regular?(path) do
+          [
+            %{
+              key: language <> "/" <> relative_path,
+              language: language,
+              relative_path: relative_path,
+              path: path,
+              expected: expected
+            }
+          ]
+        else
+          []
+        end
+      end)
+    else
+      []
+    end
   end
 
   @doc """
