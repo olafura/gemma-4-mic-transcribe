@@ -2,11 +2,13 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
   use ExUnit.Case, async: true
 
   alias Gemma4MicTranscribe.LanguageId.Artifact
+  alias Gemma4MicTranscribe.LanguageId.CommonVoice
   alias Gemma4MicTranscribe.LanguageId.Corpus
   alias Gemma4MicTranscribe.LanguageId.Finetune
   alias Gemma4MicTranscribe.LanguageId.Encoder
   alias Gemma4MicTranscribe.LanguageId.Head
   alias Gemma4MicTranscribe.LanguageId.Runtime
+  alias Gemma4MicTranscribe.LanguageId.Server
   alias Gemma4MicTranscribe.LanguageIdCLI
 
   defp tiny_encoder(opts) do
@@ -227,6 +229,19 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     assert finetune.freeze == ["audio_encoder.subsample", "audio_encoder.blocks.0"]
     assert {:error, "finetune requires --depth"} = LanguageIdCLI.parse(["finetune", "--inputs-train", "mel", "--train", "f", "--artifact", "o"])
 
+    assert {:ok, :validate, validate} = LanguageIdCLI.parse(["validate", "--artifact", "d", "--languages", "de,ha", "--shards", "2"])
+    assert validate.corpus == "/data/common_voice"
+    assert validate.split == "test"
+    assert validate.backend == "torchx:cpu"
+    assert validate.languages == ["de", "ha"]
+    assert validate.shards == 2
+    assert {:error, "validate requires --artifact"} = LanguageIdCLI.parse(["validate"])
+    assert {:error, "--shards must be a positive integer"} = LanguageIdCLI.parse(["validate", "--artifact", "d", "--shards", "0"])
+
+    assert {:ok, :serve, serve} = LanguageIdCLI.parse(["serve", "--artifact", "d"])
+    assert serve.port == 7860
+    assert {:error, "serve requires --artifact"} = LanguageIdCLI.parse(["serve", "--port", "8080"])
+
     assert {:help, usage} = LanguageIdCLI.parse([])
     assert usage =~ "language_id detect"
     assert {:error, _} = LanguageIdCLI.parse(["unknown"])
@@ -340,4 +355,153 @@ defmodule Gemma4MicTranscribe.LanguageIdTest do
     assert Nx.to_flat_list(updates["layer"]["kernel"]) == [0.0, 0.0]
     assert Nx.to_number(state.skipped) == 1
   end
+  # 16 kHz mono 16-bit WAV of a tone, so ffmpeg-backed decoding can run
+  # without fixtures.
+  defp wav(ms) do
+    pcm = for i <- 1..(16 * ms), into: <<>>, do: <<round(0.5 * :math.sin(i / 3) * 32767)::little-signed-16>>
+
+    <<"RIFF", 36 + byte_size(pcm)::little-32, "WAVE", "fmt ", 16::little-32, 1::little-16, 1::little-16,
+      16_000::little-32, 32_000::little-32, 2::little-16, 16::little-16, "data", byte_size(pcm)::little-32>> <> pcm
+  end
+
+  defp write_shard!(path, rows) do
+    File.mkdir_p!(Path.dirname(path))
+
+    audio =
+      Explorer.Series.from_list(
+        Enum.map(rows, &%{"bytes" => &1.bytes, "path" => &1.path}),
+        dtype: {:struct, [{"bytes", :binary}, {"path", :string}]}
+      )
+
+    column = fn field -> Explorer.Series.from_list(Enum.map(rows, &Map.fetch!(&1, field))) end
+
+    Explorer.DataFrame.new(
+      path: column.(:path),
+      client_id: column.(:client_id),
+      locale: column.(:locale),
+      sentence: column.(:sentence),
+      up_votes: Explorer.Series.from_list(Enum.map(rows, fn _row -> 2 end)),
+      audio: audio
+    )
+    |> Explorer.DataFrame.to_parquet!(path)
+  end
+
+  test "common voice shards are found flat or nested and sampled by seed" do
+    root = Path.join(System.tmp_dir!(), "language-id-cv-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    row = fn language, index ->
+      %{
+        bytes: "mp3-#{language}-#{index}",
+        path: "common_voice_#{language}_#{index}.mp3",
+        client_id: "speaker#{rem(index, 3)}",
+        locale: language,
+        sentence: "sentence #{index}"
+      }
+    end
+
+    write_shard!(Path.join(root, "de/test-00000-of-00002.parquet"), Enum.map(0..5, &row.("de", &1)))
+    write_shard!(Path.join(root, "de/test-00001-of-00002.parquet"), Enum.map(6..9, &row.("de", &1)))
+    write_shard!(Path.join(root, "de/train-00000-of-00001.parquet"), Enum.map(10..12, &row.("de", &1)))
+
+    write_shard!(
+      Path.join(root, "frnew/test/chunk-range-000000000-000000003/test-00000-of-00001.parquet"),
+      Enum.map(0..3, &%{row.("fr", &1) | locale: ""})
+    )
+
+    assert CommonVoice.languages(root) == ["de", "frnew"]
+    assert length(CommonVoice.shards(root, "de", "test")) == 2
+    assert length(CommonVoice.shards(root, "de", "train")) == 1
+    assert [nested] = CommonVoice.shards(root, "frnew", "test")
+    assert nested =~ "chunk-range"
+    assert CommonVoice.shards(root, "frnew", "train") == []
+
+    clips = CommonVoice.sample(root, "test", 3, seed: 7)
+    assert length(clips) == 6
+    assert Enum.map(clips, & &1.directory) == ["de", "de", "de", "frnew", "frnew", "frnew"]
+    # the locale column names the language; a blank locale falls back to the directory
+    assert Enum.map(clips, & &1.language) == ["de", "de", "de", "frnew", "frnew", "frnew"]
+
+    for clip <- clips do
+      assert clip.key == clip.directory <> "/" <> clip.path
+      assert clip.bytes == "mp3-#{if clip.directory == "de", do: "de", else: "fr"}-" <> (clip.path |> String.split("_") |> List.last() |> String.trim_trailing(".mp3"))
+      assert clip.sentence =~ "sentence"
+    end
+
+    # one shard per language by default, chosen by the seed; both with --shards 2
+    de_keys = fn clips -> clips |> Enum.filter(&(&1.directory == "de")) |> Enum.map(& &1.key) end
+    assert CommonVoice.sample(root, "test", 3, seed: 7) |> de_keys.() == de_keys.(clips)
+    all = CommonVoice.sample(root, "test", 10, seed: 7, shards: 2, languages: ["de"])
+    assert length(all) == 10
+    assert CommonVoice.sample(root, "test", 10, seed: 7, languages: ["de"]) |> length() < 10
+    assert CommonVoice.sample(root, "test", 2, seed: 7, languages: ["missing"]) == []
+
+    if System.find_executable("ffmpeg") do
+      samples = CommonVoice.decode!(%{bytes: wav(300), path: "tone.wav"}, 1)
+      assert length(samples) == 4800
+      assert Enum.any?(samples, &(abs(&1) > 0.1))
+    end
+  end
+
+  test "corpus cases come from the split tsv and are sampled by seed" do
+    root = Path.join(System.tmp_dir!(), "language-id-corpus-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    for language <- ["aa", "bb"] do
+      File.mkdir_p!(Path.join([root, language, "clips"]))
+      rows = for i <- 1..5, do: "c#{i}\tclip_#{i}.mp3\tword #{i}\t0"
+      File.write!(Path.join([root, language, "test.tsv"]), Enum.join(["client_id\tpath\tsentence\tup_votes" | rows], "\n") <> "\n")
+      for i <- 1..4, do: File.write!(Path.join([root, language, "clips", "clip_#{i}.mp3"]), "x")
+    end
+
+    assert Corpus.languages(root) == ["aa", "bb"]
+    # clip_5 is listed but missing on disk
+    assert length(Corpus.cases(root, "aa", "test")) == 4
+    assert Corpus.cases(root, "aa", "train") == []
+
+    sampled = Corpus.sample(root, "test", 2, seed: 3)
+    assert length(sampled) == 4
+    assert Enum.map(sampled, & &1.language) == ["aa", "aa", "bb", "bb"]
+    assert Enum.all?(sampled, &String.starts_with?(&1.key, &1.language <> "/clip_"))
+    assert Corpus.sample(root, "test", 2, seed: 3) == sampled
+    assert Corpus.sample(root, "test", 2, seed: 4, languages: ["bb"]) |> Enum.map(& &1.language) == ["bb", "bb"]
+  end
+
+  test "server answers health and detect over http" do
+    spec = tiny_encoder(capture_all_depths: true)
+    {_predict, params, _tokens} = init(spec, 1, 16)
+    runtime = Runtime.load(spec: spec, params: params, backend: "torchx:cpu", seconds: 1)
+    features = runtime |> Runtime.encode([Runtime.prepare(runtime, for(i <- 0..3999, do: :math.sin(i / 7)))]) |> Map.fetch!("depth_1")
+    head = Head.train(Nx.concatenate([features, Nx.add(features, 1.0)]), Nx.tensor([0, 1]), ["xx", "yy"], steps: 20)
+    artifact = Artifact.build(runtime, 1, head)
+
+    assert {200, "application/json", body} = Server.handle(:GET, "/health", "", %{})
+    assert Jason.decode!(body) == %{"status" => "ok"}
+    assert {404, _type, _body} = Server.handle(:GET, "/missing", "", %{})
+    assert {400, _type, _body} = Server.handle(:POST, "/detect", "", %{})
+    assert {200, "text/html; charset=utf-8", page} = Server.handle(:GET, "/", "", %{artifact: artifact})
+    assert page =~ "xx, yy"
+    assert IO.iodata_to_binary(Server.encode({404, "text/plain", "no"})) =~ "HTTP/1.1 404 Not Found\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n"
+
+    if System.find_executable("ffmpeg") do
+      {:ok, _started} = Application.ensure_all_started(:inets)
+      socket = Server.listen!(artifact, runtime, 0)
+      {:ok, port} = :inet.port(socket)
+      url = ~c"http://127.0.0.1:#{port}"
+
+      assert {:ok, {{_, 200, _}, _headers, ~c"{\"status\":\"ok\"}"}} = :httpc.request(:get, {url ++ ~c"/health", []}, [], [])
+
+      assert {:ok, {{_, 200, _}, _headers, json}} =
+               :httpc.request(:post, {url ++ ~c"/detect", [], ~c"audio/wav", wav(400)}, [], [])
+
+      assert %{"languages" => [%{"language" => first, "probability" => p} | _rest], "seconds" => 1, "ms" => ms} = Jason.decode!(to_string(json))
+      assert first in ["xx", "yy"]
+      assert p > 0.0 and is_integer(ms)
+
+      assert {:ok, {{_, 422, _}, _headers, error}} = :httpc.request(:post, {url ++ ~c"/detect", [], ~c"audio/wav", "not audio"}, [], [])
+      assert to_string(error) =~ "ffmpeg failed"
+      :gen_tcp.close(socket)
+    end
+  end
+
 end

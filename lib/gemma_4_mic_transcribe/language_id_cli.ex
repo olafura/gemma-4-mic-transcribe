@@ -2,14 +2,16 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   @moduledoc false
 
   alias Gemma4MicTranscribe.LanguageId.Artifact
+  alias Gemma4MicTranscribe.LanguageId.CommonVoice
   alias Gemma4MicTranscribe.LanguageId.Corpus
   alias Gemma4MicTranscribe.LanguageId.Features
   alias Gemma4MicTranscribe.LanguageId.Finetune
   alias Gemma4MicTranscribe.LanguageId.Head
   alias Gemma4MicTranscribe.LanguageId.Reference
   alias Gemma4MicTranscribe.LanguageId.Runtime
+  alias Gemma4MicTranscribe.LanguageId.Server
 
-  @commands ["extract", "sweep", "export", "detect", "compare", "inputs", "finetune"]
+  @commands ["extract", "sweep", "export", "detect", "compare", "inputs", "finetune", "validate", "serve"]
 
   @switches [
     corpus: :string,
@@ -40,6 +42,9 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     epochs: :integer,
     max_grad_norm: :float,
     freeze: :string,
+    shards: :integer,
+    languages: :string,
+    port: :integer,
     help: :boolean
   ]
 
@@ -54,6 +59,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       {:ok, :compare, opts} -> compare!(opts)
       {:ok, :inputs, opts} -> inputs!(opts)
       {:ok, :finetune, opts} -> finetune!(opts)
+      {:ok, :validate, opts} -> validate!(opts)
+      {:ok, :serve, opts} -> serve!(opts)
       {:help, usage} -> IO.puts(usage)
       {:error, message} -> abort(message)
     end
@@ -83,8 +90,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
 
   defp parse_values(mode, opts) do
     values = %{
-      corpus: Keyword.get(opts, :corpus, "~/Downloads/cv-corpus-7.0-singleword"),
-      split: Keyword.get(opts, :split, "train"),
+      corpus: Keyword.get(opts, :corpus, default_corpus(mode)),
+      split: Keyword.get(opts, :split, default_split(mode)),
       per_language: Keyword.get(opts, :per_language, 200),
       seed: Keyword.get(opts, :seed, 42),
       seconds: Keyword.get(opts, :seconds, 4),
@@ -110,7 +117,10 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       inputs_test: opts[:inputs_test],
       epochs: Keyword.get(opts, :epochs, 3),
       max_grad_norm: Keyword.get(opts, :max_grad_norm, 1.0),
-      freeze: opts[:freeze] |> to_string() |> String.split(",", trim: true)
+      freeze: opts[:freeze] |> to_string() |> String.split(",", trim: true),
+      shards: Keyword.get(opts, :shards, 1),
+      languages: opts[:languages] && String.split(opts[:languages], ",", trim: true),
+      port: Keyword.get(opts, :port, 7860)
     }
 
     with :ok <- required(mode, values),
@@ -120,6 +130,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
          :ok <- positive(values.steps, "--steps"),
          :ok <- positive(values.epochs, "--epochs"),
          :ok <- positive(values.top_k, "--top-k"),
+         :ok <- positive(values.shards, "--shards"),
+         :ok <- positive(values.port, "--port"),
          :ok <- positive_number(values.learning_rate, "--learning-rate"),
          :ok <- non_negative_number(values.weight_decay, "--weight-decay"),
          :ok <- valid_depth(values.depth),
@@ -132,7 +144,16 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
 
   defp default_backend(:detect), do: "torchx:cpu"
   defp default_backend(:compare), do: "torchx:cpu"
+  defp default_backend(:validate), do: "torchx:cpu"
+  defp default_backend(:serve), do: "torchx:cpu"
   defp default_backend(_mode), do: "exla:rocm"
+
+  # validate reads the bucket a Hugging Face job or Space mounts at /data.
+  defp default_corpus(:validate), do: "/data/common_voice"
+  defp default_corpus(_mode), do: "~/Downloads/cv-corpus-7.0-singleword"
+
+  defp default_split(:validate), do: "test"
+  defp default_split(_mode), do: "train"
 
   defp default_learning_rate(:finetune), do: 2.0e-5
   defp default_learning_rate(_mode), do: 0.01
@@ -166,6 +187,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
   defp required(:compare, %{artifact: nil}), do: {:error, "compare requires --artifact"}
   defp required(:compare, %{whisper_model: nil, reference: nil}),
     do: {:error, "compare requires --whisper-model or --reference"}
+  defp required(:validate, %{artifact: nil}), do: {:error, "validate requires --artifact"}
+  defp required(:serve, %{artifact: nil}), do: {:error, "serve requires --artifact"}
   defp required(_mode, _values), do: :ok
 
   defp positive(value, _flag) when is_integer(value) and value > 0, do: :ok
@@ -532,6 +555,192 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     File.write!(path, header <> pcm)
   end
 
+  # Scores a saved detector on full-sentence Common Voice clips read straight
+  # from parquet shards (fsicoli/common_voice_17_0 mirrored into a bucket).
+  # Languages the detector was never trained on cannot be right or wrong, so
+  # they are reported by what the detector calls them instead.
+  defp validate!(opts) do
+    corpus = Path.expand(opts.corpus)
+    File.dir?(corpus) || abort("corpus #{corpus} is not a directory; pass --corpus")
+
+    started = System.monotonic_time(:millisecond)
+    artifact = Artifact.load!(opts.artifact)
+    runtime = Artifact.runtime(artifact, backend: opts.backend)
+    IO.puts("loaded detector (depth #{artifact.depth}, #{length(artifact.languages)} languages) in #{elapsed(started)}")
+
+    languages = opts.languages || CommonVoice.languages(corpus)
+    known = MapSet.new(artifact.languages)
+
+    started = System.monotonic_time(:millisecond)
+
+    clips =
+      CommonVoice.sample(corpus, opts.split, opts.per_language,
+        seed: opts.seed,
+        languages: languages,
+        shards: opts.shards
+      )
+
+    clips == [] && abort("no #{opts.split} shards under #{corpus}")
+
+    IO.puts(
+      "sampled #{length(clips)} #{opts.split} clips from #{length(languages)} language directories " <>
+        "(#{opts.shards} shard(s) each) in #{elapsed(started)}, #{artifact.seconds} s window"
+    )
+
+    # warm the compiled path so the first clip's latency is not compile time
+    Artifact.detect(artifact, runtime, CommonVoice.decode!(hd(clips), artifact.seconds))
+
+    rows =
+      clips
+      |> Enum.with_index(1)
+      |> Enum.map(fn {clip, index} ->
+        samples = CommonVoice.decode!(clip, artifact.seconds)
+        started = System.monotonic_time(:millisecond)
+        ranked = Artifact.detect(artifact, runtime, samples)
+        ms = System.monotonic_time(:millisecond) - started
+        top = Enum.map(ranked, & &1.language)
+
+        if rem(index, 50) == 0, do: IO.puts("  #{index}/#{length(clips)}")
+
+        %{
+          key: clip.key,
+          language: clip.language,
+          directory: clip.directory,
+          client_id: clip.client_id,
+          sentence: clip.sentence,
+          known: MapSet.member?(known, clip.language),
+          predicted: hd(top),
+          top3: Enum.take(top, 3),
+          probability: hd(ranked).probability,
+          ms: ms
+        }
+      end)
+
+    summary = summarize_validation(rows)
+
+    if opts.output do
+      File.write!(
+        Path.expand(opts.output),
+        Jason.encode!(
+          %{
+            artifact: Path.expand(opts.artifact),
+            corpus: corpus,
+            split: opts.split,
+            seconds: artifact.seconds,
+            per_language: opts.per_language,
+            seed: opts.seed,
+            shards: opts.shards,
+            languages: summary.languages,
+            summary: summary.overall,
+            rows: rows
+          },
+          pretty: true
+        )
+      )
+    end
+
+    print_validation(summary)
+  end
+
+  @doc false
+  def summarize_validation(rows) do
+    languages =
+      rows
+      |> Enum.group_by(& &1.language)
+      |> Enum.map(fn {language, clips} ->
+        predicted =
+          clips
+          |> Enum.frequencies_by(& &1.predicted)
+          |> Enum.sort_by(fn {code, count} -> {-count, code} end)
+          |> Enum.take(3)
+          |> Enum.map(fn {code, count} -> %{language: code, count: count} end)
+
+        known = hd(clips).known
+
+        %{
+          language: language,
+          known: known,
+          clips: length(clips),
+          speakers: clips |> Enum.map(& &1.client_id) |> Enum.uniq() |> length(),
+          top1: if(known, do: Enum.count(clips, &(&1.predicted == &1.language)) / length(clips)),
+          top3: if(known, do: Enum.count(clips, &(&1.language in &1.top3)) / length(clips)),
+          predicted: predicted
+        }
+      end)
+      |> Enum.sort_by(&{!&1.known, &1.language})
+
+    known_rows = Enum.filter(rows, & &1.known)
+    latencies = rows |> Enum.map(& &1.ms) |> Enum.sort()
+
+    overall = %{
+      known_languages: Enum.count(languages, & &1.known),
+      known_clips: length(known_rows),
+      top1: safe_ratio(Enum.count(known_rows, &(&1.predicted == &1.language)), length(known_rows)),
+      top3: safe_ratio(Enum.count(known_rows, &(&1.language in &1.top3)), length(known_rows)),
+      unknown_languages: Enum.count(languages, &(not &1.known)),
+      unknown_clips: length(rows) - length(known_rows),
+      p50_ms: percentile(latencies, 0.5),
+      p95_ms: percentile(latencies, 0.95)
+    }
+
+    %{languages: languages, overall: overall}
+  end
+
+  defp safe_ratio(_numerator, 0), do: nil
+  defp safe_ratio(numerator, denominator), do: numerator / denominator
+
+  defp print_validation(%{languages: languages, overall: overall}) do
+    IO.puts("")
+    IO.puts("  language  clips  speakers  top-1  top-3  predicted")
+
+    Enum.each(languages, fn row ->
+      predicted = Enum.map_join(row.predicted, ", ", &"#{&1.language} #{&1.count}")
+
+      IO.puts(
+        "  " <>
+          String.pad_trailing(row.language, 9) <>
+          String.pad_leading(Integer.to_string(row.clips), 6) <>
+          String.pad_leading(Integer.to_string(row.speakers), 10) <>
+          String.pad_leading(maybe_percent(row.top1), 7) <>
+          String.pad_leading(maybe_percent(row.top3), 7) <>
+          "  " <> predicted
+      )
+    end)
+
+    IO.puts("")
+
+    if overall.known_clips > 0 do
+      IO.puts(
+        "languages the detector knows: #{overall.known_languages}, #{overall.known_clips} clips, " <>
+          "top-1 #{percent(overall.top1)}, top-3 #{percent(overall.top3)}"
+      )
+    end
+
+    if overall.unknown_clips > 0 do
+      IO.puts(
+        "languages outside the detector: #{overall.unknown_languages}, #{overall.unknown_clips} clips " <>
+          "(see the predicted column)"
+      )
+    end
+
+    IO.puts("detect latency per clip: p50 #{overall.p50_ms} ms, p95 #{overall.p95_ms} ms")
+  end
+
+  defp maybe_percent(nil), do: "-"
+  defp maybe_percent(value), do: percent(value)
+
+  defp serve!(opts) do
+    started = System.monotonic_time(:millisecond)
+    artifact = Artifact.load!(opts.artifact)
+    runtime = Artifact.runtime(artifact, backend: opts.backend)
+    IO.puts("loaded detector (depth #{artifact.depth}, #{length(artifact.languages)} languages) in #{elapsed(started)}")
+
+    started = System.monotonic_time(:millisecond)
+    Artifact.detect(artifact, runtime, List.duplicate(0.0, 1_600))
+    IO.puts("warmed up in #{elapsed(started)}; listening on http://0.0.0.0:#{opts.port}")
+    Server.run!(artifact, runtime, opts.port)
+  end
+
   defp inputs!(opts) do
     corpus = Path.expand(opts.corpus)
     languages = Corpus.languages(corpus)
@@ -670,6 +879,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       language_id compare --artifact DIR (--whisper-model GGML | --reference JSON) [--per-language N] [--output JSON]
       language_id inputs --output DIR [--split train|dev|test] [--per-language N] [--seconds N]
       language_id finetune --inputs-train DIR --train FEATURES --depth N --artifact DIR [--inputs-test DIR] [options]
+      language_id validate --artifact DIR [--corpus DIR] [--split test] [--per-language N] [--shards N] [--output JSON]
+      language_id serve --artifact DIR [--port 7860] [--backend NAME]
 
     extract runs the Gemma 4 audio tower over Common Voice single-word clips and
     saves one pooled feature vector per conformer depth. sweep trains a softmax
@@ -682,11 +893,16 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
     inputs caches mel features for end-to-end training; finetune trains the
     truncated tower and head together (Axon.Loop, Adam) starting from the
     pretrained tower and a logistic head fitted on --train features, then
-    exports the result as a detector.
+    exports the result as a detector. validate scores a detector on
+    full-sentence Common Voice parquet shards (fsicoli/common_voice_17_0, one
+    directory per language, as mounted from a Hugging Face bucket) and reports
+    per-language accuracy; serve answers POST /detect with the ranking for the
+    audio file in the request body.
 
     Options:
-      --corpus PATH          Common Voice single-word corpus (default ~/Downloads/cv-corpus-7.0-singleword)
-      --split NAME           train, dev, or test (default train)
+      --corpus PATH          Common Voice single-word corpus (default ~/Downloads/cv-corpus-7.0-singleword);
+                             validate: parquet corpus root (default /data/common_voice)
+      --split NAME           train, dev, or test (default train; validate: test)
       --per-language N       clips sampled per language (default 200)
       --seed N               sampling seed (default 42)
       --seconds N            fixed clip window in seconds (default 4)
@@ -703,19 +919,27 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI do
       --whisper-model PATH   ggml Whisper model for compare
       --whisper-cli PATH     whisper-cli binary for compare (default $WHISPER_CLI or whisper-cli)
       --reference JSON       compare: reuse Whisper and XLM-RoBERTa answers from an earlier --output
-      --output PATH          extract/inputs: output directory; compare: JSON with every row
+      --output PATH          extract/inputs: output directory; compare/validate: JSON with every row
       --inputs-train DIR     cached mel inputs for finetune (from inputs)
       --inputs-test DIR      cached mel inputs evaluated after every epoch
       --epochs N             finetune epochs (default 3)
       --max-grad-norm X      finetune global gradient-norm clip (default 1.0, 0 disables)
       --freeze LIST          finetune layer-name prefixes to keep fixed, e.g. audio_encoder.subsample
                              (finetune --learning-rate defaults to 2.0e-5)
+      --shards N             validate: parquet shards read per language (default 1)
+      --languages LIST       validate: comma-separated language directories (default all)
+      --port N               serve: HTTP port (default 7860)
     """
   end
 end
 
 defmodule Gemma4MicTranscribe.LanguageIdCLI.Escript do
   @moduledoc false
+
+  # The NIF-backed applications (torchx, explorer) cannot live inside the
+  # escript archive, so it loads them from the build that produced it; the
+  # build directory depends on MIX_ENV and MIX_TARGET at build time.
+  @build_dir Path.relative_to_cwd(Mix.Project.build_path())
 
   def main(argv) do
     root =
@@ -724,10 +948,8 @@ defmodule Gemma4MicTranscribe.LanguageIdCLI.Escript do
       |> Path.expand()
       |> Path.dirname()
 
-    mix_env = System.get_env("MIX_ENV", "dev")
-
     root
-    |> Path.join("_build/#{mix_env}/lib/*/ebin")
+    |> Path.join("#{@build_dir}/lib/*/ebin")
     |> Path.wildcard()
     |> Enum.each(&Code.prepend_path/1)
 

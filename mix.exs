@@ -54,6 +54,11 @@ defmodule Gemma4MicTranscribe.MixProject do
       {:boombox, "~> 0.2.11", runtime: false},
       {:bumblebee, "~> 0.7.0"},
       {:ex_webrtc, "~> 0.15.0", runtime: false},
+      {:explorer, "~> 0.12.0"},
+      # override: ratio 4.0.1 (via membrane) declares decimal ~> 2.0 while
+      # numbers 5.2.5 and explorer need ~> 3.x; ratio only pattern-matches the
+      # unchanged %Decimal{} struct fields, so 3.x is fine
+      {:decimal, "~> 3.1", override: true},
       {:exla, path: "vendor/exla", override: true, runtime: false},
       {:ex_libsrt, path: "vendor/ex_libsrt", override: true},
       {:jason, "~> 1.4"},
