@@ -26,3 +26,9 @@ __pycache__/
 /expert_tool
 /language_id
 /artifacts/
+
+# System One scratch venv
+/.venv-system-one/
+
+# system-one hidden-state caches (regenerable, large)
+/data/system-one/*cache*/
