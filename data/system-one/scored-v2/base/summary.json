@@ -1,0 +1,43 @@
+{
+  "n": 600,
+  "n_decidable": 300,
+  "n_underspecified": 300,
+  "headline": -0.6567,
+  "decision_accuracy": 0.6733,
+  "followup_recall": 0.0,
+  "needless_ask_rate": 0.0,
+  "confirmation_rate": 0.0,
+  "fabrication_rate": 0.83,
+  "none_rate": 0.135,
+  "none_rate_decidable": 0.1,
+  "mean_tokens": 45.6,
+  "mean_ms": 4949.4867,
+  "outcomes": {
+    "committed_when_underspecified": 249,
+    "correct": 202,
+    "none_on_decidable": 30,
+    "none_on_underspecified": 51,
+    "wrong": 68
+  },
+  "decided_by": {
+    "abstain": 4,
+    "bare": 162,
+    "laya": 421,
+    "lead": 13
+  },
+  "checkpoint": "english",
+  "route": "multilingual",
+  "phrasing": "reply_question",
+  "judge": "v2",
+  "confirm_threshold": 0.3,
+  "none_threshold": null,
+  "none_margin": 0.1,
+  "lead_threshold": 0.6,
+  "lead_max_words": 4,
+  "lead_max_whole_p": 0.7,
+  "abstain": true,
+  "noul_margin": null,
+  "options_truncated": 0,
+  "laya_requests": 707,
+  "judge_ms_per_item": 185.6
+}
