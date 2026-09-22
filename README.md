@@ -2210,7 +2210,12 @@ are untouched. Layers 45–47 each get an additive FFN (3840 → 2048 → 3840, 
 parameters in total) behind a per-token linear router, `ffn_out = base_ffn(x)
 + g(x) * expert(x)`, enabled by `spec.system_one_layers` (default `[]`). A
 gate under the floor is clamped to exactly 0, so with the router shut the
-output is bit-identical to today's model, and `regress` checks that.
+output is bit-identical to today's model, and `regress` checks that. The
+audio path is untouched: after these changes the packed 12B `journal1.wav`
+reference and the seed-42 single-word gate (33 languages) reproduce their
+baselines with zero changed outputs, and the language-ID modules share no
+code with the edited files. The round-3 expert is on the Hub as
+[olafura/gemma4-12b-system-one](https://huggingface.co/olafura/gemma4-12b-system-one).
 
 ```bash
 export XLA_FLAGS='--xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false'
