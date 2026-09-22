@@ -1,0 +1,301 @@
+pair	pattern	description
+r2b-001	P1	blurred rule or threshold
+r2b-002	P5	category membership undecided
+r2b-003	P1	blurred rule or threshold
+r2b-004	P1	blurred rule or threshold
+r2b-005	P1	blurred rule or threshold
+r2b-006	P3	unit, currency, format or scale unstated
+r2b-007	P2	blurred measurement or count
+r2b-008	P7	unsettled or in-progress status
+r2b-009	P2	blurred measurement or count
+r2b-010	P8	defers to a document not supplied
+r2b-011	P1	blurred rule or threshold
+r2b-012	P5	category membership undecided
+r2b-013	P1	blurred rule or threshold
+r2b-014	P6	boundary or inclusive/exclusive edge
+r2b-015	P4	tie with no tiebreaker
+r2b-016	P8	defers to a document not supplied
+r2b-017	P3	unit, currency, format or scale unstated
+r2b-018	P7	unsettled or in-progress status
+r2b-019	P1	blurred rule or threshold
+r2b-020	P5	category membership undecided
+r2b-021	P7	unsettled or in-progress status
+r2b-022	P5	category membership undecided
+r2b-023	P1	blurred rule or threshold
+r2b-024	P2	blurred measurement or count
+r2b-025	P4	tie with no tiebreaker
+r2b-026	P2	blurred measurement or count
+r2b-027	P5	category membership undecided
+r2b-028	P6	boundary or inclusive/exclusive edge
+r2b-029	P2	blurred measurement or count
+r2b-030	P7	unsettled or in-progress status
+r2b-031	P4	tie with no tiebreaker
+r2b-032	P1	blurred rule or threshold
+r2b-033	P6	boundary or inclusive/exclusive edge
+r2b-034	P2	blurred measurement or count
+r2b-035	P1	blurred rule or threshold
+r2b-036	P8	defers to a document not supplied
+r2b-037	P4	tie with no tiebreaker
+r2b-038	P6	boundary or inclusive/exclusive edge
+r2b-039	P7	unsettled or in-progress status
+r2b-040	P1	blurred rule or threshold
+r2b-041	P5	category membership undecided
+r2b-042	P3	unit, currency, format or scale unstated
+r2b-043	P1	blurred rule or threshold
+r2b-044	P5	category membership undecided
+r2b-045	P7	unsettled or in-progress status
+r2b-046	P1	blurred rule or threshold
+r2b-047	P5	category membership undecided
+r2b-048	P5	category membership undecided
+r2b-049	P2	blurred measurement or count
+r2b-050	P3	unit, currency, format or scale unstated
+r2b-051	P1	blurred rule or threshold
+r2b-052	P7	unsettled or in-progress status
+r2b-053	P2	blurred measurement or count
+r2b-054	P5	category membership undecided
+r2b-055	P3	unit, currency, format or scale unstated
+r2b-056	P6	boundary or inclusive/exclusive edge
+r2b-057	P2	blurred measurement or count
+r2b-058	P7	unsettled or in-progress status
+r2b-059	P4	tie with no tiebreaker
+r2b-060	P8	defers to a document not supplied
+r2b-061	P7	unsettled or in-progress status
+r2b-062	P3	unit, currency, format or scale unstated
+r2b-063	P5	category membership undecided
+r2b-064	P8	defers to a document not supplied
+r2b-065	P1	blurred rule or threshold
+r2b-066	P7	unsettled or in-progress status
+r2b-067	P2	blurred measurement or count
+r2b-068	P5	category membership undecided
+r2b-069	P7	unsettled or in-progress status
+r2b-070	P8	defers to a document not supplied
+r2b-071	P2	blurred measurement or count
+r2b-072	P4	tie with no tiebreaker
+r2b-073	P6	boundary or inclusive/exclusive edge
+r2b-074	P2	blurred measurement or count
+r2b-075	P3	unit, currency, format or scale unstated
+r2b-076	P7	unsettled or in-progress status
+r2b-077	P5	category membership undecided
+r2b-078	P5	category membership undecided
+r2b-079	P1	blurred rule or threshold
+r2b-080	P2	blurred measurement or count
+r2b-081	P4	tie with no tiebreaker
+r2b-082	P2	blurred measurement or count
+r2b-083	P6	boundary or inclusive/exclusive edge
+r2b-084	P1	blurred rule or threshold
+r2b-085	P7	unsettled or in-progress status
+r2b-086	P3	unit, currency, format or scale unstated
+r2b-087	P5	category membership undecided
+r2b-088	P1	blurred rule or threshold
+r2b-089	P5	category membership undecided
+r2b-090	P7	unsettled or in-progress status
+r2b-091	P2	blurred measurement or count
+r2b-092	P8	defers to a document not supplied
+r2b-093	P1	blurred rule or threshold
+r2b-094	P5	category membership undecided
+r2b-095	P6	boundary or inclusive/exclusive edge
+r2b-096	P1	blurred rule or threshold
+r2b-097	P7	unsettled or in-progress status
+r2b-098	P3	unit, currency, format or scale unstated
+r2b-099	P1	blurred rule or threshold
+r2b-100	P4	tie with no tiebreaker
+r2b-101	P1	blurred rule or threshold
+r2b-102	P7	unsettled or in-progress status
+r2b-103	P5	category membership undecided
+r2b-104	P2	blurred measurement or count
+r2b-105	P1	blurred rule or threshold
+r2b-106	P1	blurred rule or threshold
+r2b-107	P4	tie with no tiebreaker
+r2b-108	P8	defers to a document not supplied
+r2b-109	P2	blurred measurement or count
+r2b-110	P7	unsettled or in-progress status
+r2b-111	P5	category membership undecided
+r2b-112	P8	defers to a document not supplied
+r2b-113	P6	boundary or inclusive/exclusive edge
+r2b-114	P2	blurred measurement or count
+r2b-115	P3	unit, currency, format or scale unstated
+r2b-116	P7	unsettled or in-progress status
+r2b-117	P2	blurred measurement or count
+r2b-118	P5	category membership undecided
+r2b-119	P2	blurred measurement or count
+r2b-120	P6	boundary or inclusive/exclusive edge
+r2b-121	P8	defers to a document not supplied
+r2b-122	P4	tie with no tiebreaker
+r2b-123	P7	unsettled or in-progress status
+r2b-124	P1	blurred rule or threshold
+r2b-125	P5	category membership undecided
+r2b-126	P1	blurred rule or threshold
+r2b-127	P2	blurred measurement or count
+r2b-128	P7	unsettled or in-progress status
+r2b-129	P5	category membership undecided
+r2b-130	P1	blurred rule or threshold
+r2b-131	P4	tie with no tiebreaker
+r2b-132	P2	blurred measurement or count
+r2b-133	P8	defers to a document not supplied
+r2b-134	P3	unit, currency, format or scale unstated
+r2b-135	P7	unsettled or in-progress status
+r2b-136	P1	blurred rule or threshold
+r2b-137	P5	category membership undecided
+r2b-138	P6	boundary or inclusive/exclusive edge
+r2b-139	P7	unsettled or in-progress status
+r2b-140	P2	blurred measurement or count
+r2b-141	P1	blurred rule or threshold
+r2b-142	P7	unsettled or in-progress status
+r2b-143	P1	blurred rule or threshold
+r2b-144	P4	tie with no tiebreaker
+r2b-145	P7	unsettled or in-progress status
+r2b-146	P2	blurred measurement or count
+r2b-147	P1	blurred rule or threshold
+r2b-148	P1	blurred rule or threshold
+r2b-149	P7	unsettled or in-progress status
+r2b-150	P3	unit, currency, format or scale unstated
+r2b-151	P1	blurred rule or threshold
+r2b-152	P7	unsettled or in-progress status
+r2b-153	P2	blurred measurement or count
+r2b-154	P8	defers to a document not supplied
+r2b-155	P5	category membership undecided
+r2b-156	P1	blurred rule or threshold
+r2b-157	P2	blurred measurement or count
+r2b-158	P1	blurred rule or threshold
+r2b-159	P4	tie with no tiebreaker
+r2b-160	P7	unsettled or in-progress status
+r2b-161	P1	blurred rule or threshold
+r2b-162	P5	category membership undecided
+r2b-163	P3	unit, currency, format or scale unstated
+r2b-164	P6	boundary or inclusive/exclusive edge
+r2b-165	P2	blurred measurement or count
+r2b-166	P1	blurred rule or threshold
+r2b-167	P7	unsettled or in-progress status
+r2b-168	P5	category membership undecided
+r2b-169	P5	category membership undecided
+r2b-170	P6	boundary or inclusive/exclusive edge
+r2b-171	P8	defers to a document not supplied
+r2b-172	P4	tie with no tiebreaker
+r2b-173	P7	unsettled or in-progress status
+r2b-174	P2	blurred measurement or count
+r2b-175	P5	category membership undecided
+r2b-176	P1	blurred rule or threshold
+r2b-177	P2	blurred measurement or count
+r2b-178	P7	unsettled or in-progress status
+r2b-179	P2	blurred measurement or count
+r2b-180	P6	boundary or inclusive/exclusive edge
+r2b-181	P4	tie with no tiebreaker
+r2b-182	P2	blurred measurement or count
+r2b-183	P8	defers to a document not supplied
+r2b-184	P5	category membership undecided
+r2b-185	P1	blurred rule or threshold
+r2b-186	P2	blurred measurement or count
+r2b-187	P7	unsettled or in-progress status
+r2b-188	P3	unit, currency, format or scale unstated
+r2b-189	P5	category membership undecided
+r2b-190	P6	boundary or inclusive/exclusive edge
+r2b-191	P7	unsettled or in-progress status
+r2b-192	P2	blurred measurement or count
+r2b-193	P8	defers to a document not supplied
+r2b-194	P1	blurred rule or threshold
+r2b-195	P7	unsettled or in-progress status
+r2b-196	P5	category membership undecided
+r2b-197	P4	tie with no tiebreaker
+r2b-198	P2	blurred measurement or count
+r2b-199	P7	unsettled or in-progress status
+r2b-200	P6	boundary or inclusive/exclusive edge
+r2b-201	P2	blurred measurement or count
+r2b-202	P1	blurred rule or threshold
+r2b-203	P7	unsettled or in-progress status
+r2b-204	P3	unit, currency, format or scale unstated
+r2b-205	P2	blurred measurement or count
+r2b-206	P5	category membership undecided
+r2b-207	P2	blurred measurement or count
+r2b-208	P6	boundary or inclusive/exclusive edge
+r2b-209	P4	tie with no tiebreaker
+r2b-210	P8	defers to a document not supplied
+r2b-211	P1	blurred rule or threshold
+r2b-212	P7	unsettled or in-progress status
+r2b-213	P5	category membership undecided
+r2b-214	P2	blurred measurement or count
+r2b-215	P3	unit, currency, format or scale unstated
+r2b-216	P6	boundary or inclusive/exclusive edge
+r2b-217	P7	unsettled or in-progress status
+r2b-218	P1	blurred rule or threshold
+r2b-219	P4	tie with no tiebreaker
+r2b-220	P5	category membership undecided
+r2b-221	P2	blurred measurement or count
+r2b-222	P8	defers to a document not supplied
+r2b-223	P1	blurred rule or threshold
+r2b-224	P7	unsettled or in-progress status
+r2b-225	P6	boundary or inclusive/exclusive edge
+r2b-226	P1	blurred rule or threshold
+r2b-227	P7	unsettled or in-progress status
+r2b-228	P5	category membership undecided
+r2b-229	P2	blurred measurement or count
+r2b-230	P3	unit, currency, format or scale unstated
+r2b-231	P6	boundary or inclusive/exclusive edge
+r2b-232	P4	tie with no tiebreaker
+r2b-233	P8	defers to a document not supplied
+r2b-234	P1	blurred rule or threshold
+r2b-235	P7	unsettled or in-progress status
+r2b-236	P2	blurred measurement or count
+r2b-237	P5	category membership undecided
+r2b-238	P6	boundary or inclusive/exclusive edge
+r2b-239	P2	blurred measurement or count
+r2b-240	P8	defers to a document not supplied
+r2b-241	P1	blurred rule or threshold
+r2b-242	P7	unsettled or in-progress status
+r2b-243	P3	unit, currency, format or scale unstated
+r2b-244	P5	category membership undecided
+r2b-245	P2	blurred measurement or count
+r2b-246	P5	category membership undecided
+r2b-247	P6	boundary or inclusive/exclusive edge
+r2b-248	P1	blurred rule or threshold
+r2b-249	P7	unsettled or in-progress status
+r2b-250	P1	blurred rule or threshold
+r2b-251	P1	blurred rule or threshold
+r2b-252	P7	unsettled or in-progress status
+r2b-253	P2	blurred measurement or count
+r2b-254	P5	category membership undecided
+r2b-255	P1	blurred rule or threshold
+r2b-256	P6	boundary or inclusive/exclusive edge
+r2b-257	P2	blurred measurement or count
+r2b-258	P8	defers to a document not supplied
+r2b-259	P4	tie with no tiebreaker
+r2b-260	P3	unit, currency, format or scale unstated
+r2b-261	P7	unsettled or in-progress status
+r2b-262	P5	category membership undecided
+r2b-263	P2	blurred measurement or count
+r2b-264	P6	boundary or inclusive/exclusive edge
+r2b-265	P1	blurred rule or threshold
+r2b-266	P3	unit, currency, format or scale unstated
+r2b-267	P2	blurred measurement or count
+r2b-268	P8	defers to a document not supplied
+r2b-269	P5	category membership undecided
+r2b-270	P6	boundary or inclusive/exclusive edge
+r2b-271	P1	blurred rule or threshold
+r2b-272	P7	unsettled or in-progress status
+r2b-273	P2	blurred measurement or count
+r2b-274	P4	tie with no tiebreaker
+r2b-275	P5	category membership undecided
+r2b-276	P7	unsettled or in-progress status
+r2b-277	P2	blurred measurement or count
+r2b-278	P1	blurred rule or threshold
+r2b-279	P2	blurred measurement or count
+r2b-280	P8	defers to a document not supplied
+r2b-281	P6	boundary or inclusive/exclusive edge
+r2b-282	P4	tie with no tiebreaker
+r2b-283	P5	category membership undecided
+r2b-284	P3	unit, currency, format or scale unstated
+r2b-285	P7	unsettled or in-progress status
+r2b-286	P2	blurred measurement or count
+r2b-287	P1	blurred rule or threshold
+r2b-288	P6	boundary or inclusive/exclusive edge
+r2b-289	P7	unsettled or in-progress status
+r2b-290	P5	category membership undecided
+r2b-291	P2	blurred measurement or count
+r2b-292	P8	defers to a document not supplied
+r2b-293	P4	tie with no tiebreaker
+r2b-294	P1	blurred rule or threshold
+r2b-295	P7	unsettled or in-progress status
+r2b-296	P5	category membership undecided
+r2b-297	P3	unit, currency, format or scale unstated
+r2b-298	P6	boundary or inclusive/exclusive edge
+r2b-299	P2	blurred measurement or count
+r2b-300	P1	blurred rule or threshold

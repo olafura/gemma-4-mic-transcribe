@@ -1,0 +1,40 @@
+{"id": "fr-001", "category": "chat", "lang": "en", "prompt": "My neighbour keeps parking across half of my driveway and we have never spoken. How would you open that conversation?"}
+{"id": "fr-002", "category": "chat", "lang": "en", "prompt": "I have been reading before bed instead of scrolling and I fall asleep faster. Is that a real effect or am I imagining it?"}
+{"id": "fr-003", "category": "chat", "lang": "en", "prompt": "Tell me something surprising about how honey keeps for thousands of years."}
+{"id": "fr-004", "category": "chat", "lang": "en", "prompt": "I am trying to grow basil on a north-facing windowsill and it keeps going leggy. What is happening to it?"}
+{"id": "fr-005", "category": "chat", "lang": "en", "prompt": "Write two sentences I could put on a postcard to a friend who just moved to a new city on her own."}
+{"id": "fr-006", "category": "chat", "lang": "en", "prompt": "What actually happens in your ears when a plane descends and they will not pop?"}
+{"id": "fr-007", "category": "chat", "lang": "en", "prompt": "Describe the smell of a second-hand bookshop without using the word musty."}
+{"id": "fr-008", "category": "chat", "lang": "en", "prompt": "My sourdough starter smells like acetone. What does that tell me about how I have been feeding it?"}
+{"id": "fr-009", "category": "chat", "lang": "en", "prompt": "Explain why the sky near the horizon is paler than the sky straight overhead."}
+{"id": "fr-010", "category": "chat", "lang": "en", "prompt": "I want to learn to sail as an adult with no boating background. What does the first season usually look like?"}
+{"id": "fr-011", "category": "code", "lang": "en", "prompt": "Write a Python function that takes a list of (start, end) intervals and merges the overlapping ones."}
+{"id": "fr-012", "category": "code", "lang": "en", "prompt": "In Elixir, what is the difference between Task.async_stream and Enum.map over Task.await?"}
+{"id": "fr-013", "category": "code", "lang": "en", "prompt": "Explain what a git rebase does to commit hashes and why that matters for a branch other people have pulled."}
+{"id": "fr-014", "category": "code", "lang": "en", "prompt": "Write a SQL query that returns, per customer, their most recent order date and the number of orders they have placed."}
+{"id": "fr-015", "category": "code", "lang": "en", "prompt": "Why does a JavaScript setTimeout with a delay of 0 not run immediately?"}
+{"id": "fr-016", "category": "code", "lang": "en", "prompt": "Write a small bash one-liner that finds the ten largest files under the current directory."}
+{"id": "fr-017", "category": "code", "lang": "en", "prompt": "What is the difference between a mutex and a semaphore, in plain terms, with one example each?"}
+{"id": "fr-018", "category": "code", "lang": "en", "prompt": "Show me an idiomatic Rust function that reads a file line by line and returns the lines that parse as integers."}
+{"id": "fr-019", "category": "code", "lang": "en", "prompt": "Explain what Content-Security-Policy does and give a reasonable starting header for a static site."}
+{"id": "fr-020", "category": "code", "lang": "en", "prompt": "Write a regular expression that matches an ISO 8601 date and explain each part of it."}
+{"id": "fr-021", "category": "translation", "lang": "en", "prompt": "Translate into French: The workshop begins at nine and lunch is provided, so please arrive on an empty stomach."}
+{"id": "fr-022", "category": "translation", "lang": "en", "prompt": "Translate into Icelandic: The weather turned before we reached the pass, so we camped by the river instead."}
+{"id": "fr-023", "category": "translation", "lang": "en", "prompt": "Translate into Japanese: Thank you for your patience, the replacement part will arrive on Thursday."}
+{"id": "fr-024", "category": "translation", "lang": "de", "prompt": "Übersetze ins Englische: Der Zug faellt heute aus, wir nehmen den Bus ueber Ludwigshafen."}
+{"id": "fr-025", "category": "translation", "lang": "es", "prompt": "Traduce al inglés: La reunión se ha movido al martes porque el cliente viaja el lunes."}
+{"id": "fr-026", "category": "translation", "lang": "en", "prompt": "Translate into Spanish and keep the tone informal: I cannot make it tonight, something came up with my brother."}
+{"id": "fr-027", "category": "translation", "lang": "fr", "prompt": "Traduis en anglais: Nous avons recu le colis mais il manque la notice de montage."}
+{"id": "fr-028", "category": "translation", "lang": "en", "prompt": "Translate into Polish: Please leave the parcel with the neighbour on the ground floor if nobody answers."}
+{"id": "fr-029", "category": "maths", "lang": "en", "prompt": "A train covers 180 km in two and a half hours. What is its average speed in metres per second?"}
+{"id": "fr-030", "category": "maths", "lang": "en", "prompt": "If I invest 2000 at 4.5 percent compounded annually, how much is it worth after seven years?"}
+{"id": "fr-031", "category": "maths", "lang": "en", "prompt": "What is the probability of getting exactly two heads in five fair coin tosses?"}
+{"id": "fr-032", "category": "maths", "lang": "en", "prompt": "Differentiate f(x) = x^3 * ln(x) and simplify."}
+{"id": "fr-033", "category": "maths", "lang": "en", "prompt": "A recipe for six needs 450 g of flour. How much flour for ten people, and how much for four?"}
+{"id": "fr-034", "category": "maths", "lang": "en", "prompt": "Explain why the sum of the first n odd numbers is n squared."}
+{"id": "fr-035", "category": "maths", "lang": "en", "prompt": "Solve 3x - 7 = 2x + 11 and check the answer."}
+{"id": "fr-036", "category": "maths", "lang": "en", "prompt": "A rectangular room is 4.2 m by 3.6 m. How many square metres of flooring do I need with ten percent added for waste?"}
+{"id": "fr-037", "category": "summarise", "lang": "en", "prompt": "Summarise in three sentences: the Anthropocene debate is about whether human activity has pushed the Earth into a new geological epoch, and geologists disagree about whether a single stratigraphic marker exists, with candidates ranging from the first agriculture to the radionuclides of the 1950s nuclear tests."}
+{"id": "fr-038", "category": "writing", "lang": "en", "prompt": "Rewrite this to be warmer without making it longer: Your request has been received and will be processed in due course."}
+{"id": "fr-039", "category": "transcript", "lang": "en", "prompt": "Clean up this dictated note into proper sentences: so uh tomorrow morning pick up the the tyres from the garage and then call marta about the the invoice thing"}
+{"id": "fr-040", "category": "explanation", "lang": "en", "prompt": "Explain to someone with no physics background why a heavier object does not fall faster in a vacuum."}

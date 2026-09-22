@@ -1,0 +1,60 @@
+{"id": "fr2-001", "category": "chat", "lang": "en", "hard_negative": false, "prompt": "I keep burning garlic when I fry it. What am I doing wrong?"}
+{"id": "fr2-002", "category": "chat", "lang": "en", "hard_negative": false, "prompt": "Why does my bread dough tear instead of stretching when I do the windowpane test?"}
+{"id": "fr2-003", "category": "chat", "lang": "en", "hard_negative": false, "prompt": "My cat has started knocking things off the table at five in the morning. Any idea what she wants?"}
+{"id": "fr2-004", "category": "chat", "lang": "en", "hard_negative": false, "prompt": "I have a long-haul flight tomorrow and I never sleep on planes. What actually helps?"}
+{"id": "fr2-005", "category": "chat", "lang": "en", "hard_negative": false, "prompt": "I inherited a cast iron pan with a rusty patch. Can it be saved?"}
+{"id": "fr2-006", "category": "explanation", "lang": "en", "hard_negative": false, "prompt": "Explain why the sky looks orange through wildfire smoke but blue on a clear day."}
+{"id": "fr2-007", "category": "explanation", "lang": "en", "hard_negative": false, "prompt": "How does a heat pump move heat from cold outside air into a warm house?"}
+{"id": "fr2-008", "category": "explanation", "lang": "en", "hard_negative": false, "prompt": "What causes the green flash that is sometimes seen at sunset?"}
+{"id": "fr2-009", "category": "factual", "lang": "en", "hard_negative": false, "prompt": "Who first described the Doppler effect, and roughly when?"}
+{"id": "fr2-010", "category": "factual", "lang": "en", "hard_negative": false, "prompt": "What is the tallest waterfall in the world and where is it?"}
+{"id": "fr2-011", "category": "code", "lang": "en", "hard_negative": false, "prompt": "In Elixir, what is the difference between a list and an improper list?"}
+{"id": "fr2-012", "category": "code", "lang": "en", "hard_negative": false, "prompt": "Write a bash one-liner that renames every .jpeg in a folder to .jpg."}
+{"id": "fr2-013", "category": "code", "lang": "en", "hard_negative": false, "prompt": "My Postgres query is slow and EXPLAIN ANALYZE says Seq Scan. What does that usually tell me?"}
+{"id": "fr2-014", "category": "code", "lang": "en", "hard_negative": false, "prompt": "What does the --no-verify flag do on git commit?"}
+{"id": "fr2-015", "category": "code", "lang": "en", "hard_negative": false, "prompt": "Why would a Python function that mutates a default list argument behave oddly on the second call?"}
+{"id": "fr2-016", "category": "maths", "lang": "en", "hard_negative": false, "prompt": "A train covers 240 km in 3 hours. If it slows by 20 km/h, how long does the same trip take?"}
+{"id": "fr2-017", "category": "maths", "lang": "en", "hard_negative": false, "prompt": "What is the derivative of x^3 times the natural log of x?"}
+{"id": "fr2-018", "category": "maths", "lang": "en", "hard_negative": false, "prompt": "If I flip a fair coin six times, what is the probability of getting exactly four heads?"}
+{"id": "fr2-019", "category": "maths", "lang": "en", "hard_negative": false, "prompt": "Simplify (2/3) divided by (4/9)."}
+{"id": "fr2-020", "category": "translation", "lang": "de", "hard_negative": false, "prompt": "Translate into English: Der Zug faellt heute wegen eines Signalschadens aus."}
+{"id": "fr2-021", "category": "translation", "lang": "fr", "hard_negative": false, "prompt": "Translate into French: The kitchen closes at nine, but the bar stays open."}
+{"id": "fr2-022", "category": "translation", "lang": "ja", "hard_negative": false, "prompt": "Translate into English: 明日の会議は午後三時に変更になりました。"}
+{"id": "fr2-023", "category": "translation", "lang": "is", "hard_negative": false, "prompt": "Translate into English: Vedrid a morgun verdur hvasst fyrir nordan."}
+{"id": "fr2-024", "category": "summarise", "lang": "en", "hard_negative": false, "prompt": "Summarise in two sentences: The harbour road was closed for most of the summer while the culvert underneath it was replaced, and the detour added twenty minutes to the school run for about four hundred families."}
+{"id": "fr2-025", "category": "writing", "lang": "en", "hard_negative": false, "prompt": "Write a two-line thank-you note to a neighbour who fed my cat for a week."}
+{"id": "fr2-026", "category": "writing", "lang": "en", "hard_negative": false, "prompt": "Give me a subject line for an email asking a professor for a reference letter."}
+{"id": "fr2-027", "category": "transcript", "lang": "en", "hard_negative": false, "prompt": "Clean up this dictation: um so the meeting is uh moved to thursday i think and we need the slides before that"}
+{"id": "fr2-028", "category": "roleplay", "lang": "en", "hard_negative": false, "prompt": "You are a museum guide. In three sentences, introduce a room full of Viking-age combs."}
+{"id": "fr2-029", "category": "chat", "lang": "de", "hard_negative": false, "prompt": "Ich habe viel zu viel Kaffee getrunken und kann nicht schlafen. Was hilft jetzt noch?"}
+{"id": "fr2-030", "category": "chat", "lang": "es", "hard_negative": false, "prompt": "Se me ha manchado una camisa blanca de tomate. Como la salvo?"}
+{"id": "fr2-031", "category": "chat", "lang": "fr", "hard_negative": false, "prompt": "Mon velo fait un bruit de cliquetis quand je pedale. D'ou ca peut venir?"}
+{"id": "fr2-032", "category": "chat", "lang": "zh", "hard_negative": false, "prompt": "我的绿萝叶子发黄了，是浇水太多了吗？"}
+{"id": "fr2-033", "category": "chat", "lang": "ko", "hard_negative": false, "prompt": "김치찌개에 돼지고기 대신 참치를 넣어도 괜찮을까요?"}
+{"id": "fr2-034", "category": "chat", "lang": "pt", "hard_negative": false, "prompt": "O meu paozinho fica duro no dia seguinte. Como devo guardar melhor?"}
+{"id": "fr2-035", "category": "explanation", "lang": "nl", "hard_negative": false, "prompt": "Waarom smaakt koffie bitter als je het water te heet laat worden?"}
+{"id": "fr2-036", "category": "writing", "lang": "en", "hard_negative": true, "prompt": "Write a friendly paragraph for our website explaining our 30-day returns policy."}
+{"id": "fr2-037", "category": "translation", "lang": "de", "hard_negative": true, "prompt": "Translate into German: Please choose one of the three shipping options at checkout."}
+{"id": "fr2-038", "category": "translation", "lang": "ja", "hard_negative": true, "prompt": "Translate into Japanese: The committee has not yet made a decision."}
+{"id": "fr2-039", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "What is the difference between a decision tree and a random forest?"}
+{"id": "fr2-040", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "In reinforcement learning, what does the word policy actually mean?"}
+{"id": "fr2-041", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "Explain what a policy gradient is to someone who knows basic calculus."}
+{"id": "fr2-042", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "Explain how feature flags let a team roll a change out to five percent of users first."}
+{"id": "fr2-043", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "Explain the difference between an A/B test and a multi-armed bandit."}
+{"id": "fr2-044", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "What is the Condorcet paradox?"}
+{"id": "fr2-045", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "Explain how ranked-choice voting counts second preferences."}
+{"id": "fr2-046", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "Explain what analysis paralysis means and where the phrase comes from."}
+{"id": "fr2-047", "category": "explanation", "lang": "en", "hard_negative": true, "prompt": "What is the difference between a decision and a commitment in ordinary English usage?"}
+{"id": "fr2-048", "category": "code", "lang": "en", "hard_negative": true, "prompt": "What does an IAM policy mean in AWS, and how is it different from a role?"}
+{"id": "fr2-049", "category": "code", "lang": "en", "hard_negative": true, "prompt": "In Kubernetes, what does the imagePullPolicy field control?"}
+{"id": "fr2-050", "category": "code", "lang": "en", "hard_negative": true, "prompt": "In Postgres, what does the row-level security POLICY statement do?"}
+{"id": "fr2-051", "category": "code", "lang": "en", "hard_negative": true, "prompt": "What does the SameSite cookie policy do in a browser?"}
+{"id": "fr2-052", "category": "code", "lang": "en", "hard_negative": true, "prompt": "What are the options for pinning a dependency in a Python requirements file, and what do they mean?"}
+{"id": "fr2-053", "category": "summarise", "lang": "en", "hard_negative": true, "prompt": "Summarise the case for and the case against a four-day work week in three sentences."}
+{"id": "fr2-054", "category": "summarise", "lang": "en", "hard_negative": true, "prompt": "Summarise this in one sentence: The board reviewed three proposals and deferred the decision to the next quarter."}
+{"id": "fr2-055", "category": "writing", "lang": "en", "hard_negative": true, "prompt": "My team spent an hour debating two project names and got nowhere. Write a limerick about indecision."}
+{"id": "fr2-056", "category": "writing", "lang": "en", "hard_negative": true, "prompt": "Draft an agenda for a thirty-minute meeting where we will decide on a logo."}
+{"id": "fr2-057", "category": "writing", "lang": "en", "hard_negative": true, "prompt": "Our insurance policy renews next month. Write a short calendar reminder note for it."}
+{"id": "fr2-058", "category": "writing", "lang": "en", "hard_negative": true, "prompt": "Write a two-sentence blurb for a podcast episode about how juries reach decisions."}
+{"id": "fr2-059", "category": "writing", "lang": "en", "hard_negative": true, "prompt": "Write a haiku about a fork in the road."}
+{"id": "fr2-060", "category": "rewrite", "lang": "en", "hard_negative": true, "prompt": "Rewrite this to sound less bureaucratic: Employees must select one of the enumerated options prior to the stated deadline."}
