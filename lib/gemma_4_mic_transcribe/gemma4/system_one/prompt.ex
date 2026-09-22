@@ -25,6 +25,21 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Prompt do
     end
   end
 
+  @doc """
+  Renders the text part of an item whose question is spoken.
+
+  The state and the options stay text; the question line is replaced by one
+  that points at the audio, which the caller appends after this text in the
+  model's audio slot (`Gemma4MicTranscribe.Gemma4Unified.Prompt.build/4`).
+  A written `"question"` is ignored so the spoken one is the only question
+  the model sees.
+  """
+  def render_audio(item) when is_map(item) do
+    [state_block(item), "The question is spoken in the audio that follows."]
+    |> Enum.concat(options_block(item))
+    |> Enum.join("\n\n")
+  end
+
   defp render_item(item) do
     [state_block(item), question(item)]
     |> Enum.concat(options_block(item))

@@ -52,6 +52,44 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
         SystemOnePrompt.render(%{"state" => %{}})
       end
     end
+
+    test "a spoken question keeps the state and options as text and points at the audio" do
+      text =
+        SystemOnePrompt.render_audio(%{
+          "state" => %{"job" => "contract.pdf"},
+          "question" => "ignored, the WAV carries it",
+          "audio" => "q1.wav",
+          "options" => ["hp_2200", "brother_l"]
+        })
+
+      assert text ==
+               """
+               State: {"job":"contract.pdf"}
+
+               The question is spoken in the audio that follows.
+
+               Options: hp_2200, brother_l\
+               """
+
+      # The audio slot follows the text inside the same user turn, so the
+      # model reads the state first and then hears the question.
+      input =
+        Input.build(List.duplicate(0.1, 640 * 3),
+          prompt: text,
+          audio_token_count: 5,
+          thought_channel: true
+        )
+
+      assert input.audio.token_count == 5
+      assert Nx.to_flat_list(input.audio.attention_mask) == [1, 1, 1, 0, 0]
+
+      assert input.prompt ==
+               "<bos><|turn>user\n" <>
+                 text <>
+                 "\n\n<|audio>" <>
+                 String.duplicate("<|audio|>", 5) <>
+                 "<audio|><turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+    end
   end
 
   describe "build_text/2" do
@@ -272,6 +310,7 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert opts.gate_probe == true
       assert opts.thought_channel == true
       assert opts.max_new_tokens == 64
+      assert opts.audio_seconds == 8.0
       assert opts.buckets == [64, 128, 256, 384]
       assert opts.tail_artifact == "artifacts/gemma4-12b-packed-tail-45-47"
     end
@@ -289,13 +328,16 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
                  "--force-router-closed",
                  "--no-gate-probe",
                  "--max-new-tokens",
-                 "16"
+                 "16",
+                 "--audio-seconds",
+                 "6"
                ])
 
       assert opts.expert == "artifacts/system-one-expert"
       assert opts.force_router_closed == true
       assert opts.gate_probe == false
       assert opts.max_new_tokens == 16
+      assert opts.audio_seconds == 6.0
       assert opts.gate_floor == nil
     end
 

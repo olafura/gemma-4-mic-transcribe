@@ -2268,6 +2268,30 @@ opens the gate late in ordinary replies; and under cross-entropy a question
 opener is cheaper than applying a rule, so an expert asked to do both learns
 to ask.
 
+The question can be spoken. An item with `"audio": "q.wav"` (a path relative
+to the items file) goes through the model's own audio path: the state and the
+options stay text, the question line becomes "The question is spoken in the
+audio that follows.", and the WAV sits in the user turn's audio slot after
+them, so the model reads the state and then hears the question. The samples
+are cut and padded to `--audio-seconds` (default 8 s, 25 soft tokens per
+second) with the padded soft tokens masked out and positions kept contiguous
+(`Runtime.prefill_masks/4`, the mechanism the transcriber uses for its audio
+buckets), so every audio row compiles the prefix graph once; the prompt is
+then bucketed as before. `data/system-one/spoken12/` is a twelve-item check,
+six held-out twin pairs whose questions were spoken with two edge-tts voices
+(`scripts/system_one/tts_questions.py` regenerates the WAVs, which are not in
+git). With the router closed the packed 12B answers all six decidable items
+correctly from the spoken question and asks on five of six underspecified
+ones, the same profile as with the written question; with the round-3 expert
+at floor 0.8 it asks on all six underspecified items (the follow-ups get
+more specific: "Which printer upstairs?", "Which of the two came first?") and
+answers five of six decidable ones, one needless question. The expert was
+never trained on audio; it acts on the residual stream after the audio has
+been read, which is why it carries over. Padding is verified: the same audio
+in a 6 s bucket and a 384-token prompt bucket decodes token-identical to the
+4 s / 256 run. Outputs: `data/system-one/spoken12-base.jsonl` and
+`spoken12-expert-r3-f80.jsonl`.
+
 ## Implementation Status
 
 Implemented:

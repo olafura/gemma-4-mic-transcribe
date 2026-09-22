@@ -21,6 +21,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Prompt
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Trainer
   alias Gemma4MicTranscribe.Gemma4.SystemOneArtifact
+  alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
   alias Gemma4MicTranscribe.Gemma4Unified.Input
   alias Gemma4MicTranscribe.Gemma4Unified.Runtime
   alias Gemma4MicTranscribe.Gemma4Unified.Transcript
@@ -30,6 +31,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   @default_tail_artifact "artifacts/gemma4-12b-packed-tail-45-47"
   @default_wav "journal1.wav"
   @sample_rate 16_000
+  # A spoken question is padded to this many seconds of audio soft tokens so
+  # the prefix graph compiles once for every audio row; longer audio is cut.
+  @default_audio_seconds 8.0
   @manifest "manifest.json"
   @rows "rows"
   @version 1
@@ -97,6 +101,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     system_message: :string,
     thought_channel: :boolean,
     max_new_tokens: :integer,
+    audio_seconds: :float,
     force_router_closed: :boolean,
     gate_floor: :float,
     gate_probe: :boolean,
@@ -232,6 +237,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          system_message: Keyword.get(opts, :system_message),
          thought_channel: Keyword.get(opts, :thought_channel, true),
          max_new_tokens: Keyword.get(opts, :max_new_tokens, 64),
+         audio_seconds: Keyword.get(opts, :audio_seconds, @default_audio_seconds),
          force_router_closed: Keyword.get(opts, :force_router_closed, false),
          gate_floor: Keyword.get(opts, :gate_floor),
          gate_probe: Keyword.get(opts, :gate_probe, true),
@@ -571,23 +577,58 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
   # Padding is right-appended pad tokens masked out of attention: the real
   # positions never attend to them, so a bucketed prompt has the same prefix
-  # output as an exact-length one.
+  # output as an exact-length one. An input with audio is padded a second
+  # time, inside the prompt: its soft tokens are filled to the audio bucket
+  # and the unused ones are masked out in the same way (`Runtime.prefill_masks/4`),
+  # with positions running contiguously over the real tokens. For a text-only
+  # input those masks are all ones and 0..length-1.
   defp prepared_inputs(input, spec, backend, token_ids, bucket) do
     length = length(token_ids)
     padding = bucket - length
+    masks = prompt_masks(input, spec, token_ids)
+    first_padded = masks.content_length
 
     Nx.with_default_backend(backend, fn ->
       %{
         "input_ids" =>
           Nx.tensor([token_ids ++ List.duplicate(spec.pad_token_id, padding)], type: :s64),
         "attention_mask" =>
-          Nx.tensor([List.duplicate(1, length) ++ List.duplicate(0, padding)], type: :s64),
-        "position_ids" => Nx.tensor([Enum.to_list(0..(bucket - 1))], type: :s64),
+          Nx.tensor([masks.attention_mask ++ List.duplicate(0, padding)], type: :s64),
+        "position_ids" =>
+          Nx.tensor(
+            [masks.position_ids ++ Enum.to_list(first_padded..(first_padded + padding - 1)//1)],
+            type: :s64
+          ),
         "input_features" => Nx.backend_copy(Nx.new_axis(input.audio.input_features, 0), backend),
         "input_features_mask" =>
           Nx.backend_copy(Nx.new_axis(input.audio.attention_mask, 0), backend)
       }
     end)
+  end
+
+  defp prompt_masks(%{audio: %{token_count: 0}}, _spec, token_ids) do
+    Runtime.prefill_masks(length(token_ids), nil, 0, 0)
+  end
+
+  defp prompt_masks(%{audio: audio}, spec, token_ids) do
+    audio_start_index = Enum.find_index(token_ids, &(&1 == spec.audio_token_id))
+    audio_count = Enum.count(token_ids, &(&1 == spec.audio_token_id))
+
+    if audio_start_index == nil or audio_count != audio.token_count do
+      abort(
+        "prompt carries #{audio_count} audio tokens, expected #{audio.token_count}: " <>
+          "the tokenizer did not keep <|audio|> as one token"
+      )
+    end
+
+    actual_audio_tokens = audio.attention_mask |> Nx.sum() |> Nx.to_number()
+
+    Runtime.prefill_masks(
+      length(token_ids),
+      audio_start_index,
+      actual_audio_tokens,
+      audio.token_count
+    )
   end
 
   defp train!(opts) do
@@ -656,11 +697,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     id = Map.get(row, "id", "row-#{index}")
     backend = pipeline.prefix.backend
 
-    input =
-      Input.build_text(Prompt.render(row),
-        system_message: system_message(row, opts),
-        thought_channel: opts.thought_channel
-      )
+    {input, audio_info} = row_input(row, id, opts)
 
     token_ids = tokenize!(tokenizer, input.prompt)
     prompt_length = length(token_ids)
@@ -708,6 +745,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         "prompt_tokens" => prompt_length,
         "bucket" => bucket
       })
+      |> Map.merge(audio_info)
 
     IO.puts(
       Jason.encode!(%{
@@ -718,12 +756,78 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         ms: result["ms"],
         gate: result["gate"],
         gate_open_fraction: result["gate_open_fraction"],
-        gate_last: result["gate_last"]
+        gate_last: result["gate_last"],
+        audio_tokens: result["audio_tokens"]
       })
     )
 
     result
   end
+
+  # A row whose question is spoken carries `"audio"`, a WAV path resolved
+  # against the input file's directory, and goes through the model's own
+  # audio path: the state and options are text, the WAV sits in the audio slot
+  # after them, and the question line says so. Its samples are cut and padded
+  # to the `--audio-seconds` bucket so every audio row compiles the prefix
+  # graph the same way. Everything else is the text-only input as before.
+  defp row_input(%{"audio" => path} = row, id, opts) when is_binary(path) do
+    audio_tokens = ceil_div(round(opts.audio_seconds * @sample_rate), samples_per_token())
+    max_samples = audio_tokens * samples_per_token()
+
+    samples =
+      path
+      |> resolve_audio_path(opts.input)
+      |> Audio.read_wav_samples!(@sample_rate)
+
+    if length(samples) > max_samples do
+      IO.puts(
+        Jason.encode!(%{
+          event: "audio_truncated",
+          id: id,
+          seconds: length(samples) / @sample_rate,
+          kept_seconds: max_samples / @sample_rate
+        })
+      )
+    end
+
+    samples = Enum.take(samples, max_samples)
+
+    input =
+      Input.build(samples,
+        prompt: Prompt.render_audio(row),
+        system_message: system_message(row, opts),
+        thought_channel: opts.thought_channel,
+        audio_token_count: audio_tokens
+      )
+
+    {input,
+     %{
+       "audio_tokens" => input.audio.attention_mask |> Nx.sum() |> Nx.to_number(),
+       "audio_bucket_tokens" => audio_tokens,
+       "audio_seconds" => length(samples) / @sample_rate
+     }}
+  end
+
+  defp row_input(row, _id, opts) do
+    {Input.build_text(Prompt.render(row),
+       system_message: system_message(row, opts),
+       thought_channel: opts.thought_channel
+     ), %{}}
+  end
+
+  defp resolve_audio_path(path, input) do
+    beside_input = input |> Path.expand() |> Path.dirname() |> Path.join(path)
+
+    cond do
+      Path.type(path) == :absolute -> path
+      File.exists?(beside_input) -> beside_input
+      true -> Path.expand(path)
+    end
+  end
+
+  defp samples_per_token, do: AudioFeatureExtractor.samples_per_token()
+
+  defp ceil_div(numerator, denominator), do: div(numerator + denominator - 1, denominator)
 
   # One more prefix pass and one gate-only pass over the tail blocks, which is
   # what reporting a gate beside a reply costs; `--no-gate-probe` skips both.
@@ -1017,7 +1121,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
     generate: answer a JSONL of eval items, the input of scripts/system_one/scorecard.py
 
-      --input PATH               JSONL of items, or rows with a bare `prompt`, required
+      --input PATH               JSONL of items, or rows with a bare `prompt`, required;
+                                 an item with `audio` (a WAV path, relative to the file)
+                                 takes its question from the audio instead of `question`
       --output PATH              JSONL to write (the same rows plus reply, tokens, ms, gate), required
       --expert PATH              Expert artifact, default none (base Gemma)
       --prefix-artifact PATH     Packed prefix artifact, default #{@default_prefix_artifact}
@@ -1027,6 +1133,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --system-message TEXT      System turn prepended to every item, default none
       --no-thought-channel       End the prompt at the model turn
       --max-new-tokens N         Generation budget per item, default 64
+      --audio-seconds S          Audio bucket for `audio` items: the WAV is cut and padded
+                                 to S seconds (25 soft tokens per second), default #{@default_audio_seconds}
       --force-router-closed      Clamp every gate to 0, the base-model baseline
       --gate-floor F             Override the floor the expert artifact was saved with
       --no-gate-probe            Skip the extra pass that reports the mean gate and the
