@@ -2200,6 +2200,69 @@ whole 50-token chunks are consumed as they complete and the flush is at most
 one small chunk. That keeps the call count near the one-shot count while still
 hiding prefill behind arriving audio.
 
+## System One expert for Gemma 4 12B
+
+`mix gemma.system_one` adds a routed "quick decision" expert to the 12B
+Unified model, in the spirit of Laya and Jev but in free text: given a state
+and a question it answers in one line, and when the state does not settle the
+answer it asks one follow-up question instead of guessing. The base weights
+are untouched. Layers 45–47 each get an additive FFN (3840 → 2048 → 3840, 71M
+parameters in total) behind a per-token linear router, `ffn_out = base_ffn(x)
++ g(x) * expert(x)`, enabled by `spec.system_one_layers` (default `[]`). A
+gate under the floor is clamped to exactly 0, so with the router shut the
+output is bit-identical to today's model, and `regress` checks that.
+
+```bash
+export XLA_FLAGS='--xla_gpu_autotune_level=0 --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false'
+
+# layer-45 inputs for every training row, from the packed 0–44 prefix, one bucket
+mix gemma.system_one cache --input data/system-one/train-round3.jsonl \
+  --output data/system-one/cache-round3-256 --buckets 256
+
+# the expert and its router; the 3-layer tail is dequantised to f32 for autodiff
+mix gemma.system_one train --cache data/system-one/cache-round3-256 \
+  --output artifacts/system-one/round3 --gate-mode classifier --gate-floor 0.5
+
+# replies for the held-out set, then the Laya scorecard
+mix gemma.system_one generate --input data/system-one/heldout.jsonl \
+  --output out.jsonl --expert artifacts/system-one/round3 --gate-floor 0.8 \
+  --system-message 'Answer in one short line. ...'
+.venv-system-one/bin/python scripts/system_one/scorecard.py out.jsonl --out-dir scored
+
+# the non-regression gate: router forced closed, then live at the floor
+mix gemma.system_one regress --expert artifacts/system-one/round3
+mix gemma.system_one regress --expert artifacts/system-one/round3 --gate-floor 0.8
+```
+
+Scoring uses Laya only for what it is good at: a deterministic question rule
+decides whether a reply asks, Laya `choice` over the item's real options
+decides what it commits to, and a confirmation check catches "X — is that
+right?". Correct answers and follow-ups on underspecified items score +1,
+needless questions −0.25, wrong answers −1, committing on an underspecified
+item −2. The headline is gameable by always asking, so the decidable /
+underspecified split is the number to read.
+
+Three training rounds on this machine (2,756 → 4,944 rows of twin pairs, one
+decidable item and its blurred twin, plus 1,000 replay rows of base Gemma's
+own replies) are written up with their numbers in
+[docs/system-one-expert-plan.md](docs/system-one-expert-plan.md). Where it
+ended: round 3 trains the gate as the decision itself (`--gate-mode
+classifier`, open only on underspecified items, base Gemma answers the rest).
+Served at floor 0.8 with the one-line system message it takes base Gemma from
+committing on 64% of underspecified held-out items to 25%, at the cost of
+asking needlessly on 26% of decidable ones (accuracy 0.85 → 0.66), and leaves
+ordinary prompts token-identical on 97–100% of a 400-prompt regression set
+(the rest reword mid-reply, none turns into a question). The limit is the
+router: a linear probe of
+the residual stream separates the two classes only weakly on unseen items
+(median gate 0.59 against 0.79), so the next change is a router with more
+capacity, not more data. Lessons that cost time: the gate reported by
+`generate` is a prefill probe (`gate_last` is the decision position), only
+token identity against a base run measures the reply side; a second epoch
+opens the gate late in ordinary replies; and under cross-entropy a question
+opener is cheaper than applying a rule, so an expert asked to do both learns
+to ask.
+
 ## Implementation Status
 
 Implemented:
