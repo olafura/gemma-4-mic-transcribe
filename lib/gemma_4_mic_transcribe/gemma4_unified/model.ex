@@ -9,6 +9,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   import Bumblebee.Utils.Model, only: [join: 2]
 
   alias Bumblebee.Layers
+  alias Gemma4MicTranscribe.Gemma4.SystemOne
   alias Gemma4MicTranscribe.Gemma4Unified.CompressedTensors
   alias Gemma4MicTranscribe.Gemma4Unified.Q4DualGemv
   alias Gemma4MicTranscribe.Gemma4Unified.Q4Gemv
@@ -58,7 +59,15 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             # matrix cores while decode still reads packed int4
             hybrid_linear: false,
             # Artifact-runner experiment: combine FFN gate/up decode GEMVs.
-            fused_q4_ffn: false
+            fused_q4_ffn: false,
+            # Decoder layers that carry a routed System One expert beside their
+            # FFN (`Gemma4.SystemOne`). Empty builds the graph unchanged.
+            system_one_layers: [],
+            # Inference floor: a router gate under it is clamped to exactly 0,
+            # so the expert term is exactly 0.0. A floor of 1.0 forces every
+            # router closed and restores base Gemma bit for bit.
+            system_one_gate_floor: 0.05,
+            system_one_expert_size: 2048
 
   @impl true
   def architectures, do: [:for_conditional_generation]
@@ -319,7 +328,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
           Layers.none(),
           Enum.fetch!(layer_types(spec), layer_index),
           spec,
-          name: "decoder.blocks.#{layer_index}"
+          name: "decoder.blocks.#{layer_index}",
+          layer_index: layer_index
         )
 
       hidden_state
@@ -354,6 +364,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             Enum.fetch!(layer_types(spec), layer_index),
             spec,
             name: "decoder.blocks.#{layer_index}",
+            layer_index: layer_index,
             bypass_ffn: MapSet.member?(bypass_ffn_layers, layer_index)
           )
 
@@ -383,21 +394,86 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
   end
 
   defp output_logits(hidden_state, spec) do
+    hidden_state
+    |> Axon.nx(
+      fn hidden_state ->
+        hidden_state
+        |> Nx.slice_along_axis(Nx.axis_size(hidden_state, 1) - 1, 1, axis: 1)
+        |> Nx.squeeze(axes: [1])
+      end,
+      name: "decoder_tail.last_hidden_state"
+    )
+    |> head_logits(spec)
+  end
+
+  @doc false
+  # Logits at the positions `positions` names, `{batch, positions}` of indices
+  # into the sequence, instead of only at the last one. The System One trainer
+  # needs several positions per row and cannot afford the 262k-wide head over
+  # all 256 of them.
+  def gathered_output_logits(hidden_state, positions, spec, opts \\ []) do
+    hidden_state
+    |> gathered_hidden_state(positions)
+    |> head_logits(spec, opts)
+  end
+
+  @doc false
+  # The same gathered positions without the vocabulary head. The System One
+  # trainer runs the head as its own program, so the tail it differentiates
+  # never carries the 262144 x 3840 kernel; nothing else builds this node on
+  # its own and the model above is unchanged.
+  def gathered_hidden_state(hidden_state, positions) do
+    Axon.layer(&gather_positions/3, [hidden_state, positions],
+      name: "decoder_tail.gathered_hidden_state",
+      op_name: :gather_positions
+    )
+  end
+
+  # A layer initialises its parameters at its own policy and casts whatever is
+  # handed to it back to that type, so a bf16 kernel is promoted to f32 again
+  # unless the head's node carries the policy as well. The filter matches the
+  # head node alone, so every other layer keeps the policy it always had.
+  defp head_policy(node, nil), do: node
+
+  defp head_policy(%Axon{output: id} = node, type) do
+    policy = Axon.MixedPrecision.create_policy(params: type, compute: type, output: type)
+    Axon.MixedPrecision.apply_policy(node, policy, &(&1.id == id))
+  end
+
+  defp cast(node, nil, _name), do: node
+  defp cast(node, type, name), do: Axon.nx(node, &Nx.as_type(&1, type), name: name)
+
+  defp gather_positions(hidden_state, positions, _opts) do
+    {batch_size, count} = Nx.shape(positions)
+    hidden_size = Nx.axis_size(hidden_state, 2)
+
+    index =
+      positions
+      |> Nx.as_type(:s64)
+      |> Nx.new_axis(-1)
+      |> Nx.broadcast({batch_size, count, hidden_size})
+
+    Nx.take_along_axis(hidden_state, index, axis: 1)
+  end
+
+  defp head_logits(hidden_state, spec, opts \\ []) do
+    # `:head_type` runs the vocabulary projection at the type the head's own
+    # kernel is stored in. It is 262144 x 3840, 3.75 GB in f32, and XLA keeps
+    # a buffer per layout the forward and backward GEMMs want, so leaving the
+    # activation in f32 would promote every one of those copies back up.
+    # Without the option nothing casts and the graph is the one it always was.
+    head_type = Keyword.get(opts, :head_type)
+
     logits =
       hidden_state
-      |> Axon.nx(
-        fn hidden_state ->
-          hidden_state
-          |> Nx.slice_along_axis(Nx.axis_size(hidden_state, 1) - 1, 1, axis: 1)
-          |> Nx.squeeze(axes: [1])
-        end,
-        name: "decoder_tail.last_hidden_state"
-      )
       |> rms_norm(spec.hidden_size,
         name: "output_norm",
         epsilon: spec.layer_norm_epsilon
       )
+      |> cast(head_type, "decoder_tail.head_input")
       |> language_modeling_head(spec, name: "language_modeling_head")
+      |> head_policy(head_type)
+      |> cast(head_type && {:f, 32}, "decoder_tail.head_logits")
 
     if spec.final_logit_softcapping do
       Axon.nx(logits, fn logits ->
@@ -545,7 +621,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             offset,
             layer_type,
             spec,
-            name: join(name, "blocks.#{idx}")
+            name: join(name, "blocks.#{idx}"),
+            layer_index: idx
           )
 
         cache = Layers.Decoder.put_block_cache(state.cache, idx, block_cache)
@@ -597,17 +674,22 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       else
         shortcut = hidden_state
 
-        hidden_state =
-          hidden_state
-          |> rms_norm(spec.hidden_size,
+        ffn_input =
+          rms_norm(hidden_state, spec.hidden_size,
             name: join(name, "pre_ffn_norm"),
             epsilon: spec.layer_norm_epsilon
           )
+
+        hidden_state =
+          ffn_input
           |> gated_ffn(spec.intermediate_size, spec.hidden_size, spec,
             name: join(name, "ffn"),
             activation: spec.activation,
             kernel_initializer: kernel_initializer(spec)
           )
+          # A sibling of the FFN for the layers in `spec.system_one_layers`,
+          # and no graph node at all for every other layer.
+          |> SystemOne.attach(ffn_input, spec, layer_index: opts[:layer_index])
           |> rms_norm(spec.hidden_size,
             name: join(name, "post_ffn_norm"),
             epsilon: spec.layer_norm_epsilon
