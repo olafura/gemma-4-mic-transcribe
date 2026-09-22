@@ -47,13 +47,21 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.TokenSelection do
     end
   end
 
-  def next_token_id_from_sequence(logits, suppression_mask) do
+  @doc """
+  The best token at sequence position `index`, the last one by default.
+
+  A right-padded prompt continues at the last real token instead, so the
+  caller passes its index. The pick is made from the argmax of every position,
+  which is one jitted call either way: nothing is sliced on the device, where
+  eager ops have segfaulted the ROCm client.
+  """
+  def next_token_id_from_sequence(logits, suppression_mask, index \\ -1) do
     with_tensor_backend(suppression_mask, fn ->
       logits
       |> next_token_id_tensor(suppression_mask)
       |> Nx.backend_copy(Nx.BinaryBackend)
       |> Nx.to_flat_list()
-      |> List.last()
+      |> Enum.at(index)
     end)
   end
 

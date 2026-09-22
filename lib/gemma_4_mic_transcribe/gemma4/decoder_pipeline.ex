@@ -254,7 +254,13 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     input_opts =
       opts
       |> Keyword.put_new(:prompt, Config.default_prompt())
-      |> Keyword.take([:prompt, :system_message, :audio_token_count, :max_tokens])
+      |> Keyword.take([
+        :prompt,
+        :system_message,
+        :audio_token_count,
+        :max_tokens,
+        :thought_channel
+      ])
 
     samples
     |> Input.build(input_opts)
@@ -278,18 +284,41 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     input_opts =
       opts
       |> Keyword.put_new(:prompt, Config.default_prompt())
-      |> Keyword.take([:prompt, :system_message, :audio_token_count, :max_tokens])
+      |> Keyword.take([
+        :prompt,
+        :system_message,
+        :audio_token_count,
+        :max_tokens,
+        :thought_channel
+      ])
 
     samples
     |> Input.build(input_opts)
     |> then(&generate(pipeline, &1, opts))
   end
 
-  @doc "Runs cache-aware split generation from model-ready tensors."
+  @doc """
+  Runs cache-aware split generation from model-ready tensors.
+
+  `thought_channel: false` says the prompt stopped at the model turn instead
+  of closing an empty thought channel, so generation starts before the content
+  channel and the model may open a thought channel of its own.
+
+  `logits_index: i` continues from prompt position `i` instead of the last
+  one, for a prompt padded on the right to a fixed bucket. It is ignored when
+  prefill returns a single position, which is what the `:split` execution's
+  tail does.
+  """
   def generate_prepared(%__MODULE__{} = pipeline, prepared, opts \\ []) do
     max_new_tokens = Keyword.get(opts, :max_new_tokens, 32)
     min_new_tokens = Keyword.get(opts, :min_new_tokens, 0)
     execution = Keyword.get(opts, :execution, :composed)
+    logits_index = Keyword.get(opts, :logits_index)
+
+    channel_state =
+      if Keyword.get(opts, :thought_channel, true),
+        do: ChannelState.content(),
+        else: ChannelState.initial()
 
     cond do
       not (is_integer(max_new_tokens) and max_new_tokens >= 0) ->
@@ -301,11 +330,22 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       execution not in [:composed, :split] ->
         {:error, ":execution must be :composed or :split"}
 
+      not (is_nil(logits_index) or (is_integer(logits_index) and logits_index >= 0)) ->
+        {:error, ":logits_index must be a non-negative integer"}
+
       max_new_tokens == 0 ->
         {:ok, []}
 
       true ->
-        generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens, execution)
+        generate_cached(
+          pipeline,
+          prepared,
+          max_new_tokens,
+          min_new_tokens,
+          execution,
+          channel_state,
+          logits_index
+        )
     end
   rescue
     exception -> {:error, Exception.message(exception)}
@@ -328,7 +368,15 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     exception -> {:error, Exception.message(exception)}
   end
 
-  defp generate_cached(pipeline, prepared, max_new_tokens, min_new_tokens, execution) do
+  defp generate_cached(
+         pipeline,
+         prepared,
+         max_new_tokens,
+         min_new_tokens,
+         execution,
+         channel_state,
+         logits_index
+       ) do
     sequence_length = Nx.axis_size(prepared["input_ids"], 1)
     max_cache_length = cache_length(sequence_length, max_new_tokens)
     backend = pipeline.prefix.backend || Nx.BinaryBackend
@@ -340,9 +388,14 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
 
     outputs = predict_cached(pipeline, Map.put(prepared, "cache", cache), execution, :prefill)
 
-    channel_state = ChannelState.content()
     suppression_mask = suppression_mask(pipeline, channel_state)
-    token_id = TokenSelection.next_token_id_from_sequence(outputs.logits, suppression_mask)
+
+    token_id =
+      TokenSelection.next_token_id_from_sequence(
+        outputs.logits,
+        suppression_mask,
+        prefill_index(outputs.logits, logits_index)
+      )
 
     if stop_token?(pipeline, token_id) and min_new_tokens <= 1 do
       {:ok, []}
@@ -358,7 +411,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         1,
         max_new_tokens,
         min_new_tokens,
-        channel_state,
+        ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
         execution
       )
     end
@@ -460,6 +513,14 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       "attention_mask" => prefix_outputs.attention_mask,
       "cache" => prefix_outputs.cache
     })
+  end
+
+  # Prefill of an unpadded prompt, and the tail model's already-sliced output,
+  # both continue at the last position.
+  defp prefill_index(_logits, nil), do: -1
+
+  defp prefill_index(logits, index) do
+    if Nx.rank(logits) == 3 and Nx.axis_size(logits, 1) > index, do: index, else: -1
   end
 
   defp suppression_mask(pipeline, :before_content),

@@ -797,7 +797,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
           "content_tokens=#{masks.content_length}"
       end)
 
-      limits = generate_limits(runtime, opts)
+      limits = generate_limits(runtime, opts, input)
 
       {token_ids, margins, captured_rows, final_cache} =
         if confidence? do
@@ -920,7 +920,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
     exception -> {:error, Exception.message(exception)}
   end
 
-  defp generate_limits(runtime, opts) do
+  defp generate_limits(runtime, opts, input \\ %{}) do
     max_new_tokens =
       opts
       |> Keyword.get(:max_new_tokens, runtime.max_response_tokens)
@@ -928,8 +928,20 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
 
     %{
       max_new_tokens: max_new_tokens,
-      min_new_tokens: Keyword.get(opts, :min_new_tokens, 0)
+      min_new_tokens: Keyword.get(opts, :min_new_tokens, 0),
+      channel_state: initial_channel_state(opts, input)
     }
+  end
+
+  # The empty thought channel that ends the prompt closes deliberation before
+  # generation starts, so the first generated token is already content. Without
+  # it (`thought_channel: false`) the model opens its own thought channel and
+  # the suppression masks have to follow it from the first token.
+  defp initial_channel_state(opts, input) do
+    thought_channel =
+      Keyword.get_lazy(opts, :thought_channel, fn -> Map.get(input, :thought_channel, true) end)
+
+    if thought_channel, do: ChannelState.content(), else: ChannelState.initial()
   end
 
   @doc """
@@ -1024,7 +1036,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         cache
       )
 
-    channel_state = ChannelState.content()
+    channel_state = limits.channel_state
     suppression_mask = suppression_mask_for_state(runtime, channel_state)
 
     {token_id, margin} =
@@ -1047,7 +1059,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         maybe_capture([], captured_hidden),
         1,
         limits,
-        channel_state
+        ChannelState.advance(channel_state, token_id, runtime.channel_token_ids)
       )
     end
   end
@@ -1145,7 +1157,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         cache
       )
 
-    channel_state = ChannelState.content()
+    channel_state = limits.channel_state
     suppression_mask = suppression_mask_for_state(runtime, channel_state)
 
     log_top_token_candidates(runtime, "runtime: prefill", logits, suppression_mask)
@@ -1172,7 +1184,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
         [token_id],
         1,
         limits,
-        channel_state
+        ChannelState.advance(channel_state, token_id, runtime.channel_token_ids)
       )
     end
   end
@@ -1410,6 +1422,21 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Runtime do
       end)
 
     cond do
+      # A text-only prompt carries no audio markers at all, which is what the
+      # official chat template renders for a user turn without audio.
+      expected_count == 0 and begin_count == 0 and end_count == 0 ->
+        {:ok,
+         %{
+           begin: 0,
+           audio: 0,
+           end: 0,
+           text_control: length(input_ids),
+           begin_index: nil,
+           audio_start_index: nil,
+           audio_end_index: nil,
+           end_index: nil
+         }}
+
       begin_count != 1 ->
         {:error, "prompt has #{begin_count} audio begin tokens, expected 1"}
 
