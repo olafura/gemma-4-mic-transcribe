@@ -1,0 +1,43 @@
+sc-01    correct                        1.00  commits=billing            p=0.99   asks=0(rule 0)
+sc-02    wrong                         -1.00  commits=account            p=0.72   asks=0(rule 0)
+sc-03    followup                       1.00  commits=asks_followup      p=0.77   asks=1(rule 1)
+sc-04    needless_followup             -0.25  commits=asks_followup      p=0.54   asks=1(rule 1)
+sc-05    committed_when_underspecified  -2.00  commits=create_reminder    p=1.00   asks=0(rule 0)
+sc-06    correct                        1.00  commits=needs_changes      p=0.75   asks=0(rule 0)
+sc-07    correct                        1.00  commits=tue_1500           p=0.86   asks=0(rule 0)
+sc-08    followup                       1.00  commits=asks_followup      p=0.74   asks=1(rule 1)
+sc-09    wrong                         -1.00  commits=shrank             p=0.81   asks=0(rule 0)
+sc-10    correct                        1.00  commits=shrank             p=0.85   asks=0(rule 0)
+sc-11    committed_when_underspecified  -2.00  commits=light              p=0.99   asks=0(rule 0)
+sc-12    wrong                         -1.00  commits=speaker            p=0.80   asks=0(rule 0)
+{
+  "n": 12,
+  "n_decidable": 8,
+  "n_underspecified": 4,
+  "headline": -0.1042,
+  "decision_accuracy": 0.5,
+  "followup_recall": 0.5,
+  "needless_ask_rate": 0.125,
+  "confirmation_rate": 0.0,
+  "fabrication_rate": 0.5,
+  "none_rate": 0.0,
+  "none_rate_decidable": 0.0,
+  "mean_tokens": 19.4167,
+  "mean_ms": 284.4167,
+  "outcomes": {
+    "committed_when_underspecified": 2,
+    "correct": 4,
+    "followup": 2,
+    "needless_followup": 1,
+    "wrong": 3
+  },
+  "checkpoint": "english",
+  "route": "multilingual",
+  "phrasing": "reply_question",
+  "none_threshold": 0.4,
+  "confirm_threshold": 0.3,
+  "noul_margin": null,
+  "options_truncated": 0,
+  "laya_requests": 12,
+  "judge_ms_per_item": 154.0
+}

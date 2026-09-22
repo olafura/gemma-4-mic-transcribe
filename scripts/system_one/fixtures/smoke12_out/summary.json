@@ -1,0 +1,31 @@
+{
+  "n": 12,
+  "n_decidable": 8,
+  "n_underspecified": 4,
+  "headline": -0.1042,
+  "decision_accuracy": 0.5,
+  "followup_recall": 0.5,
+  "needless_ask_rate": 0.125,
+  "confirmation_rate": 0.0,
+  "fabrication_rate": 0.5,
+  "none_rate": 0.0,
+  "none_rate_decidable": 0.0,
+  "mean_tokens": 19.4167,
+  "mean_ms": 284.4167,
+  "outcomes": {
+    "committed_when_underspecified": 2,
+    "correct": 4,
+    "followup": 2,
+    "needless_followup": 1,
+    "wrong": 3
+  },
+  "checkpoint": "english",
+  "route": "multilingual",
+  "phrasing": "reply_question",
+  "none_threshold": 0.4,
+  "confirm_threshold": 0.3,
+  "noul_margin": null,
+  "options_truncated": 0,
+  "laya_requests": 12,
+  "judge_ms_per_item": 154.0
+}
