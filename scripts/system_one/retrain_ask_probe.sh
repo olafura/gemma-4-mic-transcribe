@@ -6,7 +6,8 @@
 #
 # TRAIN and EVAL rows are the `--extra` format of build_router_probe_set.py:
 # an `id`, a System One item (`state`, `question`, `options`) or a bare
-# `prompt`, and `decidable` (or `label`). Keep EVAL requests out of TRAIN.
+# `prompt`, and `decidable` (or `label`); a row with `audio` is spoken. Keep
+# EVAL requests out of TRAIN.
 #
 # 1. Render the rows as `route` serves them and check that with the router.
 # 2. Cache only the new rows (the GPU step, through scripts/system_one_job.sh);
@@ -17,12 +18,14 @@
 #    set plus EVAL, if given.
 #
 # To serve the new probe: mix gemma.system_one route --ask-probe OUT_DIR/ask-probe ...
-# Environment: C (inverse L2 strength, default 0.003), THRESHOLD (default 0.8).
+# Environment: C (inverse L2 strength, default 0.003), THRESHOLD (default 0.8),
+# AUDIO_SECONDS (the audio bucket of spoken rows, default 8: serve the probe
+# with the same `route --audio-seconds`).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 if [ $# -lt 2 ]; then
-  sed -n 2,19p "$0" | sed 's/^# \{0,1\}//'
+  sed -n 2,23p "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 
@@ -46,7 +49,8 @@ mkdir -p "$out"
 cache() { # NAME INPUT OUTPUT
   [ -d "$3" ] && { echo "reusing $3"; return; }
   scripts/system_one_job.sh "$1" "${MISE[@]}" mix gemma.system_one cache \
-    --input "$2" --output "$3" --buckets 256,384,512 --last-prompt-token-only
+    --input "$2" --output "$3" --buckets 256,384,512 --last-prompt-token-only \
+    --audio-seconds "${AUDIO_SECONDS:-8}"
 }
 
 "${PY[@]}" scripts/system_one/build_router_probe_set.py --only-extra --extra "${train[@]}" --output "$out/train-extra.jsonl"

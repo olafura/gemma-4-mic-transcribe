@@ -60,6 +60,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     system_message: :string,
     thought_channel: :boolean,
     last_prompt_token_only: :boolean,
+    audio_seconds: :float,
     verify_padding: :integer,
     limit: :integer,
     help: :boolean
@@ -135,6 +136,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     expert: :string,
     expert_band: :float,
     expert_floor: :float,
+    audio_seconds: :float,
     decide_only: :boolean,
     limit: :integer,
     help: :boolean
@@ -313,6 +315,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          expert: Keyword.get(opts, :expert),
          expert_band: Keyword.get(opts, :expert_band, 0.4),
          expert_floor: Keyword.get(opts, :expert_floor, 0.8),
+         audio_seconds: Keyword.get(opts, :audio_seconds, @default_audio_seconds),
          decide_only: Keyword.get(opts, :decide_only, false),
          limit: Keyword.get(opts, :limit)
        }}
@@ -352,6 +355,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          system_message: Keyword.get(opts, :system_message),
          thought_channel: Keyword.get(opts, :thought_channel, true),
          last_prompt_token_only: Keyword.get(opts, :last_prompt_token_only, false),
+         audio_seconds: Keyword.get(opts, :audio_seconds, @default_audio_seconds),
          verify_padding: Keyword.get(opts, :verify_padding),
          limit: Keyword.get(opts, :limit)
        }}
@@ -484,6 +488,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       dtype: "f16",
       buckets: opts.buckets,
       last_prompt_token_only: opts.last_prompt_token_only,
+      audio_seconds: opts.audio_seconds,
       thought_channel: opts.thought_channel,
       system_message: opts.system_message,
       input: Path.expand(opts.input),
@@ -504,17 +509,14 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
   defp cache_row!(row, index, artifact, tokenizer, spec, backend, output, opts) do
     id = Map.get(row, "id", "row-#{index}")
-
-    input =
-      Input.build_text(Prompt.render(row),
-        system_message: system_message(row, opts),
-        thought_channel: opts.thought_channel,
-        response: Map.get(row, "target")
-      )
+    input = cache_input(row, id, opts)
 
     token_ids = tokenize!(tokenizer, input.prompt)
-    head_ids = tokenize!(tokenizer, input.prompt_without_response)
-    response_range = Input.response_range(input, token_ids, head_ids)
+    head_ids = tokenize!(tokenizer, Map.get(input, :prompt_without_response, input.prompt))
+
+    response_range =
+      if Map.has_key?(input, :response), do: Input.response_range(input, token_ids, head_ids)
+
     length = length(token_ids)
 
     # `response_range/3` splits on token counts, so it is only the response
@@ -577,6 +579,32 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     )
 
     entry
+  end
+
+  # A row with `"audio"` is cached as `generate` and `route` run it: its text
+  # (a System One item's audio rendering, or a probe-set row's rendered
+  # `prompt`) with the WAV in the audio slot after it. Only the prompt is run,
+  # so a spoken row cannot carry a teacher-forced `target`.
+  defp cache_input(%{"audio" => audio} = row, id, opts) when is_binary(audio) do
+    if Map.has_key?(row, "target"), do: abort("#{id}: a spoken row cannot carry a target")
+
+    spoken = spoken_audio!(row, id, opts)
+    text = if Map.has_key?(row, "state"), do: Prompt.render_audio(row), else: Prompt.render(row)
+
+    Input.build(spoken.samples,
+      prompt: text,
+      system_message: system_message(row, opts),
+      thought_channel: opts.thought_channel,
+      audio_token_count: spoken.token_count
+    )
+  end
+
+  defp cache_input(row, _id, opts) do
+    Input.build_text(Prompt.render(row),
+      system_message: system_message(row, opts),
+      thought_channel: opts.thought_channel,
+      response: Map.get(row, "target")
+    )
   end
 
   defp run_row!(id, artifact, input, spec, backend, token_ids, pad_length, start, kept_length) do
@@ -852,41 +880,17 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   end
 
   defp row_input(%{"audio" => path} = row, id, opts) when is_binary(path) do
-    audio_tokens = ceil_div(round(opts.audio_seconds * @sample_rate), samples_per_token())
-    max_samples = audio_tokens * samples_per_token()
-
-    samples =
-      path
-      |> resolve_audio_path(opts.input)
-      |> Audio.read_wav_samples!(@sample_rate)
-
-    if length(samples) > max_samples do
-      IO.puts(
-        Jason.encode!(%{
-          event: "audio_truncated",
-          id: id,
-          seconds: length(samples) / @sample_rate,
-          kept_seconds: max_samples / @sample_rate
-        })
-      )
-    end
-
-    samples = Enum.take(samples, max_samples)
+    audio = spoken_audio!(row, id, opts)
 
     input =
-      Input.build(samples,
+      Input.build(audio.samples,
         prompt: Prompt.render_audio(row),
         system_message: system_message(row, opts),
         thought_channel: opts.thought_channel,
-        audio_token_count: audio_tokens
+        audio_token_count: audio.token_count
       )
 
-    {input,
-     %{
-       "audio_tokens" => input.audio.attention_mask |> Nx.sum() |> Nx.to_number(),
-       "audio_bucket_tokens" => audio_tokens,
-       "audio_seconds" => length(samples) / @sample_rate
-     }}
+    {input, audio_info(input, audio)}
   end
 
   defp row_input(row, _id, opts) do
@@ -969,7 +973,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         path: output,
         rows: length(results),
         routes: Enum.frequencies_by(results, & &1["route"]),
-        asked_by: results |> Enum.filter(& &1["asked_by"]) |> Enum.frequencies_by(& &1["asked_by"])
+        asked_by:
+          results |> Enum.filter(& &1["asked_by"]) |> Enum.frequencies_by(& &1["asked_by"])
       })
     )
   end
@@ -984,7 +989,10 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     tail = DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend)
 
     {base, nil} =
-      SystemOneArtifact.build_pipeline!(prefix, tail, backend, expert: nil, logits_last_only: false)
+      SystemOneArtifact.build_pipeline!(prefix, tail, backend,
+        expert: nil,
+        logits_last_only: false
+      )
 
     expert =
       if opts.expert do
@@ -1011,14 +1019,16 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   defp route_row!(row, index, pipelines, tokenizer, probe, threshold, opts) do
     id = Map.get(row, "id", "row-#{index}")
     pipeline = pipelines.base
-    direct = route_input(id, Router.direct_prompt(row), row, pipeline, tokenizer, opts)
+    audio = if Router.spoken?(row), do: spoken_audio!(row, id, opts)
+    row_input = &route_input(id, &1, row, audio, pipeline, tokenizer, opts)
+    direct = row_input.(Router.direct_prompt(row))
 
     {probe_us, ask_score} = :timer.tc(fn -> route_probe_score(id, pipeline, direct, probe) end)
 
     expert =
       if pipelines.expert && not Router.ask?(ask_score, threshold) &&
            Router.expert_band?(row, ask_score, opts.expert_band, threshold) do
-        route_expert(id, row, pipelines.expert, tokenizer, opts)
+        route_expert(id, row, audio, pipelines.expert, tokenizer, opts)
       end
 
     expert_reply = expert && Transcript.decode(tokenizer, expert.token_ids)
@@ -1059,25 +1069,14 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
           nil
 
         route == "ask" ->
-          route_followup(
-            id,
-            Router.ask_prompt(row),
-            row,
-            pipeline,
-            tokenizer,
-            opts.max_ask_tokens,
-            opts
-          )
+          route_followup(id, row_input.(Router.ask_prompt(row)), pipeline, opts.max_ask_tokens)
 
         route == "reason" ->
           route_followup(
             id,
-            Router.reason_prompt(row),
-            row,
+            row_input.(Router.reason_prompt(row)),
             pipeline,
-            tokenizer,
-            opts.max_reason_tokens,
-            opts
+            opts.max_reason_tokens
           )
       end
 
@@ -1089,6 +1088,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         true -> nil
       end
 
+    audio_fields = if audio, do: audio_info(direct.input, audio), else: %{}
     answer_us = if answer, do: answer.elapsed_us, else: 0
     followup_us = if followup, do: followup.elapsed_us, else: 0
     expert_us = if expert, do: expert.elapsed_us, else: 0
@@ -1111,6 +1111,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         "expert_ms" => div(expert_us, 1_000),
         "ms" => div(probe_us + expert_us + answer_us + followup_us, 1_000)
       })
+      |> Map.merge(audio_fields)
 
     IO.puts(
       Jason.encode!(%{
@@ -1128,20 +1129,35 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     result
   end
 
-  defp route_input(id, text, row, pipeline, tokenizer, opts) do
+  # A spoken request puts its WAV in the audio slot after the text of each of
+  # its prompts, as `generate` does.
+  defp route_input(id, text, row, audio, pipeline, tokenizer, opts) do
     text
-    |> Input.build_text(system_message: system_message(row, opts), thought_channel: true)
+    |> route_build(audio, system_message(row, opts))
     |> route_prepare(id, pipeline, tokenizer, opts)
+  end
+
+  defp route_build(text, nil, system_message),
+    do: Input.build_text(text, system_message: system_message, thought_channel: true)
+
+  defp route_build(text, audio, system_message) do
+    Input.build(audio.samples,
+      prompt: text,
+      system_message: system_message,
+      thought_channel: true,
+      audio_token_count: audio.token_count
+    )
   end
 
   # The expert is asked the way `generate` evaluated it: the System One
   # template and the system turn it was scored with, whatever `--system-message`
   # says for the router's own prompts.
-  defp route_expert(id, row, pipeline, tokenizer, opts) do
+  defp route_expert(id, row, audio, pipeline, tokenizer, opts) do
+    text = if audio, do: Prompt.render_audio(row), else: Prompt.render(row)
+
     input =
-      row
-      |> Prompt.render()
-      |> Input.build_text(system_message: Router.expert_system_message(), thought_channel: true)
+      text
+      |> route_build(audio, Router.expert_system_message())
       |> route_prepare(id, pipeline, tokenizer, opts)
 
     result = route_generate(id, pipeline, input, opts.max_ask_tokens, false)
@@ -1162,6 +1178,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     spec = pipeline.generation.spec
 
     %{
+      input: input,
       prepared: prepared_inputs(input, spec, pipeline.prefix.backend, token_ids, bucket),
       prompt_length: prompt_length
     }
@@ -1198,11 +1215,43 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     end
   end
 
-  defp route_followup(id, text, row, pipeline, tokenizer, max_new_tokens, opts) do
-    input = route_input(id, text, row, pipeline, tokenizer, opts)
+  defp route_followup(id, input, pipeline, max_new_tokens) do
     result = route_generate(id, pipeline, input, max_new_tokens, false)
     Nx.backend_deallocate(input.prepared)
     result
+  end
+
+  # The row's WAV, cut to the `--audio-seconds` bucket; `token_count` is the
+  # bucket's soft-token count, which every audio row of a run shares.
+  defp spoken_audio!(%{"audio" => path}, id, opts) do
+    token_count = ceil_div(round(opts.audio_seconds * @sample_rate), samples_per_token())
+    max_samples = token_count * samples_per_token()
+
+    samples =
+      path
+      |> resolve_audio_path(opts.input)
+      |> Audio.read_wav_samples!(@sample_rate)
+
+    if length(samples) > max_samples do
+      IO.puts(
+        Jason.encode!(%{
+          event: "audio_truncated",
+          id: id,
+          seconds: length(samples) / @sample_rate,
+          kept_seconds: max_samples / @sample_rate
+        })
+      )
+    end
+
+    %{samples: Enum.take(samples, max_samples), token_count: token_count}
+  end
+
+  defp audio_info(input, audio) do
+    %{
+      "audio_tokens" => input.audio.attention_mask |> Nx.sum() |> Nx.to_number(),
+      "audio_bucket_tokens" => audio.token_count,
+      "audio_seconds" => length(audio.samples) / @sample_rate
+    }
   end
 
   defp resolve_audio_path(path, input) do
@@ -1456,7 +1505,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
       --input PATH               JSONL of items (id, state, question, options, target), or
                                  replay rows (id, prompt, target, optional system,
-                                 kind: replay), required
+                                 kind: replay); a row with `audio` and no target is
+                                 spoken and caches its prompt only, required
       --output PATH              Cache directory to create, required
       --prefix-artifact PATH     Packed prefix artifact, default #{@default_prefix_artifact}
       --backend NAME             Nx backend, default exla:rocm
@@ -1464,6 +1514,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --system-message TEXT      System turn prepended to every item, default none
       --no-thought-channel       End the prompt at the model turn instead of an empty thought channel
       --last-prompt-token-only   Store only the hidden state at the final prompt position
+      --audio-seconds S          Audio bucket for spoken rows, default #{@default_audio_seconds}
       --verify-padding N         Re-run every row padded to N and report how far the kept
                                  slice moves; right padding is masked out, so a correct
                                  run reports 0
@@ -1540,7 +1591,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --input PATH               JSONL of requests: rows with a bare `prompt`, or System One
                                  items; optional `answer` names the answer's shape
                                  (number, letter, ...), default `option name` for items
-                                 and `answer` for prompts, required
+                                 and `answer` for prompts; a row with `audio` (a WAV path,
+                                 relative to the file) is spoken: the item's question, or the
+                                 whole request, is in the WAV and the rest stays text, required
       --output PATH              JSONL to write (the rows plus route, ask_score, confidence,
                                  direct_reply, reply and timings), required
       --ask-probe PATH           Probe from scripts/system_one/export_ask_probe.py,
@@ -1557,6 +1610,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --max-answer-tokens N      Budget of the direct answer, default 24
       --max-reason-tokens N      Budget of a reasoned reply, default 768
       --max-ask-tokens N         Budget of a follow-up question, default 64
+      --audio-seconds S          Audio bucket for spoken rows, default #{@default_audio_seconds}
       --expert PATH              Also consult a System One expert artifact (round 3) on
                                  items whose probe score is in its band; when its reply
                                  is a question that is the ask-back. Loaded on a second

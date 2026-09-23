@@ -24,6 +24,9 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Router do
   @ask_instruction "The information above does not settle this. Reply with only the one short " <>
                      "question you would ask to settle it, and nothing else."
 
+  @spoken_question "The question is spoken in the audio that follows."
+  @spoken_request "The request is spoken in the audio that follows."
+
   @expert_system_message "Answer in one short line. Name exactly one of the options you are given. " <>
                            "If the state you are given does not determine the answer, do not guess: " <>
                            "ask one short question for the missing detail instead."
@@ -48,7 +51,26 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Router do
   their descriptions. Unlike `SystemOne.Prompt`, which names the options
   only, the router has no scorecard to hold the descriptions, so Gemma is
   shown them.
+
+  A spoken request carries `"audio"`, a WAV the caller puts in the audio
+  slot after this text. The written question is then replaced by a line
+  that points at the audio, as in `SystemOne.Prompt.render_audio/1`; a
+  spoken request without a state is the audio alone, after any `"prompt"`
+  given as context.
   """
+  def body(%{"audio" => audio, "state" => state} = row) when is_binary(audio) do
+    ["State: " <> state_json(state), @spoken_question]
+    |> Enum.concat(options_block(Map.get(row, "options")))
+    |> Enum.join("\n\n")
+  end
+
+  def body(%{"audio" => audio} = row) when is_binary(audio) do
+    case Map.get(row, "prompt") do
+      prompt when is_binary(prompt) -> String.trim(prompt) <> "\n\n" <> @spoken_request
+      _none -> @spoken_request
+    end
+  end
+
   def body(%{"state" => state} = row) do
     ["State: " <> state_json(state), row |> fetch!("question") |> to_string() |> String.trim()]
     |> Enum.concat(options_block(Map.get(row, "options")))
@@ -58,6 +80,10 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Router do
   def body(%{"prompt" => prompt}) when is_binary(prompt), do: String.trim(prompt)
 
   def body(_row), do: raise(ArgumentError, "a request needs a \"prompt\" or a \"state\"")
+
+  @doc "Whether the request is spoken: it carries an `\"audio\"` WAV path."
+  def spoken?(%{"audio" => audio}) when is_binary(audio), do: true
+  def spoken?(_row), do: false
 
   @doc "The request with the one-line answer instruction; the probe reads this prompt."
   def direct_prompt(row) do
@@ -212,7 +238,9 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Router do
     ~r/[^.?？؟⁇⁈⁉፧!！。۔\n]+[.?？؟⁇⁈⁉፧!！。۔\n]*/u
     |> Regex.scan(reply)
     |> Enum.map(fn [part] -> String.trim(part) end)
-    |> Enum.filter(&(trim_chars(&1, @closers <> @sentence_ends, @closers <> @sentence_ends) != ""))
+    |> Enum.filter(
+      &(trim_chars(&1, @closers <> @sentence_ends, @closers <> @sentence_ends) != "")
+    )
     |> List.last("")
   end
 

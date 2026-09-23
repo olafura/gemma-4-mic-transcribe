@@ -193,6 +193,7 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert opts.last_prompt_token_only == false
       assert opts.verify_padding == nil
       assert opts.limit == nil
+      assert opts.audio_seconds == 8.0
     end
 
     test "parses the overrides" do
@@ -469,6 +470,7 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert opts.expert_band == 0.4
       assert opts.expert_floor == 0.8
       assert opts.decide_only == false
+      assert opts.audio_seconds == 8.0
     end
 
     test "parses the overrides and requires the paths" do
@@ -504,6 +506,19 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert opts.buckets == [384, 512]
       assert opts.decide_only == true
       assert opts.limit == 5
+
+      assert {:ok, :route, opts} =
+               SystemOneCLI.parse([
+                 "route",
+                 "--input",
+                 "i",
+                 "--output",
+                 "o",
+                 "--audio-seconds",
+                 "4"
+               ])
+
+      assert opts.audio_seconds == 4.0
 
       assert {:error, message} = SystemOneCLI.parse(["route", "--output", "out.jsonl"])
       assert message =~ "--input"
@@ -546,6 +561,39 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
 
       assert Router.answer_form(%{"prompt" => "Hi"}) == "answer"
       assert_raise ArgumentError, fn -> Router.body(%{"question" => "Why?"}) end
+    end
+
+    test "a spoken row keeps the state and options as text and points at the audio" do
+      item = %{
+        "state" => %{"battery" => 12},
+        "question" => "Should I leave now?",
+        "options" => %{"leave" => "go anyway", "charge" => "wait"},
+        "audio" => "q.wav"
+      }
+
+      assert Router.spoken?(item)
+      refute Router.spoken?(Map.delete(item, "audio"))
+
+      assert Router.direct_prompt(item) ==
+               """
+               State: {"battery":12}
+
+               The question is spoken in the audio that follows.
+
+               Options:
+               - charge: wait
+               - leave: go anyway
+
+               Reply with only one line of the form 'Answer: <option name>' and nothing else.\
+               """
+
+      refute Router.ask_prompt(item) =~ "Should I leave now?"
+
+      assert Router.direct_prompt(%{"audio" => "q.wav", "answer" => "number"}) ==
+               "The request is spoken in the audio that follows.\n\nReply with only one line of the form 'Answer: <number>' and nothing else."
+
+      assert Router.body(%{"audio" => "q.wav", "prompt" => " Context: a timer "}) ==
+               "Context: a timer\n\nThe request is spoken in the audio that follows."
     end
 
     test "answer confidence is the least likely printed token after Answer:" do

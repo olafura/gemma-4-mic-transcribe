@@ -23,9 +23,11 @@ longer than its largest bucket.
 misses. Each row is either a System One item (`state`, `question`,
 `options`) or a bare `prompt`, with an `id`, `decidable` (or `label`, 1 = the
 state does not settle it), and optionally `answer` (the answer's shape),
-`src` and `split`. They are rendered exactly as `mix gemma.system_one route`
-serves them (`SystemOne.Router.direct_prompt/1`: sorted state keys and
-options), and keep the original under `request` so
+`src` and `split`. A row with `audio` (a WAV path, relative to its file) is
+spoken: the question, or for a bare request the whole request, is in the WAV,
+which `cache` puts after the rendered prompt. They are rendered exactly as
+`mix gemma.system_one route` serves them (`SystemOne.Router.direct_prompt/1`:
+sorted state keys and options), and keep the original under `request` so
 `scripts/system_one/check_router_render.exs` can confirm that.
 `--only-extra` writes just those rows, which is how a held-out set is built
 and how a retrain caches only what is new (`retrain_ask_probe.sh`).
@@ -62,14 +64,22 @@ def answer_form(request: dict) -> str:
     return "option name" if "state" in request else "answer"
 
 
+SPOKEN_QUESTION = "The question is spoken in the audio that follows."
+SPOKEN_REQUEST = "The request is spoken in the audio that follows."
+
+
 def router_body(request: dict) -> str:
     """`SystemOne.Router.body/1`, byte for byte (checked by check_router_render.exs)."""
+    spoken = isinstance(request.get("audio"), str)
     if "state" not in request:
-        return request["prompt"].strip()
+        if not spoken:
+            return request["prompt"].strip()
+        prompt = request.get("prompt")
+        return prompt.strip() + "\n\n" + SPOKEN_REQUEST if isinstance(prompt, str) else SPOKEN_REQUEST
     state = request["state"]
     state = state.strip() if isinstance(state, str) else json.dumps(
         state, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-    parts = ["State: " + state, str(request["question"]).strip()]
+    parts = ["State: " + state, SPOKEN_QUESTION if spoken else str(request["question"]).strip()]
     options = request.get("options")
     if isinstance(options, dict) and options:
         parts.append("Options:\n" + "\n".join(f"- {k}: {str(v).strip()}" for k, v in sorted(options.items())))
@@ -94,10 +104,18 @@ def extra_rows(path: Path) -> list[dict]:
             label = 0 if request["decidable"] else 1
         else:
             raise SystemExit(f"{path}:{n}: a row needs `decidable` (true or false) or `label`")
-        if "id" not in request or ("state" not in request and "prompt" not in request):
-            raise SystemExit(f"{path}:{n}: a row needs an `id` and a `state` or a `prompt`")
-        rows.append({"id": request["id"], "label": label, "src": request.get("src", path.stem),
-                     "prompt": router_prompt(request), "request": request})
+        if "id" not in request or not any(k in request for k in ("state", "prompt", "audio")):
+            raise SystemExit(f"{path}:{n}: a row needs an `id` and a `state`, a `prompt` or an `audio`")
+        row = {"id": request["id"], "label": label, "src": request.get("src", path.stem),
+               "prompt": router_prompt(request), "request": request}
+        if isinstance(request.get("audio"), str):
+            # A spoken row is cached with its WAV after the prompt; the cache
+            # reads the rows from elsewhere, so the path is made absolute here.
+            wav = (path.parent / request["audio"]).resolve()
+            if not wav.exists():
+                raise SystemExit(f"{path}:{n}: {wav} does not exist")
+            row["audio"] = str(wav)
+        rows.append(row)
     return rows
 
 

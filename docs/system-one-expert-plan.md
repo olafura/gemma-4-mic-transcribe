@@ -986,6 +986,68 @@ Serve the result with `route --ask-probe OUT_DIR/ask-probe`. Retraining
 changes the probe's scores, so the expert band's edges may need
 re-picking afterwards.
 
+### Spoken requests
+
+`route` takes a spoken request the way `generate` does: a row with
+`"audio": "q.wav"` (a path relative to the input file). For a System One
+item the state and options stay text, and the question is replaced by
+"The question is spoken in the audio that follows." For a bare request
+the line is "The request is spoken in the audio that follows.", after
+any `prompt` text given as context. The WAV goes in the user turn's
+audio slot after all of the text, so the probe still reads the same
+template token at the end of the prompt. The ask-back and reasoning
+prompts are built the same way, so a follow-up question is written from
+the audio too. `--audio-seconds` sets the audio bucket: the WAV is cut
+and padded to it, with 25 soft tokens per second and a default of 8 s.
+`cache` does the same for spoken rows, and `build_router_probe_set.py
+--extra` and `retrain_ask_probe.sh` (`AUDIO_SECONDS`) accept them.
+
+The test set is `data/system-one/spoken-heldout/`: the 200 held-out
+twins, with each pair's shared question spoken by
+`scripts/system_one/tts_questions.py`. That is 100 WAVs of 1.9–3.7 s in 12
+languages, two edge-tts voices per language. The WAVs are gitignored and
+regenerated from the items. The table compares a 4 s bucket with the same
+200 items in text, all run through the full route (2026-09-23):
+
+| 200 held-out twins, full route | AUROC | needless asks | unclear asked | decidable right |
+|---|---|---|---|---|
+| text | 0.885 | 6 | 67 (far 29, near 38) | 86 |
+| spoken | 0.854 | 3 | 48 (far 21, near 27) | 93 |
+| spoken, `--expert` | | 13 | 72 | |
+| spoken, probe retrained with spoken twins | 0.883 | 4 | 60 (far 27, near 33) | |
+
+- **Speed is unchanged.** A spoken request routes as fast as a written
+  one: answer now has a median of 2.5 s (2.2–4.2 s once compiled), ask
+  back 2.9 s (2.4–3.7 s) and reason 23 s (9–53 s), against 2.5, 2.9 and
+  21 s in text. The 100 audio tokens fit in the 256 bucket. The probe pass
+  is still 0.84 s.
+- **Follow-ups still work.** The model heard the question: "Which
+  printer do you mean, the Brother or the HP?", "¿A qué lista quieres
+  añadir la leche?", "Qual dos dois João?".
+- **The probe asks less.** Spoken scores are lower (median −0.03, mean
+  −0.07), most of all for non-English speech (mean −0.14). At the 0.8
+  threshold it asks on 48 of the 100 unclear requests instead of 67. The
+  reason route catches the clear requests the probe lets through, so
+  decidable accuracy goes up, to 93. A lower threshold only helps in part:
+  at 0.65 the probe asks 62 with 9 needless, while text gets 67 with 6.
+  AUROC also drops, so some information is lost, not just shifted.
+- **The expert makes up for it.** With `--expert` the band catches 24
+  more unclear requests, reaching 72 asked, at the cost of 10 more
+  needless asks.
+- **A spoken retrain restores it.** `retrain_ask_probe.sh` was run with
+  600 spoken rows: 300 pairs of training twins, 100 of them non-English,
+  none from the held-out set. It took 14 min. On spoken requests the
+  retrained probe asks on 12 more unclear requests (95% CI +6 to +19,
+  pair bootstrap). Needless asks change by +1 (CI −3 to +5), and AUROC
+  0.883 matches text. On text the probe is unchanged: 67 unclear asked,
+  8 needless against 6, AUROC 0.887, and still no asks on GSM8K and ARC.
+  The gain is all English (41 → 52 of 83); non-English moves 7 → 8 of 17.
+  The probe is at `artifacts/system-one/ask-probe-spoken`; serve it with
+  `--ask-probe` and `--audio-seconds 4`.
+- **Cache matches serving.** The shipped probe scored on the spoken cache
+  gives the same 0.854, 48 and 3 that `route` served, so the cache
+  renders spoken rows exactly as `route` does.
+
 ## 6. Opus workers
 
 Spawned with the Agent tool, `model: opus`. Two lanes:
