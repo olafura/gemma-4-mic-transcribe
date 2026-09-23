@@ -11,6 +11,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   `train` fits the experts on such a cache, `generate` answers a JSONL of eval
   items with the packed pipeline plus an expert artifact, and `regress` is the
   non-regression gate: the router forced closed must still be base Gemma.
+
+  `route` is the router in front of unmodified Gemma (`SystemOne.Router`): per
+  request it asks back, answers now or reasons first.
   """
 
   alias Gemma4MicTranscribe.Audio
@@ -19,6 +22,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   alias Gemma4MicTranscribe.Gemma4.DecoderPipeline
   alias Gemma4MicTranscribe.Gemma4.SystemOne
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Prompt
+  alias Gemma4MicTranscribe.Gemma4.SystemOne.Router
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Trainer
   alias Gemma4MicTranscribe.Gemma4.SystemOneArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
@@ -30,6 +34,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   @default_prefix_artifact "artifacts/gemma4-12b-packed-prefix-0-44"
   @default_tail_artifact "artifacts/gemma4-12b-packed-tail-45-47"
   @default_wav "journal1.wav"
+  @default_ask_probe "artifacts/system-one/ask-probe"
+  # The ask-back probe was trained on prefix outputs cached at these buckets.
+  @default_route_buckets [256, 384, 512]
   @sample_rate 16_000
   # A spoken question is padded to this many seconds of audio soft tokens so
   # the prefix graph compiles once for every audio row; longer audio is cut.
@@ -111,6 +118,25 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     help: :boolean
   ]
 
+  @route_switches [
+    input: :string,
+    output: :string,
+    ask_probe: :string,
+    ask_threshold: :float,
+    confidence: :float,
+    prefix_artifact: :string,
+    tail_artifact: :string,
+    backend: :string,
+    buckets: :string,
+    system_message: :string,
+    max_answer_tokens: :integer,
+    max_reason_tokens: :integer,
+    max_ask_tokens: :integer,
+    decide_only: :boolean,
+    limit: :integer,
+    help: :boolean
+  ]
+
   @regress_switches [
     expert: :string,
     prefix_artifact: :string,
@@ -140,6 +166,10 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         generate!(opts)
         0
 
+      {:ok, :route, opts} ->
+        route!(opts)
+        0
+
       {:ok, :regress, opts} ->
         regress!(opts)
 
@@ -156,13 +186,15 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   def parse(["train" | argv]), do: parse_command(:train, argv, @train_switches)
   def parse(["generate" | argv]), do: parse_command(:generate, argv, @generate_switches)
   def parse(["regress" | argv]), do: parse_command(:regress, argv, @regress_switches)
+  def parse(["route" | argv]), do: parse_command(:route, argv, @route_switches)
 
   def parse(["--help"]), do: {:help, usage()}
   def parse(["-h"]), do: {:help, usage()}
   def parse([]), do: {:help, usage()}
 
   def parse([command | _argv]),
-    do: {:error, "unknown subcommand #{command}, expected cache, train, generate or regress"}
+    do:
+      {:error, "unknown subcommand #{command}, expected cache, train, generate, route or regress"}
 
   defp parse_command(command, argv, switches) do
     case OptionParser.parse(argv, strict: switches, aliases: [h: :help]) do
@@ -245,6 +277,37 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          force_router_closed: Keyword.get(opts, :force_router_closed, false),
          gate_floor: Keyword.get(opts, :gate_floor),
          gate_probe: Keyword.get(opts, :gate_probe, true),
+         limit: Keyword.get(opts, :limit)
+       }}
+    end
+  end
+
+  defp parse_values(:route, opts) do
+    buckets =
+      case Keyword.get(opts, :buckets) do
+        nil -> {:ok, @default_route_buckets}
+        value -> parse_buckets(value)
+      end
+
+    with {:ok, buckets} <- buckets,
+         :ok <- required(opts[:input], "--input PATH is required"),
+         :ok <- required(opts[:output], "--output PATH is required") do
+      {:ok, :route,
+       %{
+         input: opts[:input],
+         output: opts[:output],
+         ask_probe: Keyword.get(opts, :ask_probe, @default_ask_probe),
+         ask_threshold: Keyword.get(opts, :ask_threshold),
+         confidence: Keyword.get(opts, :confidence, 0.9),
+         prefix_artifact: Keyword.get(opts, :prefix_artifact, @default_prefix_artifact),
+         tail_artifact: Keyword.get(opts, :tail_artifact, @default_tail_artifact),
+         backend: Keyword.get(opts, :backend, "exla:rocm"),
+         buckets: buckets,
+         system_message: Keyword.get(opts, :system_message),
+         max_answer_tokens: Keyword.get(opts, :max_answer_tokens, 24),
+         max_reason_tokens: Keyword.get(opts, :max_reason_tokens, 768),
+         max_ask_tokens: Keyword.get(opts, :max_ask_tokens, 64),
+         decide_only: Keyword.get(opts, :decide_only, false),
          limit: Keyword.get(opts, :limit)
        }}
     end
@@ -850,6 +913,225 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
   defp score_rows(scores), do: Enum.map(scores, &[&1.logprob, &1.margin])
 
+  defp route!(opts) do
+    output = Path.expand(opts.output)
+
+    if File.exists?(output) do
+      abort("output path already exists: #{output}")
+    end
+
+    rows = read_rows!(opts.input, opts.limit)
+    probe = Router.load_probe!(opts.ask_probe)
+    threshold = opts.ask_threshold || probe.threshold
+
+    {pipeline, _artifact} =
+      timed!("route_pipeline_load", fn ->
+        {:ok,
+         SystemOneArtifact.load_pipeline!(
+           prefix_artifact: opts.prefix_artifact,
+           tail_artifact: opts.tail_artifact,
+           expert: nil,
+           backend: opts.backend,
+           force_router_closed: false,
+           gate_floor: nil,
+           logits_last_only: false
+         )}
+      end)
+
+    tokenizer =
+      pipeline.tail.tokenizer || pipeline.input_context.tokenizer ||
+        abort("neither artifact carries a tokenizer")
+
+    IO.puts(
+      Jason.encode!(%{
+        event: "route_ready",
+        rows: length(rows),
+        ask_threshold: threshold,
+        confidence: opts.confidence,
+        buckets: opts.buckets,
+        decide_only: opts.decide_only
+      })
+    )
+
+    results =
+      rows
+      |> Enum.with_index()
+      |> Enum.map(fn {row, index} ->
+        route_row!(row, index, pipeline, tokenizer, probe, threshold, opts)
+      end)
+
+    File.mkdir_p!(Path.dirname(output))
+    File.write!(output, Enum.map_join(results, &(Jason.encode!(&1) <> "\n")))
+
+    IO.puts(
+      Jason.encode!(%{
+        event: "route_written",
+        path: output,
+        rows: length(results),
+        routes: Enum.frequencies_by(results, & &1["route"])
+      })
+    )
+  end
+
+  # The probe reads the prefix output of the direct prompt, and the direct
+  # answer is generated from the same prepared input, so a request that is
+  # answered now costs one extra prefix pass over the plain direct answer.
+  defp route_row!(row, index, pipeline, tokenizer, probe, threshold, opts) do
+    id = Map.get(row, "id", "row-#{index}")
+    direct = route_input(id, Router.direct_prompt(row), row, pipeline, tokenizer, opts)
+
+    {probe_us, ask_score} = :timer.tc(fn -> route_probe_score(id, pipeline, direct, probe) end)
+    ask = Router.ask?(ask_score, threshold)
+
+    answer =
+      if not ask do
+        route_generate(id, pipeline, direct, opts.max_answer_tokens, true)
+      end
+
+    Nx.backend_deallocate(direct.prepared)
+
+    confidence =
+      answer &&
+        Router.answer_confidence(
+          Enum.map(answer.token_ids, &Bumblebee.Tokenizer.decode(tokenizer, [&1])),
+          Enum.map(answer.scores, & &1.logprob)
+        )
+
+    route =
+      cond do
+        ask -> "ask"
+        Router.answer_now?(confidence, opts.confidence) -> "answer"
+        true -> "reason"
+      end
+
+    followup =
+      cond do
+        route == "answer" or opts.decide_only ->
+          nil
+
+        route == "ask" ->
+          route_followup(
+            id,
+            Router.ask_prompt(row),
+            row,
+            pipeline,
+            tokenizer,
+            opts.max_ask_tokens,
+            opts
+          )
+
+        route == "reason" ->
+          route_followup(
+            id,
+            Router.reason_prompt(row),
+            row,
+            pipeline,
+            tokenizer,
+            opts.max_reason_tokens,
+            opts
+          )
+      end
+
+    reply_ids =
+      cond do
+        route == "answer" -> answer.token_ids
+        followup -> followup.token_ids
+        true -> nil
+      end
+
+    answer_us = if answer, do: answer.elapsed_us, else: 0
+    followup_us = if followup, do: followup.elapsed_us, else: 0
+
+    result =
+      Map.merge(row, %{
+        "id" => id,
+        "route" => route,
+        "ask_score" => ask_score,
+        "confidence" => confidence,
+        "direct_reply" => answer && Transcript.decode(tokenizer, answer.token_ids),
+        "reply" => reply_ids && Transcript.decode(tokenizer, reply_ids),
+        "tokens" => reply_ids && length(reply_ids),
+        "prompt_tokens" => direct.prompt_length,
+        "probe_ms" => div(probe_us, 1_000),
+        "answer_ms" => div(answer_us, 1_000),
+        "followup_ms" => div(followup_us, 1_000),
+        "ms" => div(probe_us + answer_us + followup_us, 1_000)
+      })
+
+    IO.puts(
+      Jason.encode!(%{
+        event: "route_row",
+        index: index,
+        id: id,
+        route: route,
+        ask_score: ask_score,
+        confidence: confidence,
+        ms: result["ms"]
+      })
+    )
+
+    result
+  end
+
+  defp route_input(id, text, row, pipeline, tokenizer, opts) do
+    input =
+      Input.build_text(text, system_message: system_message(row, opts), thought_channel: true)
+
+    token_ids = tokenize!(tokenizer, input.prompt)
+    prompt_length = length(token_ids)
+
+    bucket =
+      case bucket(prompt_length, opts.buckets) do
+        {:ok, bucket} -> bucket
+        {:error, reason} -> abort("#{id}: #{reason}")
+      end
+
+    spec = pipeline.generation.spec
+
+    %{
+      prepared: prepared_inputs(input, spec, pipeline.prefix.backend, token_ids, bucket),
+      prompt_length: prompt_length
+    }
+  end
+
+  defp route_probe_score(id, pipeline, input, probe) do
+    hidden_state =
+      case DecoderPipeline.run_prefix(pipeline.prefix, input.prepared) do
+        {:ok, hidden_state} -> hidden_state
+        {:error, reason} -> abort("#{id}: prefix run failed: #{reason}")
+      end
+
+    spec = pipeline.generation.spec
+    last = host_slice(hidden_state, input.prompt_length - 1, 1, spec)
+    Nx.backend_deallocate(hidden_state)
+    Router.probe_score(probe, Nx.reshape(last, {spec.hidden_size}))
+  end
+
+  defp route_generate(id, pipeline, input, max_new_tokens, scores) do
+    {elapsed_us, generated} =
+      :timer.tc(fn ->
+        DecoderPipeline.generate_prepared(pipeline, input.prepared,
+          max_new_tokens: max_new_tokens,
+          thought_channel: true,
+          logits_index: input.prompt_length - 1,
+          scores: scores
+        )
+      end)
+
+    case generated do
+      {:ok, token_ids} -> %{token_ids: token_ids, scores: nil, elapsed_us: elapsed_us}
+      {:ok, token_ids, scores} -> %{token_ids: token_ids, scores: scores, elapsed_us: elapsed_us}
+      {:error, reason} -> abort("#{id}: generation failed: #{reason}")
+    end
+  end
+
+  defp route_followup(id, text, row, pipeline, tokenizer, max_new_tokens, opts) do
+    input = route_input(id, text, row, pipeline, tokenizer, opts)
+    result = route_generate(id, pipeline, input, max_new_tokens, false)
+    Nx.backend_deallocate(input.prepared)
+    result
+  end
+
   defp resolve_audio_path(path, input) do
     beside_input = input |> Path.expand() |> Path.dirname() |> Path.join(path)
 
@@ -1095,7 +1377,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     defaults = Trainer.defaults()
 
     """
-    usage: mix gemma.system_one cache|train|generate|regress [options]
+    usage: mix gemma.system_one cache|train|generate|route|regress [options]
 
     cache: run the packed prefix over a JSONL of items and store layer 45's input
 
@@ -1179,6 +1461,32 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --gate-floor F             Override the floor the expert artifact was saved with
       --no-gate-probe            Skip the extra pass that reports the mean gate and the
                                  fraction of prompt positions the router opens on
+
+    route: the router in front of unmodified Gemma: ask back, answer now, or reason first
+
+      --input PATH               JSONL of requests: rows with a bare `prompt`, or System One
+                                 items; optional `answer` names the answer's shape
+                                 (number, letter, ...), default `option name` for items
+                                 and `answer` for prompts, required
+      --output PATH              JSONL to write (the rows plus route, ask_score, confidence,
+                                 direct_reply, reply and timings), required
+      --ask-probe PATH           Probe from scripts/system_one/export_ask_probe.py,
+                                 default #{@default_ask_probe}
+      --ask-threshold F          Ask back above this probe score, default the probe's own
+      --confidence F             Answer now at or above this answer confidence, else
+                                 reason, default 0.9
+      --prefix-artifact PATH     Packed prefix artifact, default #{@default_prefix_artifact}
+      --tail-artifact PATH       Packed tail artifact, default #{@default_tail_artifact}
+      --backend NAME             Nx backend, default exla:rocm
+      --buckets LIST             Padded prompt lengths, default #{Enum.join(@default_route_buckets, ",")}
+                                 (the ones the probe was trained at)
+      --system-message TEXT      System turn prepended to every request, default none
+      --max-answer-tokens N      Budget of the direct answer, default 24
+      --max-reason-tokens N      Budget of a reasoned reply, default 768
+      --max-ask-tokens N         Budget of a follow-up question, default 64
+      --decide-only              Record the route but skip the reasoned reply and the
+                                 follow-up question
+      --limit N                  Route only the first N rows
 
     regress: the non-regression gate, the router forced closed must still be base Gemma
 

@@ -3,6 +3,7 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
 
   alias Gemma4MicTranscribe.Gemma4.SystemOne
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Prompt, as: SystemOnePrompt
+  alias Gemma4MicTranscribe.Gemma4.SystemOne.Router
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Trainer
   alias Gemma4MicTranscribe.Gemma4.SystemOneArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.Input
@@ -449,6 +450,138 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
 
       assert {:error, message} = SystemOneCLI.parse(["regress", "--expected", "1,two"])
       assert message =~ "--expected"
+    end
+  end
+
+  describe "route argument parsing" do
+    test "fills in the defaults, taking the threshold from the probe" do
+      assert {:ok, :route, opts} =
+               SystemOneCLI.parse(["route", "--input", "in.jsonl", "--output", "out.jsonl"])
+
+      assert opts.ask_probe == "artifacts/system-one/ask-probe"
+      assert opts.ask_threshold == nil
+      assert opts.confidence == 0.9
+      assert opts.buckets == [256, 384, 512]
+      assert opts.max_answer_tokens == 24
+      assert opts.max_reason_tokens == 768
+      assert opts.max_ask_tokens == 64
+      assert opts.decide_only == false
+    end
+
+    test "parses the overrides and requires the paths" do
+      assert {:ok, :route, opts} =
+               SystemOneCLI.parse([
+                 "route",
+                 "--input",
+                 "in.jsonl",
+                 "--output",
+                 "out.jsonl",
+                 "--ask-threshold",
+                 "0.7",
+                 "--confidence",
+                 "0.99",
+                 "--buckets",
+                 "384,512",
+                 "--decide-only",
+                 "--limit",
+                 "5"
+               ])
+
+      assert opts.ask_threshold == 0.7
+      assert opts.confidence == 0.99
+      assert opts.buckets == [384, 512]
+      assert opts.decide_only == true
+      assert opts.limit == 5
+
+      assert {:error, message} = SystemOneCLI.parse(["route", "--output", "out.jsonl"])
+      assert message =~ "--input"
+    end
+  end
+
+  describe "router" do
+    test "renders an item with its option descriptions, as the probe was trained" do
+      row = %{
+        "state" => %{"charger" => "unplugged", "battery" => 12},
+        "question" => " Should I leave now? ",
+        "options" => %{"leave" => "go anyway", "charge" => "wait for 80%"}
+      }
+
+      assert Router.direct_prompt(row) ==
+               """
+               State: {"battery":12,"charger":"unplugged"}
+
+               Should I leave now?
+
+               Options:
+               - charge: wait for 80%
+               - leave: go anyway
+
+               Reply with only one line of the form 'Answer: <option name>' and nothing else.\
+               """
+
+      assert Router.reason_prompt(row) =~
+               ~r/- leave: go anyway\n\nEnd your reply with a line of the form 'Answer: <option name>'\.$/
+
+      assert Router.ask_prompt(row) =~
+               ~r/go anyway\n\nThe information above does not settle this\./
+    end
+
+    test "passes a bare prompt through and takes the answer form from the row" do
+      row = %{"prompt" => " What is 2 + 3? ", "answer" => "number"}
+
+      assert Router.direct_prompt(row) ==
+               "What is 2 + 3?\n\nReply with only one line of the form 'Answer: <number>' and nothing else."
+
+      assert Router.answer_form(%{"prompt" => "Hi"}) == "answer"
+      assert_raise ArgumentError, fn -> Router.body(%{"question" => "Why?"}) end
+    end
+
+    test "answer confidence is the least likely printed token after Answer:" do
+      pieces = ["Answer", ":", " ", "4", "2", "<eos>"]
+      logprobs = [-0.01, -0.02, -3.0, -0.1, -0.5, -4.0]
+
+      # The blank piece is skipped; the end token prints `<eos>` and counts,
+      # so it is given a nil log-probability here as the stop token is.
+      assert_in_delta Router.answer_confidence(pieces, List.replace_at(logprobs, 5, nil)),
+                      :math.exp(-0.5),
+                      1.0e-9
+
+      assert Router.answer_confidence(["The", " answer"], [-0.1, -0.1]) == 0.0
+      assert Router.answer_confidence(["Answer:", " "], [-0.1, -0.1]) == 0.0
+    end
+
+    test "scores a vector with the folded probe and applies the cutoffs" do
+      probe = %{weight: Nx.tensor([1.0, -2.0], backend: Nx.BinaryBackend), bias: 0.5}
+
+      assert_in_delta Router.probe_score(probe, Nx.tensor([1.0, 0.25])),
+                      1 / (1 + :math.exp(-1.0)),
+                      1.0e-6
+
+      assert Router.ask?(0.81, 0.8)
+      refute Router.ask?(0.8, 0.8)
+      assert Router.answer_now?(0.9, 0.9)
+      refute Router.answer_now?(0.89, 0.9)
+    end
+
+    @tag :tmp_dir
+    test "loads an exported probe", %{tmp_dir: tmp_dir} do
+      Safetensors.write!(Path.join(tmp_dir, "probe.safetensors"), %{
+        "weight" => Nx.tensor([0.5, 0.5, 0.5], type: :f32),
+        "bias" => Nx.tensor([-1.0], type: :f32)
+      })
+
+      File.write!(
+        Path.join(tmp_dir, "probe.json"),
+        Jason.encode!(%{"hidden_size" => 3, "threshold" => 0.8})
+      )
+
+      probe = Router.load_probe!(tmp_dir)
+      assert probe.threshold == 0.8
+      assert probe.bias == -1.0
+      assert_in_delta Router.probe_score(probe, Nx.tensor([1.0, 1.0, 0.0])), 0.5, 1.0e-6
+
+      File.write!(Path.join(tmp_dir, "probe.json"), Jason.encode!(%{"hidden_size" => 4}))
+      assert_raise ArgumentError, fn -> Router.load_probe!(tmp_dir) end
     end
   end
 
