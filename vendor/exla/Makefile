@@ -172,9 +172,15 @@ $(EXLA_CACHE_OBJ_DIR)/%.hip.o: $(EXLA_DIR)/%.hip $(HEADERS)
 	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)/custom_calls
 	$(HIPCC) $(CFLAGS) --offload-arch=$(EXLA_HIP_ARCH) -fPIC -c $< -o $@
 
+# The int4 prefill kernel uses bf16 tensor cores, which need sm_80 code, so the
+# kernels carry SASS for A100/L4/H100 plus PTX for anything older or newer.
+EXLA_CUDA_KERNEL_ARCH ?= -gencode arch=compute_52,code=compute_52 \
+	-gencode arch=compute_80,code=sm_80 -gencode arch=compute_89,code=sm_89 \
+	-gencode arch=compute_90,code=[sm_90,compute_90]
+
 $(EXLA_CACHE_OBJ_DIR)/%.cu.o: $(EXLA_DIR)/%.cu $(HEADERS)
 	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)/custom_calls
-	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(EXLA_CUDA_KERNEL_ARCH) -c $< -o $@
 
 $(EXLA_CACHE_OBJ_DIR)/exla_cuda.o: $(EXLA_DIR)/exla_cuda.cc $(EXLA_DIR)/exla_cuda.h
 	@ mkdir -p $(EXLA_CACHE_OBJ_DIR)

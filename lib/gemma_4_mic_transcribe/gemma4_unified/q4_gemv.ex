@@ -139,13 +139,16 @@ defimpl EXLA.CustomCall, for: Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
          {:s, 32} <- Nx.type(packed),
          {:bf, 16} <- Nx.type(scales) do
       # Decode passes one token as {k}; prefill passes {seq, k}. CUDA's
-      # generic rank-2 path uses its tuned GEMM implementation and is faster
-      # than our simple packed kernel, while packed GEMV wins decisively.
+      # generic rank-2 path dequantizes and uses cuBLAS, about twice as fast
+      # as our packed tensor-core kernel, while packed GEMV wins decisively.
+      # Dequantizing needs a 14 GB temporary on the 12B, more than a 24 GB
+      # card has left beside the weights, so GEMMA_Q4_CUDA_PREFILL=packed
+      # keeps prefill packed there.
       target =
         case {platform, Nx.rank(x)} do
           {_, 1} -> "exla_q4_gemv"
           {:rocm, 2} -> "exla_q4_gemm"
-          {:cuda, 2} -> nil
+          {:cuda, 2} -> if cuda_packed_prefill?(), do: "exla_q4_gemm"
         end
 
       if target do
@@ -179,4 +182,6 @@ defimpl EXLA.CustomCall, for: Gemma4MicTranscribe.Gemma4Unified.Q4Gemv do
     Logger.warning(fn -> "q4_gemv: no kernel for platform #{inspect(platform)}" end)
     :skip
   end
+
+  defp cuda_packed_prefill?, do: System.get_env("GEMMA_Q4_CUDA_PREFILL") == "packed"
 end
