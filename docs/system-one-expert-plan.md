@@ -814,7 +814,10 @@ prompts, the confidence and the cutoffs; the probe is exported by
 `scripts/system_one/export_ask_probe.py` (standardisation folded into the
 weights) to `artifacts/system-one/ask-probe/`, from the cache of
 `data/system-one/router-probe-train.jsonl` (rebuilt byte-identically by
-`scripts/system_one/build_router_probe_set.py`). Rows are bare `prompt`s
+`scripts/system_one/build_router_probe_set.py`). Since 2026-09-23 the
+default probe also has the 600 spoken rows of `router-probe-train-spoken.jsonl`
+(see "Spoken requests"); the written-only probe is kept as
+`artifacts/system-one/ask-probe-text`. Rows are bare `prompt`s
 with an optional `answer` form (`number`, `letter`), or System One items,
 which the router renders with their option descriptions, as the probe was
 trained. `--decide-only` records the route without the follow-up
@@ -966,14 +969,19 @@ script:
 
 1. Renders the rows as `route` serves them and checks them against
    `Router.direct_prompt/1` (`check_router_render.exs`).
-2. Caches only the new rows through the job wrapper, reusing the 3,089
-   base rows. On first use it also caches the 400-row held-out set
-   (`data/system-one/router-probe-heldout.jsonl`, about 5 min).
+2. Caches only the new rows through the job wrapper, reusing the base
+   rows: the 3,089 written ones and the 600 spoken ones. On first use it
+   also caches the held-out sets (`router-probe-heldout.jsonl`, 400
+   written rows, about 5 min; `router-probe-heldout-spoken.jsonl`, 200
+   spoken rows, about 4 min). The spoken caches need the WAVs, which
+   `tts_questions.py` regenerates from the items in
+   `data/system-one/spoken-{train,heldout}/`.
 3. Exports `OUT_DIR/ask-probe` from base + new rows (`C`, `THRESHOLD`
    from the environment).
 4. Scores the shipped probe and the new one side by side
    (`eval_ask_probe.py`: AUROC, unclear asked and needless asks, per
-   source and split) on the held-out set, plus the eval files if given.
+   source and split) on both held-out sets, plus the eval files if given.
+   Spoken rows show up as `src=spoken-twin`.
 
 A smoke run (80 training and 40 eval rows from unused round-3 pairs, so no
 new domains) took 2.3 min once the held-out cache existed. The shipped
@@ -1042,8 +1050,15 @@ regenerated from the items. The table compares a 4 s bucket with the same
   0.883 matches text. On text the probe is unchanged: 67 unclear asked,
   8 needless against 6, AUROC 0.887, and still no asks on GSM8K and ARC.
   The gain is all English (41 → 52 of 83); non-English moves 7 → 8 of 17.
-  The probe is at `artifacts/system-one/ask-probe-spoken`; serve it with
-  `--ask-probe` and `--audio-seconds 4`.
+  It is the default probe now, at `artifacts/system-one/ask-probe`, and
+  exporting from the base caches reproduces it bit for bit. The
+  written-only probe is `artifacts/system-one/ask-probe-text`.
+- **The audio bucket barely matters.** The default probe was trained at a
+  4 s bucket. Served at the default 8 s, it makes the same route decision
+  on all 200 rows, with scores within 0.017. It is slower, though: 200
+  audio tokens move the prompt into the 384 bucket, so the probe pass takes
+  1.29 s instead of 0.84 s. For short spoken requests, pass
+  `--audio-seconds 4`.
 - **Cache matches serving.** The shipped probe scored on the spoken cache
   gives the same 0.854, 48 and 3 that `route` served, so the cache
   renders spoken rows exactly as `route` does.
