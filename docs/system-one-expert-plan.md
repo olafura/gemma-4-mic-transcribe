@@ -802,8 +802,12 @@ On GSM/ARC the router gives exactly the confidence-router numbers above,
 since the probe never asks there. Compared with the round-3 expert at floor
 0.8 (needless asks on 26% of decidable items, a quarter of the unclear
 ones still guessed, and 3% of ordinary replies reworded), the router asks
-less needlessly, catches more of the unclear requests, and cannot change an
-ordinary reply at all: it only chooses which unmodified mode runs.
+needlessly a third as often (8%) and cannot change an ordinary reply at
+all, since it only chooses which unmodified mode runs, but it guesses on
+more of the unclear requests (36 of 100 against about a quarter). The two
+are not measured on the same items or by the same judge (the expert's
+numbers are the Laya cascade over 600 items, the router's are option
+matches on 100 + 100 twins), so read that as a profile, not a ranking.
 
 **In code: `mix gemma.system_one route`.** `SystemOne.Router` holds the
 prompts, the confidence and the cutoffs; the probe is exported by
@@ -835,6 +839,58 @@ Joões você quer que eu ligue?", "What type of rice are you using?"), one of
 them needless on a decidable twin; the 7 reasoned replies took 96–603
 tokens (13–62 s) and got 3/3 GSM, 2/2 decidable twins and 0/1 ARC right;
 the 4 answered at once took 2.3–3.2 s.
+
+**A nonlinear probe does not help.** On the same 3,089 rows, picked by
+5-fold CV grouped by twin pair and scored once on the held-out twins, no
+MLP (64 or 256 hidden, α 1–30, with or without PCA) or RBF SVM beats the
+logistic probe: CV AUROC 0.907–0.927 against 0.932, held-out 0.825–0.846
+against 0.857, and the MLPs score GSM/ARC questions up to 0.94–1.00, where
+the logistic probe stays under 0.29. What it misses is domains it was not
+trained on: at ask > 0.8 it asks on 36/48 unclear twins from the training
+domains ("near") and 28/52 from new ones ("far": clinic, education,
+finance, smart home, ...). **More training domains do not close that gap
+either**: with the twin rows held fixed and the domains drawn from the 18
+training ones (5 draws each), unclear "far" twins asked go 28.4 → 29.0 of
+52 from 4 to 18 domains at 200 pairs, and 30.4 at 450 pairs (held-out
+AUROC 0.837 → 0.841 → 0.847; all 1,200 pairs: 0.857). The linear read of
+the last prompt position of layer 44 is close to its ceiling on this set;
+the far twins look harder rather than unseen, and new-domain twins from the
+Opus workers would not pay for themselves.
+
+**Pooling over the prompt does not help reliably.** From full-sequence
+caches of the same rows (`cache` without `--last-prompt-token-only`),
+logistic probes on the mean over the last 4 or 16 positions, the whole
+prompt, the prompt without the fixed instruction, the signed max, and
+concatenations with the last position all land at held-out AUROC
+0.686–0.859 against 0.855 for the last position alone. Last + mean asks on
+71 unclear twins against 65 at the same ≤ 8 needless asks, but a paired
+bootstrap over twin pairs puts that at +7 points, 95% CI [−3, +17], with
+the operating threshold chosen on the same held-out set; the last position
+stays.
+
+**An earlier layer reads the same.** The same last-token probe on the
+output of layers 0–31 (a second prefix artifact, `extract-prefix
+--tail-start 32`) scores held-out AUROC 0.853 against 0.855 at layer 44
+(train CV 0.945 vs 0.935). At ≤ 8 needless asks it asks on 68 unclear twins
+against 65, and 70 with both layers concatenated, but the paired bootstrap
+puts layer 31 at +7 points, 95% CI [−1, +16], and the concatenation at +5,
+[−2, +12]; AUROC moves by 0.002 at most. Serving layer 31 would mean
+splitting the prefix at layer 32, which that does not pay for. Across the
+nonlinear probes, the domain curve, pooling and depth, a linear read of the
+prompt tops out near 0.86 AUROC on these twins: the unclear requests it
+misses, mostly far-domain, are not separated in the prefix output at all.
+
+**Asking Gemma is worse than probing it.** Given the request without the
+answer instruction and "Does the information above give enough to settle
+this for certain? Reply with only Yes or No.", Gemma says No on 82 of 100
+unclear twins but also on 50 of 100 clear ones and 97 of 200 GSM8K and ARC
+questions. Read as a score (the signed logit margin toward No) it reaches
+held-out AUROC 0.780 against 0.855 for the probe, ranks the twins much as
+the probe does (Spearman 0.78), and at ≤ 8 needless asks with no plain
+question asked it asks on 7 unclear twins against 65. Summing its rank
+with the probe's does not help either (56, −9 points, 95% CI [−23, +3]).
+The probe already reads what Gemma knows about this, and reads it better
+than Gemma says it.
 
 ## 6. Opus workers
 
