@@ -14,7 +14,9 @@ System One template drops from AUROC 0.83 to 0.64 on direct-form prompts
         --output artifacts/system-one/ask-probe
 
 `--cache` is a `cache --last-prompt-token-only` run over `--labels`, whose
-rows carry `label` (1 = the state does not settle the question). The
+rows carry `label` (1 = the state does not settle the question). Both take
+several paths, so a retrain on rows of your own reuses the base cache and
+caches only what is new (`scripts/system_one/retrain_ask_probe.sh`). The
 standardisation is folded into the weights, so serving is one dot product:
 score = sigmoid(weight . x + bias). CPU only.
 """
@@ -45,19 +47,30 @@ def features(cache: Path) -> tuple[list[str], np.ndarray]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--cache", type=Path, required=True)
-    parser.add_argument("--labels", type=Path, required=True)
+    parser.add_argument("--cache", type=Path, nargs="+", required=True)
+    parser.add_argument("--labels", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--c", type=float, default=0.003, help="inverse L2 strength, default 0.003")
     parser.add_argument("--threshold", type=float, default=0.8, help="ask-back cutoff recorded with the probe")
     args = parser.parse_args()
 
     labels = {}
-    for line in args.labels.read_text().splitlines():
-        if line.strip():
-            row = json.loads(line)
-            labels[row["id"]] = row
-    ids, x = features(args.cache)
+    for path in args.labels:
+        for line in path.read_text().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                if row["id"] in labels:
+                    raise SystemExit(f"{path}: id {row['id']} is in more than one labels file")
+                labels[row["id"]] = row
+    ids, parts = [], []
+    for cache in args.cache:
+        cache_ids, x = features(cache)
+        missing = [i for i in cache_ids if i not in labels]
+        if missing:
+            raise SystemExit(f"{cache}: {len(missing)} cached rows have no label, e.g. {missing[0]}")
+        ids += cache_ids
+        parts.append(x)
+    x = np.concatenate(parts)
     y = np.array([labels[i]["label"] for i in ids])
 
     scaler = StandardScaler().fit(x)
