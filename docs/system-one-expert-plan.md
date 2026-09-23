@@ -734,6 +734,77 @@ layer (or the expert's own down-projection as a feature) trained in
 classifier mode, which is a change to `SystemOne.gate_nodes`, not to the
 data.
 
+### Route 1: a router in front of Gemma
+
+After round 3 the direction changed: instead of an expert inside the tail,
+put a Laya-like router in front of unmodified Gemma that decides per request
+whether to **answer now**, **reason first** or **ask back**. No weights
+change and no Laya-shaped JSON: the router only picks which of Gemma's own
+modes runs. Everything below was measured on 2026-09-23 with the stock
+12B (q4), greedy decoding; routing was simulated offline from recorded runs.
+
+**Native thinking is not usable here.** `generate --think` renders the 12B
+template's `<|think|>` system turn (no newline after it, unlike E4B). The
+packed 12B then spells `<thought` as text instead of emitting `<|channel>`;
+with the channel pre-opened it reaches the answer and loops "let me
+double-check" without ever closing the channel, even at 1,024 tokens. It
+needs sampling, and the decoder is greedy-only. Normal mode already reasons
+visibly (≈ 250 tokens), so "reason" means an ordinary reply ending in an
+`Answer:` line.
+
+**Answer now or reason: answer confidence.** The direct prompt asks for one
+line, `Answer: <x>`. `generate --scores` records each chosen token's
+log-probability (full-vocabulary log-softmax, suppressed tokens excluded;
+picks are token-identical to a run without it), and the confidence is the
+minimum probability over the answer tokens. Below a cutoff the request is
+re-run in normal mode. On 200 fresh GSM8K + ARC-Challenge items (100 each,
+disjoint from the 60 used to pick the method) direct answers are right on
+139 (GSM 45, ARC 94), confidence separates right from wrong at AUROC 0.960,
+and reasoning costs 29.9 s per item:
+
+| cutoff | reasoned | correct | s/q |
+|---|---|---|---|
+| 0.7 | 44 | 176/200 | 8.1 |
+| 0.9 | 70 | 189/200 | 12.1 |
+| 0.99 | 93 | 194/200 | 15.1 |
+
+At 0.9 the router is 2.5× faster than reasoning on everything; the six
+wrong answers it keeps all had confidence 0.93–0.97. (On the first 60,
+always-reason was 57/60 at 26 s/q.)
+
+**Ask back: a probe, not confidence.** Answer confidence cannot see that
+something is missing: on 100 held-out twin pairs (the decidable item and
+its blurred twin, in the direct form) it separates them at AUROC 0.585.
+Adding an `ask` option to the prompt gets 0.740, but at the cost of the
+decidable answers (67/100 right). A logistic probe (standardised features,
+C = 0.003) on the layer-44 hidden state at the last prompt token — computed
+anyway during prefill, so free at serve time — gets 0.83–0.86, **but only on
+the prompt wording it was trained on**: trained on the System One template
+from the round-3 cache it scores 0.825 on the held-out twins in that
+template and 0.637 on the same twins in the router's direct form. Retrained
+on 3,089 router-form prompts (2,400 training twins, 400 replay prompts, 300
+unseen GSM/ARC), it scores 0.857 on the held-out twins (near 0.886, far
+0.847) and never fires on the 200 GSM/ARC items (highest score 0.29).
+
+**The whole router** (ask if probe > 0.8, else answer now if confidence ≥
+the cutoff, else reason). Reasoning helps decidable twins it is sent (43/45
+right against 36/45 direct) but never asks: it committed to an option on
+16 of 17 underspecified twins, so asking is the probe's job alone.
+
+| on 100 + 100 held-out twins | decidable right | needless asks | underspecified asked | s/q |
+|---|---|---|---|---|
+| direct answer only | 87 | 0 | 0 | 1.5 |
+| `ask` option in the prompt | 67 | 9 | 54 | 1.5 |
+| router, cutoff 0.9 | 85 | 8 | 64 | 4.5 |
+| router, cutoff 0.99 | 88 | 8 | 64 | 7.9 |
+
+On GSM/ARC the router gives exactly the confidence-router numbers above,
+since the probe never asks there. Compared with the round-3 expert at floor
+0.8 (needless asks on 26% of decidable items, a quarter of the unclear
+ones still guessed, and 3% of ordinary replies reworded), the router asks
+less needlessly, catches more of the unclear requests, and cannot change an
+ordinary reply at all: it only chooses which unmodified mode runs.
+
 ## 6. Opus workers
 
 Spawned with the Agent tool, `model: opus`. Two lanes:
