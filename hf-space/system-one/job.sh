@@ -13,7 +13,8 @@
 #     hexpm/elixir:1.20.2-erlang-29.0.3-debian-bookworm-20260713-slim bash /data/jobs/job.sh
 #
 # WEIGHTS lists the weight sets to time: packed (W4A16, 13.4 GB, fits a 24 GB
-# card) and bf16 (24.2 GB, needs 40 GB or more).
+# card) and bf16 (24.2 GB, needs 40 GB or more). ROUTE_ARGS adds route
+# options, such as --bf16-embedding.
 set -eu
 : "${FLAVOR:?set FLAVOR to the hardware flavor}"
 WEIGHTS=${WEIGHTS:-packed}
@@ -55,7 +56,7 @@ route() { # NAME PREFIX TAIL INPUT [ARGS...]
   /app/system_one/bin/system_one eval \
     'Application.ensure_all_started(:gemma_4_mic_transcribe); System.halt(Gemma4MicTranscribe.SystemOneCLI.main(System.argv()))' \
     route --backend exla:cuda --prefix-artifact "$prefix" --tail-artifact "$tail" \
-    --ask-probe artifacts/ask-probe --input "$input" --output "$OUT/$name.jsonl" "$@" \
+    --ask-probe artifacts/ask-probe --input "$input" --output "$OUT/$name.jsonl" "$@" ${ROUTE_ARGS:-} \
     > "$OUT/$name.log" 2>&1 || echo "$name exited $?"
   grep -E '"event":"(route_ready|route_written)"|timed|elapsed' "$OUT/$name.log" | head -5 || true
 }

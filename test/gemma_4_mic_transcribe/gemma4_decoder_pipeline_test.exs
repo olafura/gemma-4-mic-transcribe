@@ -284,6 +284,60 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
              )
   end
 
+  test "keeps a lossless f32 tied embedding as bf16 without changing generation" do
+    {runtime, inputs} = runtime()
+
+    runtime =
+      update_in(runtime.model_info.params.data["embedder.token_embedding"]["kernel"], fn table ->
+        table |> Nx.as_type(:bf16) |> Nx.as_type(:f32)
+      end)
+
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+    root = Path.join(System.tmp_dir!(), "gemma-bf16-embed-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+    DecoderBlockArtifact.save_prefix!(pipeline, Path.join(root, "prefix"))
+
+    DecoderBlockArtifact.save_tail!(pipeline.tail, Path.join(root, "tail"),
+      verification_sequence_length: 3
+    )
+
+    backend = {Torchx.Backend, device: :cpu}
+
+    generate = fn opts ->
+      prefix =
+        DecoderBlockArtifact.load_prefix!(Path.join(root, "prefix"), backend, opts)
+
+      table = prefix.prefix.params.data["embedder.token_embedding"]["kernel"]
+
+      tail =
+        DecoderBlockArtifact.load_tail!(Path.join(root, "tail"), backend, tied_embedding: table)
+
+      assert tail.params.data["language_modeling_head.output"]["kernel"] == table
+      split = DecoderBlockArtifact.build_split_pipeline!(prefix, tail, backend)
+
+      {:ok, token_ids} =
+        DecoderPipeline.generate_prepared(split, inputs, max_new_tokens: 2, min_new_tokens: 3)
+
+      {Nx.type(table), Map.get(prefix.generation.spec, :embedding_compute_type), token_ids}
+    end
+
+    assert {{:f, 32}, nil, expected} = generate.([])
+    assert {{:bf, 16}, {:f, 32}, ^expected} = generate.(bf16_embedding: true)
+  end
+
+  test "keeps an f32 embedding that bf16 would round" do
+    {runtime, _inputs} = runtime()
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+    path = Path.join(System.tmp_dir!(), "gemma-f32-embed-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(path) end)
+    DecoderBlockArtifact.save_prefix!(pipeline, path)
+
+    prefix = DecoderBlockArtifact.load_prefix!(path, Nx.BinaryBackend, bf16_embedding: true)
+
+    assert Nx.type(prefix.prefix.params.data["embedder.token_embedding"]["kernel"]) == {:f, 32}
+    assert Map.get(prefix.generation.spec, :embedding_compute_type) == nil
+  end
+
   test "preserves packed weights and scales in separate prefix and tail artifacts" do
     {runtime, _inputs} = runtime()
     pipeline = DecoderPipeline.extract!(runtime, [1])

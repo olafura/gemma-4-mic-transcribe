@@ -259,7 +259,16 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     end
   end
 
-  def load_prefix!(path, backend) do
+  @doc """
+  Loads a decoder prefix artifact.
+
+  With `bf16_embedding: true`, an f32 token embedding whose values are all
+  exact bf16 (as in the packed 12B) is kept on the device as bf16 and upcast
+  after the lookup, so the embeddings are unchanged. Passed on to `load_tail!`
+  as the tied head, it halves the head's reads for every decoded token; the
+  head's dot upcasts it, though not always with the same summation order.
+  """
+  def load_prefix!(path, backend, opts \\ []) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
 
@@ -269,6 +278,12 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
 
     tensors = Safetensors.read!(Path.join(path, @parameters), lazy: true)
     params = load_parameters!(tensors, manifest.parameter_paths, backend)
+
+    {params, manifest} =
+      if opts[:bf16_embedding],
+        do: bf16_embedding(params, manifest, backend),
+        else: {params, manifest}
+
     model = Model.decoder_prefix_model(manifest.spec, manifest.last_layer)
     {_init_fun, predict_fun} = Axon.build(model, build_opts(backend))
     cached_model = Model.cached_decoder_prefix_model(manifest.spec, manifest.last_layer)
@@ -606,9 +621,43 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     if tensor != nil and Map.get(spec, :tie_word_embeddings, false), do: tensor
   end
 
+  # a bf16 tensor also stands in for an f32 one, since `bf16_embedding` only
+  # keeps the bf16 copy when it is lossless
   defp reuse_tensor(tensors, name, tensor) do
     stored = Map.fetch!(tensors, name)
-    if stored.shape == Nx.shape(tensor) and stored.type == Nx.type(tensor), do: tensor
+
+    if stored.shape == Nx.shape(tensor) and
+         (stored.type == Nx.type(tensor) or
+            {stored.type, Nx.type(tensor)} == {{:f, 32}, {:bf, 16}}),
+       do: tensor
+  end
+
+  @embedding ["embedder.token_embedding", "kernel"]
+
+  defp bf16_embedding(params, manifest, backend) do
+    table = get_in(params.data, @embedding)
+
+    if Nx.type(table) == {:f, 32} do
+      cast = Nx.Defn.jit(&Nx.as_type(&1, :bf16), build_opts(backend)).(table)
+
+      lossless =
+        Nx.Defn.jit(&Nx.all(Nx.equal(Nx.as_type(&1, :f32), &2)), build_opts(backend)).(
+          cast,
+          table
+        )
+
+      if Nx.to_number(lossless) == 1 do
+        Nx.backend_deallocate(table)
+        spec = Map.put(manifest.spec, :embedding_compute_type, {:f, 32})
+
+        {%{params | data: put_in(params.data, @embedding, cast)}, %{manifest | spec: spec}}
+      else
+        Nx.backend_deallocate(cast)
+        {params, manifest}
+      end
+    else
+      {params, manifest}
+    end
   end
 
   defp load_tensor!(tensors, name, backend) do

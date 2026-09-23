@@ -52,6 +52,9 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
             quantization_config: nil,
             logits_last_only: false,
             cache_type: {:f, 32},
+            # type token embeddings are cast to after the lookup (nil keeps the
+            # table's); read with Map.get, since stored specs predate it
+            embedding_compute_type: nil,
             # false dequantizes int4 weights to bf16 at load: 4x the resident
             # memory, but prefill uses rocBLAS instead of the hand int4 GEMM.
             packed_linear: true,
@@ -549,6 +552,14 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Model do
       name: join(name, "token_embedding")
     )
     |> Axon.nx(fn embeddings ->
+      # set when a lossless bf16 copy of an f32 table is loaded, so the scale
+      # is applied in the table's original type
+      embeddings =
+        case Map.get(spec, :embedding_compute_type) do
+          nil -> embeddings
+          type -> Nx.as_type(embeddings, type)
+        end
+
       scale =
         spec.hidden_size
         |> Nx.tensor(type: Nx.type(embeddings))

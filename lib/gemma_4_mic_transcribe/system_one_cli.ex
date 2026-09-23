@@ -138,6 +138,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     expert_floor: :float,
     audio_seconds: :float,
     decide_only: :boolean,
+    bf16_embedding: :boolean,
     limit: :integer,
     help: :boolean
   ]
@@ -317,6 +318,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          expert_floor: Keyword.get(opts, :expert_floor, 0.8),
          audio_seconds: Keyword.get(opts, :audio_seconds, @default_audio_seconds),
          decide_only: Keyword.get(opts, :decide_only, false),
+         bf16_embedding: Keyword.get(opts, :bf16_embedding, false),
          limit: Keyword.get(opts, :limit)
        }}
     end
@@ -985,7 +987,11 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   # the expert's band runs on unmodified Gemma and the model is loaded once.
   defp route_pipelines!(opts) do
     {:ok, backend} = Runtime.resolve_backend(opts.backend)
-    prefix = DecoderBlockArtifact.load_prefix!(opts.prefix_artifact, backend)
+
+    prefix =
+      DecoderBlockArtifact.load_prefix!(opts.prefix_artifact, backend,
+        bf16_embedding: opts.bf16_embedding
+      )
 
     tail =
       DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend,
@@ -1624,6 +1630,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --expert-floor F           The expert's gate floor, default 0.8
       --decide-only              Record the route but skip the reasoned reply and the
                                  follow-up question (the expert still runs: it decides)
+      --bf16-embedding           Keep the tied f32 embedding and head as bf16 when that
+                                 is lossless: 1.9 GB less memory and a faster head, but
+                                 the head's logits may round differently
       --limit N                  Route only the first N rows
 
     regress: the non-regression gate, the router forced closed must still be base Gemma
