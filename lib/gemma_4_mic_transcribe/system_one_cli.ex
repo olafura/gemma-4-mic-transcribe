@@ -1631,8 +1631,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --decide-only              Record the route but skip the reasoned reply and the
                                  follow-up question (the expert still runs: it decides)
       --bf16-embedding           Keep the tied f32 embedding and head as bf16 when that
-                                 is lossless: 1.9 GB less memory and a faster head, but
-                                 the head's logits may round differently
+                                 is lossless: 1.9 GB less memory and a faster head on
+                                 CUDA (L4 81 -> 73 ms/step), but the head's logits may
+                                 round differently. Slower on ROCm (97 -> 120 ms/step)
       --limit N                  Route only the first N rows
 
     regress: the non-regression gate, the router forced closed must still be base Gemma

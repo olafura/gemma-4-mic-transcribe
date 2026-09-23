@@ -267,6 +267,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
   after the lookup, so the embeddings are unchanged. Passed on to `load_tail!`
   as the tied head, it halves the head's reads for every decoded token; the
   head's dot upcasts it, though not always with the same summation order.
+  That pays off on CUDA; on ROCm the upcast is not fused into the dot and
+  decoding gets slower.
   """
   def load_prefix!(path, backend, opts \\ []) do
     path = Path.expand(path)
