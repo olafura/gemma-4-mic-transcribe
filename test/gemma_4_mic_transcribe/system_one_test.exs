@@ -465,6 +465,9 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert opts.max_answer_tokens == 24
       assert opts.max_reason_tokens == 768
       assert opts.max_ask_tokens == 64
+      assert opts.expert == nil
+      assert opts.expert_band == 0.4
+      assert opts.expert_floor == 0.8
       assert opts.decide_only == false
     end
 
@@ -484,9 +487,18 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
                  "384,512",
                  "--decide-only",
                  "--limit",
-                 "5"
+                 "5",
+                 "--expert",
+                 "artifacts/system-one/round3",
+                 "--expert-band",
+                 "0.5",
+                 "--expert-floor",
+                 "0.9"
                ])
 
+      assert opts.expert == "artifacts/system-one/round3"
+      assert opts.expert_band == 0.5
+      assert opts.expert_floor == 0.9
       assert opts.ask_threshold == 0.7
       assert opts.confidence == 0.99
       assert opts.buckets == [384, 512]
@@ -561,6 +573,35 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       refute Router.ask?(0.8, 0.8)
       assert Router.answer_now?(0.9, 0.9)
       refute Router.answer_now?(0.89, 0.9)
+    end
+
+    test "consults the expert only on items in the band below the ask threshold" do
+      item = %{"state" => %{}, "question" => "Which?"}
+
+      assert Router.expert_band?(item, 0.41, 0.4, 0.8)
+      assert Router.expert_band?(item, 0.8, 0.4, 0.8)
+      refute Router.expert_band?(item, 0.4, 0.4, 0.8)
+      refute Router.expert_band?(item, 0.81, 0.4, 0.8)
+      refute Router.expert_band?(%{"prompt" => "What is 2 + 3?"}, 0.6, 0.4, 0.8)
+    end
+
+    test "reads a reply as a question the way the scorecard's rule does" do
+      for reply <- [
+            "Which printer do you mean?",
+            "The HP one. Which floor is it on?\n",
+            "¿Cuál de los dos?",
+            "Do you want the Brother printer",
+            "Could you tell me the floor.",
+            "Please specify the model.",
+            "どちらのプリンターですか。",
+            "**Which one?**"
+          ] do
+        assert Router.asks_question?(reply), reply
+      end
+
+      for reply <- ["brother_l", "Answer: hp_2200", "Do not forget the invoice.", "Have a good day.", "", "**"] do
+        refute Router.asks_question?(reply), reply
+      end
     end
 
     @tag :tmp_dir

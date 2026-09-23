@@ -132,6 +132,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     max_answer_tokens: :integer,
     max_reason_tokens: :integer,
     max_ask_tokens: :integer,
+    expert: :string,
+    expert_band: :float,
+    expert_floor: :float,
     decide_only: :boolean,
     limit: :integer,
     help: :boolean
@@ -307,6 +310,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          max_answer_tokens: Keyword.get(opts, :max_answer_tokens, 24),
          max_reason_tokens: Keyword.get(opts, :max_reason_tokens, 768),
          max_ask_tokens: Keyword.get(opts, :max_ask_tokens, 64),
+         expert: Keyword.get(opts, :expert),
+         expert_band: Keyword.get(opts, :expert_band, 0.4),
+         expert_floor: Keyword.get(opts, :expert_floor, 0.8),
          decide_only: Keyword.get(opts, :decide_only, false),
          limit: Keyword.get(opts, :limit)
        }}
@@ -924,19 +930,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     probe = Router.load_probe!(opts.ask_probe)
     threshold = opts.ask_threshold || probe.threshold
 
-    {pipeline, _artifact} =
-      timed!("route_pipeline_load", fn ->
-        {:ok,
-         SystemOneArtifact.load_pipeline!(
-           prefix_artifact: opts.prefix_artifact,
-           tail_artifact: opts.tail_artifact,
-           expert: nil,
-           backend: opts.backend,
-           force_router_closed: false,
-           gate_floor: nil,
-           logits_last_only: false
-         )}
-      end)
+    {pipeline, expert_pipeline} =
+      timed!("route_pipeline_load", fn -> {:ok, route_pipelines!(opts)} end)
 
     tokenizer =
       pipeline.tail.tokenizer || pipeline.input_context.tokenizer ||
@@ -949,15 +944,20 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         ask_threshold: threshold,
         confidence: opts.confidence,
         buckets: opts.buckets,
+        expert: opts.expert,
+        expert_band: opts.expert && opts.expert_band,
+        expert_floor: opts.expert && opts.expert_floor,
         decide_only: opts.decide_only
       })
     )
+
+    pipelines = %{base: pipeline, expert: expert_pipeline}
 
     results =
       rows
       |> Enum.with_index()
       |> Enum.map(fn {row, index} ->
-        route_row!(row, index, pipeline, tokenizer, probe, threshold, opts)
+        route_row!(row, index, pipelines, tokenizer, probe, threshold, opts)
       end)
 
     File.mkdir_p!(Path.dirname(output))
@@ -968,20 +968,69 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         event: "route_written",
         path: output,
         rows: length(results),
-        routes: Enum.frequencies_by(results, & &1["route"])
+        routes: Enum.frequencies_by(results, & &1["route"]),
+        asked_by: results |> Enum.filter(& &1["asked_by"]) |> Enum.frequencies_by(& &1["asked_by"])
       })
     )
+  end
+
+  # Without `--expert` this is the bare pipeline alone, as `load_pipeline!`
+  # builds it. With one, the expert is installed on a second pipeline over the
+  # same prefix and tail weights (as `regress` does), so every request outside
+  # the expert's band runs on unmodified Gemma and the model is loaded once.
+  defp route_pipelines!(opts) do
+    {:ok, backend} = Runtime.resolve_backend(opts.backend)
+    prefix = DecoderBlockArtifact.load_prefix!(opts.prefix_artifact, backend)
+    tail = DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend)
+
+    {base, nil} =
+      SystemOneArtifact.build_pipeline!(prefix, tail, backend, expert: nil, logits_last_only: false)
+
+    expert =
+      if opts.expert do
+        {pipeline, _artifact} =
+          SystemOneArtifact.build_pipeline!(prefix, tail, backend,
+            expert: opts.expert,
+            gate_floor: opts.expert_floor,
+            logits_last_only: false
+          )
+
+        pipeline
+      end
+
+    {base, expert}
   end
 
   # The probe reads the prefix output of the direct prompt, and the direct
   # answer is generated from the same prepared input, so a request that is
   # answered now costs one extra prefix pass over the plain direct answer.
-  defp route_row!(row, index, pipeline, tokenizer, probe, threshold, opts) do
+  #
+  # With `--expert`, an item in the expert's band is first put to the expert
+  # the way it was evaluated; when its reply is a question, that question is
+  # the ask-back and nothing else runs.
+  defp route_row!(row, index, pipelines, tokenizer, probe, threshold, opts) do
     id = Map.get(row, "id", "row-#{index}")
+    pipeline = pipelines.base
     direct = route_input(id, Router.direct_prompt(row), row, pipeline, tokenizer, opts)
 
     {probe_us, ask_score} = :timer.tc(fn -> route_probe_score(id, pipeline, direct, probe) end)
-    ask = Router.ask?(ask_score, threshold)
+
+    expert =
+      if pipelines.expert && not Router.ask?(ask_score, threshold) &&
+           Router.expert_band?(row, ask_score, opts.expert_band, threshold) do
+        route_expert(id, row, pipelines.expert, tokenizer, opts)
+      end
+
+    expert_reply = expert && Transcript.decode(tokenizer, expert.token_ids)
+
+    asked_by =
+      cond do
+        Router.ask?(ask_score, threshold) -> "probe"
+        expert_reply && Router.asks_question?(expert_reply) -> "expert"
+        true -> nil
+      end
+
+    ask = asked_by != nil
 
     answer =
       if not ask do
@@ -1006,7 +1055,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
     followup =
       cond do
-        route == "answer" or opts.decide_only ->
+        route == "answer" or asked_by == "expert" or opts.decide_only ->
           nil
 
         route == "ask" ->
@@ -1035,17 +1084,20 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     reply_ids =
       cond do
         route == "answer" -> answer.token_ids
+        asked_by == "expert" -> expert.token_ids
         followup -> followup.token_ids
         true -> nil
       end
 
     answer_us = if answer, do: answer.elapsed_us, else: 0
     followup_us = if followup, do: followup.elapsed_us, else: 0
+    expert_us = if expert, do: expert.elapsed_us, else: 0
 
     result =
       Map.merge(row, %{
         "id" => id,
         "route" => route,
+        "asked_by" => asked_by,
         "ask_score" => ask_score,
         "confidence" => confidence,
         "direct_reply" => answer && Transcript.decode(tokenizer, answer.token_ids),
@@ -1055,7 +1107,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         "probe_ms" => div(probe_us, 1_000),
         "answer_ms" => div(answer_us, 1_000),
         "followup_ms" => div(followup_us, 1_000),
-        "ms" => div(probe_us + answer_us + followup_us, 1_000)
+        "expert_reply" => expert_reply,
+        "expert_ms" => div(expert_us, 1_000),
+        "ms" => div(probe_us + expert_us + answer_us + followup_us, 1_000)
       })
 
     IO.puts(
@@ -1064,6 +1118,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         index: index,
         id: id,
         route: route,
+        asked_by: asked_by,
         ask_score: ask_score,
         confidence: confidence,
         ms: result["ms"]
@@ -1074,9 +1129,27 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   end
 
   defp route_input(id, text, row, pipeline, tokenizer, opts) do
-    input =
-      Input.build_text(text, system_message: system_message(row, opts), thought_channel: true)
+    text
+    |> Input.build_text(system_message: system_message(row, opts), thought_channel: true)
+    |> route_prepare(id, pipeline, tokenizer, opts)
+  end
 
+  # The expert is asked the way `generate` evaluated it: the System One
+  # template and the system turn it was scored with, whatever `--system-message`
+  # says for the router's own prompts.
+  defp route_expert(id, row, pipeline, tokenizer, opts) do
+    input =
+      row
+      |> Prompt.render()
+      |> Input.build_text(system_message: Router.expert_system_message(), thought_channel: true)
+      |> route_prepare(id, pipeline, tokenizer, opts)
+
+    result = route_generate(id, pipeline, input, opts.max_ask_tokens, false)
+    Nx.backend_deallocate(input.prepared)
+    result
+  end
+
+  defp route_prepare(input, id, pipeline, tokenizer, opts) do
     token_ids = tokenize!(tokenizer, input.prompt)
     prompt_length = length(token_ids)
 
@@ -1484,8 +1557,15 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --max-answer-tokens N      Budget of the direct answer, default 24
       --max-reason-tokens N      Budget of a reasoned reply, default 768
       --max-ask-tokens N         Budget of a follow-up question, default 64
+      --expert PATH              Also consult a System One expert artifact (round 3) on
+                                 items whose probe score is in its band; when its reply
+                                 is a question that is the ask-back. Loaded on a second
+                                 pipeline over the same weights, default none
+      --expert-band F            Lower edge of the band: probe scores above F and at or
+                                 below the ask threshold, default 0.4
+      --expert-floor F           The expert's gate floor, default 0.8
       --decide-only              Record the route but skip the reasoned reply and the
-                                 follow-up question
+                                 follow-up question (the expert still runs: it decides)
       --limit N                  Route only the first N rows
 
     regress: the non-regression gate, the router forced closed must still be base Gemma

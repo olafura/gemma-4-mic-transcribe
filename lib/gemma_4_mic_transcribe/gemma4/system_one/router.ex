@@ -24,6 +24,14 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Router do
   @ask_instruction "The information above does not settle this. Reply with only the one short " <>
                      "question you would ask to settle it, and nothing else."
 
+  @expert_system_message "Answer in one short line. Name exactly one of the options you are given. " <>
+                           "If the state you are given does not determine the answer, do not guess: " <>
+                           "ask one short question for the missing detail instead."
+
+  @question_marks "?？؟⁇⁈⁉፧"
+  @sentence_ends "." <> @question_marks <> "!！。۔\n"
+  @closers " \t\"'”’)]}»」』*_"
+
   @doc """
   The answer's shape as the instructions name it: the row's `"answer"`
   (`number`, `letter`, ...), else `option name` for a System One item and
@@ -166,6 +174,79 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Router do
 
   @doc "Ask back when the probe scores strictly above the threshold."
   def ask?(ask_score, threshold), do: ask_score > threshold
+
+  @doc """
+  Whether the round-3 expert is consulted: a System One item whose probe
+  score is above `low` but not above the ask threshold. The expert asks on
+  more unclear items than the probe but also on many clear ones; below the
+  band the probe is trusted to answer (`docs/system-one-expert-plan.md`,
+  "The router and the expert together").
+  """
+  def expert_band?(%{"state" => _state}, ask_score, low, threshold),
+    do: ask_score > low and ask_score <= threshold
+
+  def expert_band?(_row, _ask_score, _low, _threshold), do: false
+
+  @doc "The system turn the round-3 expert was evaluated with."
+  def expert_system_message, do: @expert_system_message
+
+  @doc """
+  True when the reply's last sentence is a question: the deterministic rule
+  of `scripts/system_one/scorecard.py` (`asks_question_rule`), which agrees
+  with the full judge on every held-out expert reply.
+  """
+  def asks_question?(reply) when is_binary(reply) do
+    sentence = last_sentence(reply)
+    bare = trim_chars(sentence, "", @closers)
+
+    cond do
+      sentence == "" -> false
+      String.contains?(sentence, "¿") -> true
+      String.ends_with?(bare, String.graphemes(@question_marks)) -> true
+      bare |> trim_chars("", "。.．") |> String.ends_with?(["か", "の", "カ"]) -> true
+      true -> question_opening?(sentence)
+    end
+  end
+
+  defp last_sentence(reply) do
+    ~r/[^.?？؟⁇⁈⁉፧!！。۔\n]+[.?？؟⁇⁈⁉፧!！。۔\n]*/u
+    |> Regex.scan(reply)
+    |> Enum.map(fn [part] -> String.trim(part) end)
+    |> Enum.filter(&(trim_chars(&1, @closers <> @sentence_ends, @closers <> @sentence_ends) != ""))
+    |> List.last("")
+  end
+
+  defp question_opening?(sentence) do
+    head = ~r/^[^\w¿]+/u |> Regex.replace(sentence, "") |> String.downcase()
+
+    Regex.match?(~r/^(which|what|whats|who|whom|whose|when|where|why|how)\b/u, head) or
+      Regex.match?(
+        ~r/^(do|does|did|is|are|was|were|can|could|will|would|should|shall|may|might|have|has|had|am)\s+(i|you|we|they|he|she|it|there|this|that|these|those|the|your|his|her|their|any)\b/u,
+        head
+      ) or
+      Regex.match?(
+        ~r/^(could|can|would)\s+you\b|^(please\s+)?(tell|let)\s+(me|us)\b|^i\s+(need|would\s+need)\s+to\s+know\b|^(please\s+)?(clarify|specify|confirm)\b|^before\s+i\b.*\b(tell|know|confirm|clarify)\b/u,
+        head
+      )
+  end
+
+  # Python's str.strip(chars): drop any of the leading and trailing characters.
+  defp trim_chars(text, leading, trailing) do
+    text
+    |> drop_while_in(String.graphemes(leading))
+    |> String.reverse()
+    |> drop_while_in(String.graphemes(trailing))
+    |> String.reverse()
+  end
+
+  defp drop_while_in(text, []), do: text
+
+  defp drop_while_in(text, chars) do
+    case String.next_grapheme(text) do
+      {first, rest} -> if first in chars, do: drop_while_in(rest, chars), else: text
+      nil -> text
+    end
+  end
 
   @doc "Answer now when the direct answer's confidence reaches the cutoff."
   def answer_now?(confidence, cutoff), do: confidence >= cutoff
