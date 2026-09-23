@@ -153,7 +153,10 @@ watchdog() {
   done
 }
 
-watchdog &
+# Neither the watchdog nor the job gets fd 9: a leftover child (the
+# watchdog's sleep, a daemon the job spawns) would hold the lock after this
+# script exits and turn away the next job.
+watchdog 9>&- &
 watchdog_pid=$!
 
 cleanup() {
@@ -173,7 +176,7 @@ systemd-run --user --scope \
   -p MemoryMax="$MEMORY_MAX" \
   -p MemorySwapMax="$MEMORY_SWAP_MAX" \
   -p CPUQuota="$CPU_QUOTA" \
-  -- nice -n 19 ionice -c3 "$@" || status=$?
+  -- nice -n 19 ionice -c3 "$@" 9>&- || status=$?
 
 cleanup
 trap - EXIT
