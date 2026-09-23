@@ -102,6 +102,29 @@ defmodule Gemma4MicTranscribe.Gemma4UnifiedTest do
     assert TokenSelection.top_tokens(logits, suppression_mask, 2) == [{2, 4.0}, {4, 3.0}]
   end
 
+  test "token selection scores candidates at a position with suppressed tokens left out" do
+    suppression_mask = TokenSelection.suppression_mask([3], 4, Nx.BinaryBackend)
+    ln2 = :math.log(2)
+
+    logits =
+      Nx.tensor([
+        [
+          [ln2, 0.0, 0.0, 50.0],
+          [0.0, 0.0, 0.0, 0.0]
+        ]
+      ])
+
+    [{best, best_lp}, {_, runner_lp}] =
+      TokenSelection.scored_candidates(logits, suppression_mask, 2, 0)
+
+    assert best == 0
+    assert_in_delta best_lp, :math.log(2 / 4), 1.0e-5
+    assert_in_delta runner_lp, :math.log(1 / 4), 1.0e-5
+
+    [{_, last_lp} | _] = TokenSelection.scored_candidates(logits, suppression_mask, 2)
+    assert_in_delta last_lp, :math.log(1 / 3), 1.0e-5
+  end
+
   test "token selection skips banned candidates and falls back when all are banned" do
     suppression_mask = TokenSelection.suppression_mask([], 5, Nx.BinaryBackend)
     logits = Nx.tensor([[[0.0, 9.0, 1.0, 2.0, 8.0]]])

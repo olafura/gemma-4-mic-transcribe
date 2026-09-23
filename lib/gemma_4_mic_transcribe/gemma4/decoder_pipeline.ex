@@ -308,12 +308,18 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
   one, for a prompt padded on the right to a fixed bucket. It is ignored when
   prefill returns a single position, which is what the `:split` execution's
   tail does.
+
+  `scores: true` also returns, for every generated token, its log-probability
+  and its margin over the best other candidate (both under the suppression
+  mask the step used), as `{:ok, token_ids, scores}`. The picks are the same
+  as without it.
   """
   def generate_prepared(%__MODULE__{} = pipeline, prepared, opts \\ []) do
     max_new_tokens = Keyword.get(opts, :max_new_tokens, 32)
     min_new_tokens = Keyword.get(opts, :min_new_tokens, 0)
     execution = Keyword.get(opts, :execution, :composed)
     logits_index = Keyword.get(opts, :logits_index)
+    scores = if Keyword.get(opts, :scores, false), do: [], else: nil
 
     channel_state =
       if Keyword.get(opts, :thought_channel, true),
@@ -334,7 +340,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         {:error, ":logits_index must be a non-negative integer"}
 
       max_new_tokens == 0 ->
-        {:ok, []}
+        finish([], scores)
 
       true ->
         generate_cached(
@@ -344,7 +350,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
           min_new_tokens,
           execution,
           channel_state,
-          logits_index
+          logits_index,
+          scores
         )
     end
   rescue
@@ -375,7 +382,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          min_new_tokens,
          execution,
          channel_state,
-         logits_index
+         logits_index,
+         scores
        ) do
     sequence_length = Nx.axis_size(prepared["input_ids"], 1)
     max_cache_length = cache_length(sequence_length, max_new_tokens)
@@ -390,15 +398,12 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
 
     suppression_mask = suppression_mask(pipeline, channel_state)
 
-    token_id =
-      TokenSelection.next_token_id_from_sequence(
-        outputs.logits,
-        suppression_mask,
-        prefill_index(outputs.logits, logits_index)
-      )
+    index = prefill_index(outputs.logits, logits_index)
+    token_id = TokenSelection.next_token_id_from_sequence(outputs.logits, suppression_mask, index)
+    scores = record_score(scores, outputs.logits, suppression_mask, token_id, index)
 
     if stop_token?(pipeline, token_id) and min_new_tokens <= 1 do
-      {:ok, []}
+      finish([], scores)
     else
       content_length = prepared["attention_mask"] |> Nx.sum() |> Nx.to_number()
 
@@ -412,7 +417,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         max_new_tokens,
         min_new_tokens,
         ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
-        execution
+        execution,
+        scores
       )
     end
   end
@@ -427,10 +433,11 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          max_new_tokens,
          _min_new_tokens,
          _channel_state,
-         _execution
+         _execution,
+         scores
        )
        when generated_count >= max_new_tokens,
-       do: {:ok, Enum.reverse(generated)}
+       do: finish(Enum.reverse(generated), scores)
 
   defp decode_cached(
          pipeline,
@@ -442,7 +449,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          max_new_tokens,
          min_new_tokens,
          channel_state,
-         execution
+         execution,
+         scores
        ) do
     backend = pipeline.prefix.backend || Nx.BinaryBackend
     position_id = prompt_length + generated_count - 1
@@ -474,9 +482,10 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       )
 
     step = generated_count + 1
+    scores = record_score(scores, outputs.logits, suppression_mask, token_id, -1)
 
     if stop_token?(pipeline, token_id) and step >= min_new_tokens do
-      {:ok, Enum.reverse(generated)}
+      finish(Enum.reverse(generated), scores)
     else
       decode_cached(
         pipeline,
@@ -488,9 +497,37 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         max_new_tokens,
         min_new_tokens,
         ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
-        execution
+        execution,
+        scores
       )
     end
+  end
+
+  # A stop token ends generation without being returned, so its score, the
+  # last one recorded, is dropped with it.
+  defp finish(token_ids, nil), do: {:ok, token_ids}
+
+  defp finish(token_ids, scores),
+    do: {:ok, token_ids, scores |> Enum.reverse() |> Enum.take(length(token_ids))}
+
+  defp record_score(nil, _logits, _suppression_mask, _token_id, _index), do: nil
+
+  defp record_score(scores, logits, suppression_mask, token_id, index) do
+    candidates = TokenSelection.scored_candidates(logits, suppression_mask, 4, index)
+
+    score =
+      case List.keyfind(candidates, token_id, 0) do
+        {^token_id, logprob} ->
+          runner_up =
+            Enum.find_value(candidates, fn {id, lp} -> if id != token_id, do: lp end)
+
+          %{logprob: logprob, margin: if(runner_up, do: logprob - runner_up, else: nil)}
+
+        nil ->
+          %{logprob: nil, margin: nil}
+      end
+
+    [score | scores]
   end
 
   defp predict_cached(pipeline, inputs, :composed, :prefill) do

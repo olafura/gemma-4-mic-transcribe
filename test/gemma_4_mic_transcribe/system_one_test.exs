@@ -118,6 +118,21 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert input.thought_channel == false
     end
 
+    test "think matches the template's enable_thinking prompt, with or without a system message" do
+      input = Input.build_text("Should I leave now?", think: true)
+
+      assert input.prompt ==
+               "<bos><|turn>system\n<|think|><turn|>\n<|turn>user\nShould I leave now?<turn|>\n<|turn>model\n<|channel>thought\n"
+
+      assert input.thought_channel == :open
+
+      input =
+        Input.build_text("Should I leave now?", system_message: " Be helpful. ", think: true)
+
+      assert input.prompt ==
+               "<bos><|turn>system\n<|think|>Be helpful.<turn|>\n<|turn>user\nShould I leave now?<turn|>\n<|turn>model\n<|channel>thought\n"
+    end
+
     test "teacher forces the response after the model turn header" do
       input = Input.build_text("Should I leave now?", response: "Yes.")
 
@@ -309,6 +324,8 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert opts.force_router_closed == false
       assert opts.gate_probe == true
       assert opts.thought_channel == true
+      assert opts.think == false
+      assert opts.scores == false
       assert opts.max_new_tokens == 64
       assert opts.audio_seconds == 8.0
       assert opts.buckets == [64, 128, 256, 384]
@@ -330,7 +347,9 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
                  "--max-new-tokens",
                  "16",
                  "--audio-seconds",
-                 "6"
+                 "6",
+                 "--think",
+                 "--scores"
                ])
 
       assert opts.expert == "artifacts/system-one-expert"
@@ -338,6 +357,8 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert opts.gate_probe == false
       assert opts.max_new_tokens == 16
       assert opts.audio_seconds == 6.0
+      assert opts.think == true
+      assert opts.scores == true
       assert opts.gate_floor == nil
     end
 

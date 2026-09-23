@@ -24,7 +24,7 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Input do
   @doc """
   Builds a text-only input: no audio markers in the prompt and no audio tokens.
 
-  Options are `:system_message`, `:thought_channel` (see
+  Options are `:system_message`, `:thought_channel`, `:think` (see
   `Gemma4MicTranscribe.Gemma4Unified.Prompt.text/3`) and `:response`. With
   `:response` the model turn is teacher-forced, so `:prompt` runs past the
   model turn header into the response and its end-of-turn token, and
@@ -33,10 +33,11 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Input do
   """
   def build_text(prompt, opts \\ []) do
     system_message = Keyword.get(opts, :system_message)
-    thought_channel = Keyword.get(opts, :thought_channel, true)
+    think = Keyword.get(opts, :think, false)
+    thought_channel = if think, do: :open, else: Keyword.get(opts, :thought_channel, true)
     response = Keyword.get(opts, :response)
 
-    head = Prompt.text(system_message, prompt, thought_channel: thought_channel)
+    head = Prompt.text(system_message, prompt, thought_channel: thought_channel, think: think)
 
     %{
       samples: [],

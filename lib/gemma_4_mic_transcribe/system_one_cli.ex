@@ -100,6 +100,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     buckets: :string,
     system_message: :string,
     thought_channel: :boolean,
+    think: :boolean,
+    scores: :boolean,
     max_new_tokens: :integer,
     audio_seconds: :float,
     force_router_closed: :boolean,
@@ -236,6 +238,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          buckets: buckets,
          system_message: Keyword.get(opts, :system_message),
          thought_channel: Keyword.get(opts, :thought_channel, true),
+         think: Keyword.get(opts, :think, false),
+         scores: Keyword.get(opts, :scores, false),
          max_new_tokens: Keyword.get(opts, :max_new_tokens, 64),
          audio_seconds: Keyword.get(opts, :audio_seconds, @default_audio_seconds),
          force_router_closed: Keyword.get(opts, :force_router_closed, false),
@@ -719,13 +723,15 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         DecoderPipeline.generate_prepared(pipeline, prepared,
           max_new_tokens: opts.max_new_tokens,
           thought_channel: opts.thought_channel,
-          logits_index: prompt_length - 1
+          logits_index: prompt_length - 1,
+          scores: opts.scores
         )
       end)
 
-    generated =
+    {generated, score_info} =
       case generated do
-        {:ok, token_ids} -> token_ids
+        {:ok, token_ids} -> {token_ids, %{}}
+        {:ok, token_ids, scores} -> {token_ids, %{"token_scores" => score_rows(scores)}}
         {:error, reason} -> abort("#{id}: generation failed: #{reason}")
       end
 
@@ -735,7 +741,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     result =
       Map.merge(row, %{
         "id" => id,
-        "reply" => Transcript.decode(tokenizer, generated),
+        "reply" => Transcript.decode(tokenizer, reply_ids(tokenizer, generated, opts)),
         "token_ids" => generated,
         "tokens" => length(generated),
         "ms" => div(elapsed_us, 1_000),
@@ -746,6 +752,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         "bucket" => bucket
       })
       |> Map.merge(audio_info)
+      |> Map.merge(thought_info(tokenizer, generated, opts))
+      |> Map.merge(score_info)
 
     IO.puts(
       Jason.encode!(%{
@@ -770,6 +778,10 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   # after them, and the question line says so. Its samples are cut and padded
   # to the `--audio-seconds` bucket so every audio row compiles the prefix
   # graph the same way. Everything else is the text-only input as before.
+  defp row_input(%{"audio" => path}, _id, %{think: true}) when is_binary(path) do
+    Mix.raise("--think renders text prompts only; the audio prompt has no think turn yet")
+  end
+
   defp row_input(%{"audio" => path} = row, id, opts) when is_binary(path) do
     audio_tokens = ceil_div(round(opts.audio_seconds * @sample_rate), samples_per_token())
     max_samples = audio_tokens * samples_per_token()
@@ -811,9 +823,32 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   defp row_input(row, _id, opts) do
     {Input.build_text(Prompt.render(row),
        system_message: system_message(row, opts),
-       thought_channel: opts.thought_channel
+       thought_channel: opts.thought_channel,
+       think: opts.think
      ), %{}}
   end
+
+  # With --think the prompt already opened the thought channel, so the
+  # generated ids are thought up to `<channel|>` and the reply after it.
+  # Putting the opener back lets `Transcript.decode` strip the thought; a
+  # thought that never closed leaves an empty reply.
+  defp reply_ids(tokenizer, generated, %{think: true}),
+    do: [Bumblebee.Tokenizer.token_to_id(tokenizer, "<|channel>") | generated]
+
+  defp reply_ids(_tokenizer, generated, _opts), do: generated
+
+  defp thought_info(tokenizer, generated, %{think: true}) do
+    close = Bumblebee.Tokenizer.token_to_id(tokenizer, "<channel|>")
+
+    case Enum.find_index(generated, &(&1 == close)) do
+      nil -> %{"thought_tokens" => length(generated), "thought_closed" => false}
+      index -> %{"thought_tokens" => index, "thought_closed" => true}
+    end
+  end
+
+  defp thought_info(_tokenizer, _generated, _opts), do: %{}
+
+  defp score_rows(scores), do: Enum.map(scores, &[&1.logprob, &1.margin])
 
   defp resolve_audio_path(path, input) do
     beside_input = input |> Path.expand() |> Path.dirname() |> Path.join(path)
@@ -1132,6 +1167,11 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       --buckets LIST             Padded prompt lengths, default #{Enum.join(@default_buckets, ",")}
       --system-message TEXT      System turn prepended to every item, default none
       --no-thought-channel       End the prompt at the model turn
+      --think                    Turn thinking on the way the chat template does
+                                 (`<|think|>` at the top of the system turn); the model
+                                 reasons in its thought channel before replying. Text items only
+      --scores                   Record each generated token's log-probability and its margin
+                                 over the runner-up as `token_scores` ([logprob, margin] pairs)
       --max-new-tokens N         Generation budget per item, default 64
       --audio-seconds S          Audio bucket for `audio` items: the WAV is cut and padded
                                  to S seconds (25 soft tokens per second), default #{@default_audio_seconds}

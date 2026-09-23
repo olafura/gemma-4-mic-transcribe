@@ -6,6 +6,8 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   @audio_end "<audio|>"
   @turn_end "<turn|>"
   @empty_thought_channel "<|channel>thought\n<channel|>"
+  @open_thought_channel "<|channel>thought\n"
+  @think "<|think|>"
 
   def audio_begin, do: @audio_begin
   def audio_token, do: @audio_token
@@ -45,13 +47,32 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
 
       <bos><|turn>user\\n{prompt}<turn|>\\n<|turn>model\\n<|channel>thought\\n<channel|>
 
-  `thought_channel: false` stops at the model turn, which is the template's
-  `enable_thinking=True` generation prompt: the model then opens its own
-  thought channel instead of finding it already closed.
+  `thought_channel: false` stops at the model turn, so the model writes its
+  own thought channel. On its own that does not turn thinking on: without the
+  think token the 12B opens the channel and closes it straight away.
+
+  `think: true` is the 12B template's `enable_thinking=True`: a system turn
+  that starts with `<|think|>` (opened even without a system message) and a
+  prompt that stops at the model turn, where the model then reasons inside its
+  thought channel before answering. The E4B template puts a newline after
+  `<|think|>`; the 12B's does not, and this follows the 12B.
+
+  The packed 12B does not open that channel itself under greedy decoding: it
+  spells `<thought` out as text and never closes it. So `think: true` also
+  opens the channel (`thought_channel: :open`), and the model's first
+  generated token is already thought, to be closed with `<channel|>` before
+  the reply. Under greedy decoding the 12B reaches the answer inside the
+  thought and then keeps re-checking it ("Wait, let me double-check...")
+  without closing; thinking needs sampling or a budget.
+
+      <bos><|turn>system\\n<|think|>{system}<turn|>\\n<|turn>user\\n{prompt}<turn|>\\n<|turn>model\\n<|channel>thought\\n
   """
   def text(system_message, prompt, opts \\ []) do
+    think = Keyword.get(opts, :think, false)
+    opts = if think, do: Keyword.put(opts, :thought_channel, :open), else: opts
+
     "<bos>" <>
-      system_turn(system_message) <>
+      system_turn(system_message, think) <>
       "<|turn>user\n" <>
       normalize_text(prompt) <>
       @turn_end <>
@@ -85,10 +106,20 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.Prompt do
   end
 
   defp thought_channel(opts) do
-    if Keyword.get(opts, :thought_channel, true), do: @empty_thought_channel, else: ""
+    case Keyword.get(opts, :thought_channel, true) do
+      :open -> @open_thought_channel
+      true -> @empty_thought_channel
+      false -> ""
+    end
   end
 
-  defp system_turn(system_message) do
+  defp system_turn(system_message, think \\ false)
+
+  defp system_turn(system_message, true) do
+    "<|turn>system\n" <> @think <> normalize_text(system_message) <> @turn_end <> "\n"
+  end
+
+  defp system_turn(system_message, false) do
     case normalize_text(system_message) do
       "" -> ""
       text -> "<|turn>system\n" <> text <> @turn_end <> "\n"

@@ -116,6 +116,41 @@ defmodule Gemma4MicTranscribe.Gemma4Unified.TokenSelection do
     end)
   end
 
+  @doc """
+  The top `count` candidates at sequence position `index` (the last by
+  default) as `{token_id, log_probability}`, best first, with the suppressed
+  tokens excluded from the distribution.
+  """
+  def scored_candidates(logits, suppression_mask, count, index \\ -1)
+      when is_integer(count) and count > 0 do
+    with_tensor_backend(suppression_mask, fn ->
+      {values, indices, log_z} = scored_candidates_tensor(logits, suppression_mask, k: count)
+      log_z = log_z |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_flat_list() |> Enum.at(index)
+
+      at_index = fn tensor ->
+        tensor
+        |> Nx.backend_copy(Nx.BinaryBackend)
+        |> Nx.to_flat_list()
+        |> Enum.chunk_every(count)
+        |> Enum.at(index)
+      end
+
+      Enum.zip_with(at_index.(indices), at_index.(values), fn token_id, value ->
+        {token_id, value - log_z}
+      end)
+    end)
+  end
+
+  defn scored_candidates_tensor(logits, suppression_mask, opts \\ []) do
+    opts = keyword!(opts, [:k])
+    logits = Nx.as_type(logits, :f32)
+    replacement = Nx.Constants.min_finite(:f32)
+    suppression_mask = Nx.broadcast(suppression_mask, Nx.shape(logits))
+    logits = Nx.select(suppression_mask == 1, replacement, logits)
+    {values, indices} = Nx.top_k(logits, k: opts[:k])
+    {values, indices, Nx.logsumexp(logits, axes: [-1])}
+  end
+
   defn next_token_id_tensor(logits, suppression_mask) do
     replacement = Nx.Constants.min_finite(Nx.type(logits))
     suppression_mask = Nx.broadcast(suppression_mask, Nx.shape(logits))
