@@ -777,8 +777,8 @@ something is missing: on 100 held-out twin pairs (the decidable item and
 its blurred twin, in the direct form) it separates them at AUROC 0.585.
 Adding an `ask` option to the prompt gets 0.740, but at the cost of the
 decidable answers (67/100 right). A logistic probe (standardised features,
-C = 0.003) on the layer-44 hidden state at the last prompt token — computed
-anyway during prefill, so free at serve time — gets 0.83–0.86, **but only on
+C = 0.003) on the layer-44 hidden state at the last prompt token (the
+prefix output, one dot product once it is there) gets 0.83–0.86, **but only on
 the prompt wording it was trained on**: trained on the System One template
 from the round-3 cache it scores 0.825 on the held-out twins in that
 template and 0.637 on the same twins in the router's direct form. Retrained
@@ -804,6 +804,37 @@ since the probe never asks there. Compared with the round-3 expert at floor
 ones still guessed, and 3% of ordinary replies reworded), the router asks
 less needlessly, catches more of the unclear requests, and cannot change an
 ordinary reply at all: it only chooses which unmodified mode runs.
+
+**In code: `mix gemma.system_one route`.** `SystemOne.Router` holds the
+prompts, the confidence and the cutoffs; the probe is exported by
+`scripts/system_one/export_ask_probe.py` (standardisation folded into the
+weights) to `artifacts/system-one/ask-probe/`, from the cache of
+`data/system-one/router-probe-train.jsonl` (rebuilt byte-identically by
+`scripts/system_one/build_router_probe_set.py`). Rows are bare `prompt`s
+with an optional `answer` form (`number`, `letter`), or System One items,
+which the router renders with their option descriptions, as the probe was
+trained. `--decide-only` records the route without the follow-up
+generation.
+
+    mix gemma.system_one route --input requests.jsonl --output routed.jsonl
+
+Parity with the simulation (`--decide-only` over the 400 simulated rows):
+probe scores within 0.0002, the same route on 400/400, the same direct
+reply on 327/328 (confidence within 0.07 on the one that differs). The
+composed execution does not expose the prefix output, so the probe costs one
+more prefix pass: 0.88 s per request against 1.34 s for the direct answer.
+Rendering items from their JSON sorts the state keys and the options, which
+changes 180 of the 200 held-out twin prompts from the probe's training
+order and the route of 44 of them, but not the totals: 6 needless asks
+(against 8), 67 of 100 unclear twins asked (against 64), 67 decidable twins
+answered right at once (against 63).
+
+A full run on 16 rows picked to cover all three routes: the 5 asks came
+back as one short question each, in the request's language ("Qual dos dois
+Joões você quer que eu ligue?", "What type of rice are you using?"), one of
+them needless on a decidable twin; the 7 reasoned replies took 96–603
+tokens (13–62 s) and got 3/3 GSM, 2/2 decidable twins and 0/1 ARC right;
+the 4 answered at once took 2.3–3.2 s.
 
 ## 6. Opus workers
 
