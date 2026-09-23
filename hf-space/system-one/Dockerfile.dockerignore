@@ -1,0 +1,10 @@
+# BuildKit reads this instead of the root .dockerignore for this Dockerfile.
+*
+!mix.exs
+!mix.lock
+!config/config.exs
+!lib/
+!vendor/exla/
+vendor/exla/cache/
+!vendor/xla/
+!vendor/ex_libsrt/mix.exs

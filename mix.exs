@@ -10,6 +10,7 @@ defmodule Gemma4MicTranscribe.MixProject do
       elixirc_paths: elixirc_paths(Mix.target()),
       elixirc_options: elixirc_options(Mix.target()),
       escript: escript(),
+      releases: releases(),
       deps: deps()
     ]
   end
@@ -30,11 +31,18 @@ defmodule Gemma4MicTranscribe.MixProject do
     ]
   end
 
+  # MIX_TARGET=system_one_cuda is everything the 12B needs (the decoder,
+  # System One and its router) against the precompiled cuda12 XLA archive, for
+  # timing `route` on an Nvidia GPU. Only the WebRTC test harness, and with
+  # it the WebRTC and Boombox stack, stays out.
+  defp elixirc_paths(:system_one_cuda),
+    do: Path.wildcard("lib/**/*.ex") -- Path.wildcard("lib/gemma_4_mic_transcribe/webrtc/*.ex")
+
   defp elixirc_paths(_target), do: ["lib"]
 
   # Boombox is only reached from the transcription pipeline; the language-ID
   # build leaves it out, so its remote calls are expected to be undefined.
-  defp elixirc_options(target) when target in [:language_id, :language_id_cuda],
+  defp elixirc_options(target) when target in [:language_id, :language_id_cuda, :system_one_cuda],
     do: [no_warn_undefined: [Boombox]]
   defp elixirc_options(_target), do: []
 
@@ -69,6 +77,13 @@ defmodule Gemma4MicTranscribe.MixProject do
     ]
   end
 
+  # The System One tool as a release, for the Nvidia jobs in hf-space/system-one.
+  # EXLA is a runtime: false dependency (Runtime starts it when a backend asks
+  # for it), so the release has to be told to carry it.
+  defp releases do
+    [system_one: [include_executables_for: [:unix], applications: [exla: :load]]]
+  end
+
   def application do
     [
       extra_applications: [:logger, :ssl, :inets, :eex, :runtime_tools]
@@ -85,7 +100,7 @@ defmodule Gemma4MicTranscribe.MixProject do
       # numbers 5.2.5 and explorer need ~> 3.x; ratio only pattern-matches the
       # unchanged %Decimal{} struct fields, so 3.x is fine
       {:decimal, "~> 3.1", override: true},
-      {:exla, path: "vendor/exla", override: true, runtime: false, targets: [:host, :language_id_cuda]},
+      {:exla, path: "vendor/exla", override: true, runtime: false, targets: [:host, :language_id_cuda, :system_one_cuda]},
       {:ex_libsrt, path: "vendor/ex_libsrt", override: true, targets: [:host]},
       {:jason, "~> 1.4"},
       # override: bumblebee 0.7.0 (latest) pins nx ~> 0.12.0, but nx 0.13
@@ -95,7 +110,7 @@ defmodule Gemma4MicTranscribe.MixProject do
       # for CVE-2026-49755 and the multipart injection advisory are 0.6-only
       {:req, "~> 0.6.3", override: true},
       {:torchx, "~> 0.13.0"},
-      {:xla, path: "vendor/xla", override: true, runtime: false, targets: [:host, :language_id_cuda]}
+      {:xla, path: "vendor/xla", override: true, runtime: false, targets: [:host, :language_id_cuda, :system_one_cuda]}
     ]
   end
 end
