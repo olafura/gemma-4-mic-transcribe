@@ -145,7 +145,16 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     end
   end
 
-  def load_tail!(path, backend) do
+  @doc """
+  Loads a decoder tail artifact.
+
+  With `tied_embedding: tensor` (the prefix's `embedder.token_embedding`
+  kernel) and a spec that ties word embeddings, the language modeling head
+  reuses that tensor instead of loading its own copy. The packed 12B stores
+  the tied embedding as f32 in both artifacts, so this saves 3.75 GiB of
+  device memory, which is what lets it load on a 24 GB card.
+  """
+  def load_tail!(path, backend, opts \\ []) do
     path = Path.expand(path)
     manifest = read_manifest!(path)
 
@@ -154,11 +163,19 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     end
 
     tensors = Safetensors.read!(Path.join(path, @parameters), lazy: true)
+    tied_embedding = tied_embedding(manifest.spec, opts[:tied_embedding])
 
     params =
       manifest.parameter_paths
-      |> Enum.map(fn {tensor_name, [node_name, parameter_name]} ->
-        {node_name, parameter_name, load_tensor!(tensors, tensor_name, backend)}
+      |> Enum.map(fn
+        {tensor_name, ["language_modeling_head.output", "kernel"] = [node_name, parameter_name]}
+        when tied_embedding != nil ->
+          {node_name, parameter_name,
+           reuse_tensor(tensors, tensor_name, tied_embedding) ||
+             load_tensor!(tensors, tensor_name, backend)}
+
+        {tensor_name, [node_name, parameter_name]} ->
+          {node_name, parameter_name, load_tensor!(tensors, tensor_name, backend)}
       end)
       |> Enum.group_by(&elem(&1, 0), &{elem(&1, 1), elem(&1, 2)})
       |> Map.new(fn {node_name, parameters} -> {node_name, Map.new(parameters)} end)
@@ -583,6 +600,15 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderBlockArtifact do
     |> Enum.group_by(&elem(&1, 0), &{elem(&1, 1), elem(&1, 2)})
     |> Map.new(fn {node_name, parameters} -> {node_name, Map.new(parameters)} end)
     |> Axon.ModelState.new()
+  end
+
+  defp tied_embedding(spec, tensor) do
+    if tensor != nil and Map.get(spec, :tie_word_embeddings, false), do: tensor
+  end
+
+  defp reuse_tensor(tensors, name, tensor) do
+    stored = Map.fetch!(tensors, name)
+    if stored.shape == Nx.shape(tensor) and stored.type == Nx.type(tensor), do: tensor
   end
 
   defp load_tensor!(tensors, name, backend) do

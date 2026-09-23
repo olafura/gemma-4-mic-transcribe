@@ -986,7 +986,11 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   defp route_pipelines!(opts) do
     {:ok, backend} = Runtime.resolve_backend(opts.backend)
     prefix = DecoderBlockArtifact.load_prefix!(opts.prefix_artifact, backend)
-    tail = DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend)
+
+    tail =
+      DecoderBlockArtifact.load_tail!(opts.tail_artifact, backend,
+        tied_embedding: get_in(prefix.prefix.params.data, ["embedder.token_embedding", "kernel"])
+      )
 
     {base, nil} =
       SystemOneArtifact.build_pipeline!(prefix, tail, backend,

@@ -394,13 +394,16 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         Model.init_cache(pipeline.generation.spec, 1, max_cache_length, %{})
       end)
 
+    started = step_clock()
     outputs = predict_cached(pipeline, Map.put(prepared, "cache", cache), execution, :prefill)
+    predicted = step_clock(outputs)
 
     suppression_mask = suppression_mask(pipeline, channel_state)
 
     index = prefill_index(outputs.logits, logits_index)
     token_id = TokenSelection.next_token_id_from_sequence(outputs.logits, suppression_mask, index)
     scores = record_score(scores, outputs.logits, suppression_mask, token_id, index)
+    report_step(:prefill, started, predicted)
 
     if stop_token?(pipeline, token_id) and min_new_tokens <= 1 do
       finish([], scores)
@@ -467,7 +470,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
         }
       end)
 
+    started = step_clock()
     outputs = predict_cached(pipeline, prefix_inputs, execution, :decode)
+    predicted = step_clock(outputs)
 
     suppression_mask = suppression_mask(pipeline, channel_state)
 
@@ -483,6 +488,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
 
     step = generated_count + 1
     scores = record_score(scores, outputs.logits, suppression_mask, token_id, -1)
+    report_step(:decode, started, predicted)
 
     if stop_token?(pipeline, token_id) and step >= min_new_tokens do
       finish(Enum.reverse(generated), scores)
@@ -502,6 +508,32 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       )
     end
   end
+
+  # GEMMA_DECODE_TIMING=1 prints, for every prefill and decode step, the time
+  # spent in the model and in token selection, to profile new hardware. The
+  # model time waits for the logits, so it no longer overlaps selection.
+  defp step_clock, do: if(step_timing?(), do: System.monotonic_time(:microsecond))
+
+  defp step_clock(outputs) do
+    if step_timing?() do
+      outputs.logits |> Nx.reduce_max() |> Nx.to_number()
+      System.monotonic_time(:microsecond)
+    end
+  end
+
+  defp report_step(_phase, nil, _predicted), do: :ok
+
+  defp report_step(phase, started, predicted) do
+    selected = System.monotonic_time(:microsecond)
+
+    IO.puts(
+      :stderr,
+      ~s({"event":"step_timing","phase":"#{phase}","model_us":#{predicted - started},) <>
+        ~s("select_us":#{selected - predicted}})
+    )
+  end
+
+  defp step_timing?, do: System.get_env("GEMMA_DECODE_TIMING") == "1"
 
   # A stop token ends generation without being returned, so its score, the
   # last one recorded, is dropped with it.
@@ -530,27 +562,58 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     [score | scores]
   end
 
-  defp predict_cached(pipeline, inputs, :composed, :prefill) do
+  # Every step replaces the KV cache, and nothing but this loop holds the old
+  # one, so its device buffers are freed here rather than whenever the terms
+  # holding them happen to be collected. Those terms are too small to prompt a
+  # collection, so otherwise several stale caches (1.75 GB each at 1024 tokens
+  # on the 12B) pile up and overrun a 24 GB card. A collection per step would
+  # also do it, but costs 5-12 ms because it copies the whole process heap.
+  defp predict_cached(pipeline, inputs, execution, phase) do
+    outputs = run_cached(pipeline, inputs, execution, phase)
+    release_stale(inputs["cache"], outputs.cache)
+    outputs
+  end
+
+  defp run_cached(pipeline, inputs, :composed, :prefill) do
     predict_fun =
       pipeline.prefill_generation_predict_fun || pipeline.generation_predict_fun
 
     predict_fun.(pipeline.generation_params, inputs)
   end
 
-  defp predict_cached(pipeline, inputs, :composed, :decode) do
+  defp run_cached(pipeline, inputs, :composed, :decode) do
     pipeline.generation_predict_fun.(pipeline.generation_params, inputs)
   end
 
-  defp predict_cached(pipeline, inputs, :split, _phase) do
+  defp run_cached(pipeline, inputs, :split, _phase) do
     prefix_outputs = pipeline.cached_prefix_predict_fun.(pipeline.prefix.params, inputs)
 
-    pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{
-      "hidden_state" => prefix_outputs.hidden_state,
-      "position_ids" => inputs["position_ids"],
-      "attention_mask" => prefix_outputs.attention_mask,
-      "cache" => prefix_outputs.cache
-    })
+    outputs =
+      pipeline.cached_tail_predict_fun.(pipeline.tail.params, %{
+        "hidden_state" => prefix_outputs.hidden_state,
+        "position_ids" => inputs["position_ids"],
+        "attention_mask" => prefix_outputs.attention_mask,
+        "cache" => prefix_outputs.cache
+      })
+
+    release_stale(prefix_outputs.cache, outputs.cache)
+    outputs
   end
+
+  # Frees the tensors of `old` whose buffers `new` does not share.
+  defp release_stale(old, new) do
+    kept = new |> cache_tensors() |> MapSet.new(& &1.data)
+
+    for tensor <- cache_tensors(old), not MapSet.member?(kept, tensor.data) do
+      Nx.backend_deallocate(tensor)
+    end
+
+    :ok
+  end
+
+  defp cache_tensors(cache),
+    do:
+      Nx.Defn.Composite.reduce(cache, [], &if(is_struct(&1, Nx.Tensor), do: [&1 | &2], else: &2))
 
   # Prefill of an unpadded prompt, and the tail model's already-sliced output,
   # both continue at the last position.
