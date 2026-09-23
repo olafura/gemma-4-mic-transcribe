@@ -610,6 +610,30 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
       assert Router.answer_confidence(["Answer:", " "], [-0.1, -0.1]) == 0.0
     end
 
+    test "watching the answer as it comes flags the token answer_confidence would" do
+      watch = fn pieces, logprobs, cutoff ->
+        pieces
+        |> Enum.zip(logprobs)
+        |> Enum.with_index()
+        |> Enum.reduce_while(nil, fn {{piece, logprob}, index}, state ->
+          case Router.watch_confidence(state, piece, logprob, cutoff) do
+            {:low, _state} -> {:halt, index}
+            {:ok, state} -> {:cont, state}
+          end
+        end)
+      end
+
+      pieces = ["Sure", ".", " Answer", ":", " ", "4", "2"]
+      logprobs = [-3.0, -3.0, -0.01, -0.02, -3.0, -0.01, -0.5]
+
+      # Before `Answer:` and blank pieces never count; " 2" at e^-0.5 = 0.61 does.
+      assert watch.(pieces, logprobs, 0.9) == 6
+      assert Router.answer_confidence(pieces, logprobs) < 0.9
+      assert watch.(pieces, logprobs, 0.6) == :answering
+      assert Router.answer_confidence(pieces, logprobs) >= 0.6
+      assert watch.(["The", " answer"], [-3.0, -3.0], 0.9) == "The answer"
+    end
+
     test "scores a vector with the folded probe and applies the cutoffs" do
       probe = %{weight: Nx.tensor([1.0, -2.0], backend: Nx.BinaryBackend), bias: 0.5}
 
@@ -647,7 +671,14 @@ defmodule Gemma4MicTranscribe.SystemOneTest do
         assert Router.asks_question?(reply), reply
       end
 
-      for reply <- ["brother_l", "Answer: hp_2200", "Do not forget the invoice.", "Have a good day.", "", "**"] do
+      for reply <- [
+            "brother_l",
+            "Answer: hp_2200",
+            "Do not forget the invoice.",
+            "Have a good day.",
+            "",
+            "**"
+          ] do
         refute Router.asks_question?(reply), reply
       end
     end

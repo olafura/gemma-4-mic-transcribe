@@ -188,6 +188,24 @@ defmodule Gemma4MicTranscribe.Gemma4.SystemOne.Router do
     end
   end
 
+  @doc """
+  Follows the direct answer as it is generated, reading it the way
+  `answer_confidence/2` does. Given the state so far (`nil` to start) and the
+  next token's text and log-probability, returns `{:low, state}` once a token
+  after `Answer:` falls below `cutoff`, which settles the route as reason
+  before the answer is done, and `{:ok, state}` otherwise.
+  """
+  def watch_confidence(:answering, piece, logprob, cutoff) do
+    if String.trim(piece) != "" and is_number(logprob) and :math.exp(logprob) < cutoff,
+      do: {:low, :answering},
+      else: {:ok, :answering}
+  end
+
+  def watch_confidence(text, piece, _logprob, _cutoff) do
+    text = (text || "") <> piece
+    if String.contains?(text, "Answer:"), do: {:ok, :answering}, else: {:ok, text}
+  end
+
   defp answer_start(pieces) do
     pieces
     |> Enum.scan("", fn piece, text -> text <> piece end)

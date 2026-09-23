@@ -23,6 +23,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   alias Gemma4MicTranscribe.Gemma4.SystemOne
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Prompt
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Router
+  alias Gemma4MicTranscribe.Gemma4.SystemOne.Server
   alias Gemma4MicTranscribe.Gemma4.SystemOne.Trainer
   alias Gemma4MicTranscribe.Gemma4.SystemOneArtifact
   alias Gemma4MicTranscribe.Gemma4Unified.AudioFeatureExtractor
@@ -139,9 +140,14 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     audio_seconds: :float,
     decide_only: :boolean,
     bf16_embedding: :boolean,
+    stop_early: :boolean,
     limit: :integer,
     help: :boolean
   ]
+
+  @serve_switches @route_switches
+                  |> Keyword.drop([:input, :output, :decide_only, :stop_early, :limit])
+                  |> Keyword.put(:port, :integer)
 
   @regress_switches [
     expert: :string,
@@ -176,6 +182,9 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         route!(opts)
         0
 
+      {:ok, :serve, opts} ->
+        serve!(opts)
+
       {:ok, :regress, opts} ->
         regress!(opts)
 
@@ -193,6 +202,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   def parse(["generate" | argv]), do: parse_command(:generate, argv, @generate_switches)
   def parse(["regress" | argv]), do: parse_command(:regress, argv, @regress_switches)
   def parse(["route" | argv]), do: parse_command(:route, argv, @route_switches)
+  def parse(["serve" | argv]), do: parse_command(:serve, argv, @serve_switches)
 
   def parse(["--help"]), do: {:help, usage()}
   def parse(["-h"]), do: {:help, usage()}
@@ -200,7 +210,8 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
   def parse([command | _argv]),
     do:
-      {:error, "unknown subcommand #{command}, expected cache, train, generate, route or regress"}
+      {:error,
+       "unknown subcommand #{command}, expected cache, train, generate, route, serve or regress"}
 
   defp parse_command(command, argv, switches) do
     case OptionParser.parse(argv, strict: switches, aliases: [h: :help]) do
@@ -298,29 +309,23 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     with {:ok, buckets} <- buckets,
          :ok <- required(opts[:input], "--input PATH is required"),
          :ok <- required(opts[:output], "--output PATH is required") do
-      {:ok, :route,
-       %{
-         input: opts[:input],
-         output: opts[:output],
-         ask_probe: Keyword.get(opts, :ask_probe, @default_ask_probe),
-         ask_threshold: Keyword.get(opts, :ask_threshold),
-         confidence: Keyword.get(opts, :confidence, 0.9),
-         prefix_artifact: Keyword.get(opts, :prefix_artifact, @default_prefix_artifact),
-         tail_artifact: Keyword.get(opts, :tail_artifact, @default_tail_artifact),
-         backend: Keyword.get(opts, :backend, "exla:rocm"),
-         buckets: buckets,
-         system_message: Keyword.get(opts, :system_message),
-         max_answer_tokens: Keyword.get(opts, :max_answer_tokens, 24),
-         max_reason_tokens: Keyword.get(opts, :max_reason_tokens, 768),
-         max_ask_tokens: Keyword.get(opts, :max_ask_tokens, 64),
-         expert: Keyword.get(opts, :expert),
-         expert_band: Keyword.get(opts, :expert_band, 0.4),
-         expert_floor: Keyword.get(opts, :expert_floor, 0.8),
-         audio_seconds: Keyword.get(opts, :audio_seconds, @default_audio_seconds),
-         decide_only: Keyword.get(opts, :decide_only, false),
-         bf16_embedding: Keyword.get(opts, :bf16_embedding, false),
-         limit: Keyword.get(opts, :limit)
-       }}
+      {:ok, :route, route_values(opts, buckets)}
+    end
+  end
+
+  # A served request's WAV is a temporary file with an absolute path, so the
+  # input it would be resolved against is only a placeholder. The server
+  # always ends a doubtful direct answer early and always replies.
+  defp parse_values(:serve, opts) do
+    buckets =
+      case Keyword.get(opts, :buckets) do
+        nil -> {:ok, @default_route_buckets}
+        value -> parse_buckets(value)
+      end
+
+    with {:ok, buckets} <- buckets do
+      opts = Keyword.merge(opts, input: ".", stop_early: true)
+      {:ok, :serve, Map.put(route_values(opts, buckets), :port, Keyword.get(opts, :port, 7860))}
     end
   end
 
@@ -362,6 +367,32 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
          limit: Keyword.get(opts, :limit)
        }}
     end
+  end
+
+  defp route_values(opts, buckets) do
+    %{
+      input: opts[:input],
+      output: opts[:output],
+      ask_probe: Keyword.get(opts, :ask_probe, @default_ask_probe),
+      ask_threshold: Keyword.get(opts, :ask_threshold),
+      confidence: Keyword.get(opts, :confidence, 0.9),
+      prefix_artifact: Keyword.get(opts, :prefix_artifact, @default_prefix_artifact),
+      tail_artifact: Keyword.get(opts, :tail_artifact, @default_tail_artifact),
+      backend: Keyword.get(opts, :backend, "exla:rocm"),
+      buckets: buckets,
+      system_message: Keyword.get(opts, :system_message),
+      max_answer_tokens: Keyword.get(opts, :max_answer_tokens, 24),
+      max_reason_tokens: Keyword.get(opts, :max_reason_tokens, 768),
+      max_ask_tokens: Keyword.get(opts, :max_ask_tokens, 64),
+      expert: Keyword.get(opts, :expert),
+      expert_band: Keyword.get(opts, :expert_band, 0.4),
+      expert_floor: Keyword.get(opts, :expert_floor, 0.8),
+      audio_seconds: Keyword.get(opts, :audio_seconds, @default_audio_seconds),
+      decide_only: Keyword.get(opts, :decide_only, false),
+      bf16_embedding: Keyword.get(opts, :bf16_embedding, false),
+      stop_early: Keyword.get(opts, :stop_early, false),
+      limit: Keyword.get(opts, :limit)
+    }
   end
 
   defp parse_head_type(nil), do: {:ok, Trainer.defaults().head_type}
@@ -963,7 +994,11 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
       rows
       |> Enum.with_index()
       |> Enum.map(fn {row, index} ->
-        route_row!(row, index, pipelines, tokenizer, probe, threshold, opts)
+        try do
+          route_row!(row, index, pipelines, tokenizer, probe, threshold, opts)
+        rescue
+          error in RuntimeError -> abort(error.message)
+        end
       end)
 
     File.mkdir_p!(Path.dirname(output))
@@ -979,6 +1014,83 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
           results |> Enum.filter(& &1["asked_by"]) |> Enum.frequencies_by(& &1["asked_by"])
       })
     )
+  end
+
+  # Loads what `route` does, routes one request to compile the text graphs,
+  # then serves requests over HTTP until stopped (`SystemOne.Server`).
+  defp serve!(opts) do
+    probe = Router.load_probe!(opts.ask_probe)
+    threshold = opts.ask_threshold || probe.threshold
+
+    {pipeline, expert_pipeline} =
+      timed!("route_pipeline_load", fn -> {:ok, route_pipelines!(opts)} end)
+
+    tokenizer =
+      pipeline.tail.tokenizer || pipeline.input_context.tokenizer ||
+        abort("neither artifact carries a tokenizer")
+
+    pipelines = %{base: pipeline, expert: expert_pipeline}
+
+    route = fn request, emit ->
+      route_row!(request, 0, pipelines, tokenizer, probe, threshold, opts, emit)
+    end
+
+    timed!("serve_warmup", fn ->
+      serve_warmup!(pipeline, probe, tokenizer, opts)
+      {:ok, :warm}
+    end)
+
+    Server.listen!(route, opts.port)
+    IO.puts(Jason.encode!(%{event: "serve_ready", port: opts.port, ask_threshold: threshold}))
+    Process.sleep(:infinity)
+  end
+
+  # The graphs are compiled per input kind, prompt bucket and reply length,
+  # and the first request that needs one waits about 20 s for it. So for a
+  # typed and a spoken input (a second of silence), with a prompt padded into
+  # each bucket, the warmup runs the probe and starts each reply the router
+  # makes (one token is enough). The expert's graphs are not warmed.
+  defp serve_warmup!(pipeline, probe, tokenizer, opts) do
+    wav =
+      Path.join(System.tmp_dir!(), "system-one-warmup-#{System.unique_integer([:positive])}.wav")
+
+    File.write!(wav, silent_wav(@sample_rate))
+    row = %{"id" => "warmup"}
+    first_token = {fn _token_id, _score, acc -> {:halt, acc} end, nil}
+
+    replies = [
+      {opts.max_answer_tokens, true},
+      {opts.max_ask_tokens, false},
+      {opts.max_reason_tokens, false}
+    ]
+
+    try do
+      for audio <- [nil, spoken_audio!(%{"audio" => wav}, "warmup", opts)],
+          bucket <- opts.buckets do
+        input = &route_input("warmup", &1, row, audio, pipeline, tokenizer, opts)
+        filler = bucket - 8 - input.("").prompt_length
+        prompt = String.duplicate("ok ", max(filler, 0))
+        route_probe_score("warmup", pipeline, input.(prompt), probe)
+
+        for {max_new_tokens, scores} <- replies do
+          warm = input.(prompt)
+          route_generate("warmup", pipeline, warm, max_new_tokens, scores, first_token)
+          Nx.backend_deallocate(warm.prepared)
+        end
+
+        :erlang.garbage_collect()
+      end
+    after
+      File.rm(wav)
+    end
+  end
+
+  defp silent_wav(samples) do
+    data_size = 2 * samples
+
+    <<"RIFF", 36 + data_size::little-32, "WAVE", "fmt ", 16::little-32, 1::little-16,
+      1::little-16, @sample_rate::little-32, 2 * @sample_rate::little-32, 2::little-16,
+      16::little-16, "data", data_size::little-32, 0::size(data_size)-unit(8)>>
   end
 
   # Without `--expert` this is the bare pipeline alone, as `load_pipeline!`
@@ -1026,7 +1138,27 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
   # With `--expert`, an item in the expert's band is first put to the expert
   # the way it was evaluated; when its reply is a question, that question is
   # the ask-back and nothing else runs.
-  defp route_row!(row, index, pipelines, tokenizer, probe, threshold, opts) do
+  #
+  # `emit` is handed the reply as it is made, for `serve`: a `route` event
+  # once the route is known, then `text` events carrying the reply's new text.
+  # A follow-up streams token by token; the direct answer is only emitted
+  # once it is done and confident enough, since until then it may yet be
+  # reasoned. `first_text_ms` records when the first text was ready. With
+  # `stop_early` a direct answer stops at the first token that settles the
+  # route as reason, so its `direct_reply` and `confidence` are cut short.
+  #
+  # Failures raise, so a server can report them and carry on.
+  defp route_row!(row, index, pipelines, tokenizer, probe, threshold, opts, emit \\ &no_emit/1) do
+    started = System.monotonic_time(:microsecond)
+    first_text = {:route_first_text, make_ref()}
+
+    emit = fn event ->
+      if event.event == "text" and Process.get(first_text) == nil,
+        do: Process.put(first_text, System.monotonic_time(:microsecond))
+
+      emit.(event)
+    end
+
     id = Map.get(row, "id", "row-#{index}")
     pipeline = pipelines.base
     audio = if Router.spoken?(row), do: spoken_audio!(row, id, opts)
@@ -1052,9 +1184,14 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
 
     ask = asked_by != nil
 
+    if ask do
+      emit.(%{event: "route", route: "ask", asked_by: asked_by, ask_score: ask_score})
+    end
+
     answer =
       if not ask do
-        route_generate(id, pipeline, direct, opts.max_answer_tokens, true)
+        watch = if opts.stop_early, do: confidence_watch(tokenizer, opts.confidence)
+        route_generate(id, pipeline, direct, opts.max_answer_tokens, true, watch)
       end
 
     Nx.backend_deallocate(direct.prepared)
@@ -1073,20 +1210,37 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         true -> "reason"
       end
 
+    if not ask do
+      emit.(%{event: "route", route: route, ask_score: ask_score, confidence: confidence})
+    end
+
+    cond do
+      route == "answer" -> emit_text(Transcript.decode(tokenizer, answer.token_ids), "", emit)
+      asked_by == "expert" -> emit_text(expert_reply, "", emit)
+      true -> :ok
+    end
+
     followup =
       cond do
         route == "answer" or asked_by == "expert" or opts.decide_only ->
           nil
 
         route == "ask" ->
-          route_followup(id, row_input.(Router.ask_prompt(row)), pipeline, opts.max_ask_tokens)
+          route_followup(
+            id,
+            row_input.(Router.ask_prompt(row)),
+            pipeline,
+            opts.max_ask_tokens,
+            text_stream(tokenizer, emit)
+          )
 
         route == "reason" ->
           route_followup(
             id,
             row_input.(Router.reason_prompt(row)),
             pipeline,
-            opts.max_reason_tokens
+            opts.max_reason_tokens,
+            text_stream(tokenizer, emit)
           )
       end
 
@@ -1102,6 +1256,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     answer_us = if answer, do: answer.elapsed_us, else: 0
     followup_us = if followup, do: followup.elapsed_us, else: 0
     expert_us = if expert, do: expert.elapsed_us, else: 0
+    first_text_us = Process.delete(first_text)
 
     result =
       Map.merge(row, %{
@@ -1119,6 +1274,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         "followup_ms" => div(followup_us, 1_000),
         "expert_reply" => expert_reply,
         "expert_ms" => div(expert_us, 1_000),
+        "first_text_ms" => first_text_us && div(first_text_us - started, 1_000),
         "ms" => div(probe_us + expert_us + answer_us + followup_us, 1_000)
       })
       |> Map.merge(audio_fields)
@@ -1132,11 +1288,59 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
         asked_by: asked_by,
         ask_score: ask_score,
         confidence: confidence,
+        first_text_ms: result["first_text_ms"],
         ms: result["ms"]
       })
     )
 
     result
+  end
+
+  defp no_emit(_event), do: :ok
+
+  # Streams a reply as it is generated: after each token the reply so far is
+  # decoded and whatever text it added is emitted.
+  defp text_stream(tokenizer, emit) do
+    stream = fn token_id, _score, {token_ids, sent} ->
+      token_ids = [token_id | token_ids]
+      text = Transcript.decode(tokenizer, Enum.reverse(token_ids))
+      {:cont, {token_ids, emit_text(text, sent, emit)}}
+    end
+
+    {stream, {[], ""}}
+  end
+
+  # Emits what `text` adds to the `sent` text and returns what has now been
+  # sent. Text that ends in a partial character, or that no longer extends
+  # what was sent (a later token can change how earlier ones decode), waits
+  # for the next token; the finished reply is authoritative either way.
+  defp emit_text(text, sent, emit) do
+    if byte_size(text) > byte_size(sent) and String.starts_with?(text, sent) and
+         String.valid?(text) and not String.ends_with?(text, "\uFFFD") do
+      emit.(%{
+        event: "text",
+        text: binary_part(text, byte_size(sent), byte_size(text) - byte_size(sent))
+      })
+
+      text
+    else
+      sent
+    end
+  end
+
+  # Ends the direct answer at the first token that puts its confidence below
+  # the cutoff, which already decides the route: reason.
+  defp confidence_watch(tokenizer, cutoff) do
+    watch = fn token_id, score, state ->
+      piece = Bumblebee.Tokenizer.decode(tokenizer, [token_id])
+
+      case Router.watch_confidence(state, piece, score.logprob, cutoff) do
+        {:low, state} -> {:halt, state}
+        {:ok, state} -> {:cont, state}
+      end
+    end
+
+    {watch, nil}
   end
 
   # A spoken request puts its WAV in the audio slot after the text of each of
@@ -1182,7 +1386,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     bucket =
       case bucket(prompt_length, opts.buckets) do
         {:ok, bucket} -> bucket
-        {:error, reason} -> abort("#{id}: #{reason}")
+        {:error, reason} -> raise "#{id}: #{reason}"
       end
 
     spec = pipeline.generation.spec
@@ -1198,7 +1402,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     hidden_state =
       case DecoderPipeline.run_prefix(pipeline.prefix, input.prepared) do
         {:ok, hidden_state} -> hidden_state
-        {:error, reason} -> abort("#{id}: prefix run failed: #{reason}")
+        {:error, reason} -> raise "#{id}: prefix run failed: #{reason}"
       end
 
     spec = pipeline.generation.spec
@@ -1207,26 +1411,27 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     Router.probe_score(probe, Nx.reshape(last, {spec.hidden_size}))
   end
 
-  defp route_generate(id, pipeline, input, max_new_tokens, scores) do
+  defp route_generate(id, pipeline, input, max_new_tokens, scores, on_token \\ nil) do
     {elapsed_us, generated} =
       :timer.tc(fn ->
         DecoderPipeline.generate_prepared(pipeline, input.prepared,
           max_new_tokens: max_new_tokens,
           thought_channel: true,
           logits_index: input.prompt_length - 1,
-          scores: scores
+          scores: scores,
+          on_token: on_token
         )
       end)
 
     case generated do
       {:ok, token_ids} -> %{token_ids: token_ids, scores: nil, elapsed_us: elapsed_us}
       {:ok, token_ids, scores} -> %{token_ids: token_ids, scores: scores, elapsed_us: elapsed_us}
-      {:error, reason} -> abort("#{id}: generation failed: #{reason}")
+      {:error, reason} -> raise "#{id}: generation failed: #{reason}"
     end
   end
 
-  defp route_followup(id, input, pipeline, max_new_tokens) do
-    result = route_generate(id, pipeline, input, max_new_tokens, false)
+  defp route_followup(id, input, pipeline, max_new_tokens, on_token) do
+    result = route_generate(id, pipeline, input, max_new_tokens, false, on_token)
     Nx.backend_deallocate(input.prepared)
     result
   end
@@ -1509,7 +1714,7 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
     defaults = Trainer.defaults()
 
     """
-    usage: mix gemma.system_one cache|train|generate|route|regress [options]
+    usage: mix gemma.system_one cache|train|generate|route|serve|regress [options]
 
     cache: run the packed prefix over a JSONL of items and store layer 45's input
 
@@ -1634,7 +1839,23 @@ defmodule Gemma4MicTranscribe.SystemOneCLI do
                                  is lossless: 1.9 GB less memory and a faster head on
                                  CUDA (L4 81 -> 73 ms/step), but the head's logits may
                                  round differently. Slower on ROCm (97 -> 120 ms/step)
+      --stop-early               End the direct answer at the first token that makes it
+                                 a reason, as `serve` does; direct_reply is then cut short
       --limit N                  Route only the first N rows
+
+    serve: route requests over HTTP, streaming each reply as it is written
+
+      Takes route's options except --input, --output, --decide-only, --stop-early and
+      --limit, and always stops a doubtful direct answer early.
+
+      --port N                   Port to listen on, default 7860
+
+      GET / is a page to try it; POST /route takes one request as a JSON object (a
+      spoken one's WAV as base64 in `audio_wav`) and answers with NDJSON events:
+      `route` once the route is chosen, `text` with each new piece of the reply, and
+      `done` with the finished row as route writes it. Before listening it compiles
+      every graph a request can need (about 5 minutes on Strix Halo), so no request
+      waits on a compile
 
     regress: the non-regression gate, the router forced closed must still be base Gemma
 

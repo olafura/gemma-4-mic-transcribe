@@ -313,6 +313,12 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
   and its margin over the best other candidate (both under the suppression
   mask the step used), as `{:ok, token_ids, scores}`. The picks are the same
   as without it.
+
+  `on_token: {fun, acc}` streams the reply: `fun.(token_id, score, acc)` is
+  called with each token as soon as it is final (not with the stop token that
+  ends the reply), with its score when `scores: true` and `nil` otherwise,
+  and returns `{:cont, acc}` to go on or `{:halt, acc}` to end generation
+  there, keeping that token. The picks are the same as without it.
   """
   def generate_prepared(%__MODULE__{} = pipeline, prepared, opts \\ []) do
     max_new_tokens = Keyword.get(opts, :max_new_tokens, 32)
@@ -320,6 +326,7 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     execution = Keyword.get(opts, :execution, :composed)
     logits_index = Keyword.get(opts, :logits_index)
     scores = if Keyword.get(opts, :scores, false), do: [], else: nil
+    on_token = Keyword.get(opts, :on_token)
 
     channel_state =
       if Keyword.get(opts, :thought_channel, true),
@@ -339,6 +346,9 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
       not (is_nil(logits_index) or (is_integer(logits_index) and logits_index >= 0)) ->
         {:error, ":logits_index must be a non-negative integer"}
 
+      not (is_nil(on_token) or match?({fun, _acc} when is_function(fun, 3), on_token)) ->
+        {:error, ":on_token must be {fun/3, acc}"}
+
       max_new_tokens == 0 ->
         finish([], scores)
 
@@ -351,7 +361,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
           execution,
           channel_state,
           logits_index,
-          scores
+          scores,
+          on_token
         )
     end
   rescue
@@ -383,7 +394,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          execution,
          channel_state,
          logits_index,
-         scores
+         scores,
+         on_token
        ) do
     sequence_length = Nx.axis_size(prepared["input_ids"], 1)
     max_cache_length = cache_length(sequence_length, max_new_tokens)
@@ -408,21 +420,28 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     if stop_token?(pipeline, token_id) and min_new_tokens <= 1 do
       finish([], scores)
     else
-      content_length = prepared["attention_mask"] |> Nx.sum() |> Nx.to_number()
+      case stream_token(on_token, token_id, scores) do
+        :halt ->
+          finish([token_id], scores)
 
-      decode_cached(
-        pipeline,
-        outputs.cache,
-        token_id,
-        content_length,
-        [token_id],
-        1,
-        max_new_tokens,
-        min_new_tokens,
-        ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
-        execution,
-        scores
-      )
+        on_token ->
+          content_length = prepared["attention_mask"] |> Nx.sum() |> Nx.to_number()
+
+          decode_cached(
+            pipeline,
+            outputs.cache,
+            token_id,
+            content_length,
+            [token_id],
+            1,
+            max_new_tokens,
+            min_new_tokens,
+            ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
+            execution,
+            scores,
+            on_token
+          )
+      end
     end
   end
 
@@ -437,7 +456,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          _min_new_tokens,
          _channel_state,
          _execution,
-         scores
+         scores,
+         _on_token
        )
        when generated_count >= max_new_tokens,
        do: finish(Enum.reverse(generated), scores)
@@ -453,7 +473,8 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
          min_new_tokens,
          channel_state,
          execution,
-         scores
+         scores,
+         on_token
        ) do
     backend = pipeline.prefix.backend || Nx.BinaryBackend
     position_id = prompt_length + generated_count - 1
@@ -493,19 +514,40 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipeline do
     if stop_token?(pipeline, token_id) and step >= min_new_tokens do
       finish(Enum.reverse(generated), scores)
     else
-      decode_cached(
-        pipeline,
-        outputs.cache,
-        token_id,
-        prompt_length,
-        [token_id | generated],
-        generated_count + 1,
-        max_new_tokens,
-        min_new_tokens,
-        ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
-        execution,
-        scores
-      )
+      case stream_token(on_token, token_id, scores) do
+        :halt ->
+          finish(Enum.reverse([token_id | generated]), scores)
+
+        on_token ->
+          decode_cached(
+            pipeline,
+            outputs.cache,
+            token_id,
+            prompt_length,
+            [token_id | generated],
+            generated_count + 1,
+            max_new_tokens,
+            min_new_tokens,
+            ChannelState.advance(channel_state, token_id, pipeline.generation.channel_token_ids),
+            execution,
+            scores,
+            on_token
+          )
+      end
+    end
+  end
+
+  # Hands a token that is now part of the reply to the `:on_token` callback,
+  # with the score `record_score` just put at the head of `scores`. Returns
+  # the callback with its new accumulator, or `:halt`.
+  defp stream_token(nil, _token_id, _scores), do: nil
+
+  defp stream_token({fun, acc}, token_id, scores) do
+    score = if is_list(scores), do: hd(scores)
+
+    case fun.(token_id, score, acc) do
+      {:cont, acc} -> {fun, acc}
+      {:halt, _acc} -> :halt
     end
   end
 

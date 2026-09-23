@@ -69,6 +69,54 @@ defmodule Gemma4MicTranscribe.Gemma4.DecoderPipelineTest do
     end
   end
 
+  test "streams each token to on_token and halts where it says" do
+    {runtime, inputs} = runtime()
+    pipeline = DecoderPipeline.extract!(runtime, [1])
+    opts = [max_new_tokens: 4, min_new_tokens: 5, scores: true]
+
+    assert {:ok, ids, scores} = DecoderPipeline.generate_prepared(pipeline, inputs, opts)
+    assert length(ids) == 4
+
+    collect = fn id, score, seen -> {:cont, [{id, score} | seen]} end
+    parent = self()
+
+    report = fn id, score, seen ->
+      seen = [{id, score} | seen]
+      send(parent, {:seen, Enum.reverse(seen)})
+      {:cont, seen}
+    end
+
+    assert {:ok, ^ids, ^scores} =
+             DecoderPipeline.generate_prepared(pipeline, inputs, [on_token: {report, []}] ++ opts)
+
+    assert_received {:seen, seen} when length(seen) == 4
+    assert seen == Enum.zip(ids, scores)
+
+    halt_second = fn _id, _score, count ->
+      if count == 1, do: {:halt, count + 1}, else: {:cont, count + 1}
+    end
+
+    assert {:ok, halted, halted_scores} =
+             DecoderPipeline.generate_prepared(
+               pipeline,
+               inputs,
+               [on_token: {halt_second, 0}] ++ opts
+             )
+
+    assert halted == Enum.take(ids, 2)
+    assert halted_scores == Enum.take(scores, 2)
+
+    assert {:ok, ^ids} =
+             DecoderPipeline.generate_prepared(pipeline, inputs,
+               max_new_tokens: 4,
+               min_new_tokens: 5,
+               on_token: {collect, []}
+             )
+
+    assert {:error, ":on_token must be {fun/3, acc}"} =
+             DecoderPipeline.generate_prepared(pipeline, inputs, on_token: collect)
+  end
+
   test "rejects unknown generation execution modes" do
     {runtime, inputs} = runtime()
     pipeline = DecoderPipeline.extract!(runtime, [1])
