@@ -892,6 +892,100 @@ with the probe's does not help either (56, −9 points, 95% CI [−23, +3]).
 The probe already reads what Gemma knows about this, and reads it better
 than Gemma says it.
 
+### The router and the expert together
+
+The probe and the round-3 expert fail differently. The probe rarely asks
+needlessly but misses unclear far-domain requests. The expert asks on more
+unclear items but also on a quarter of the clear ones. So the router
+consults the expert only where the probe is unsure. On a System One item
+whose probe score is in the band 0.4 < score ≤ 0.8, the expert (floor 0.8,
+its own system turn, `Prompt.render` of the item, 64 tokens) replies
+first. If its reply is a question (the scorecard's deterministic rule,
+`Router.asks_question?/1`), that question is the ask-back. Otherwise the
+row is routed as before: the direct answer and its confidence come from
+the base pipeline, whose graph has no expert in it. The expert therefore
+never changes an answer, only whether one is given. A bare prompt never
+reaches the expert, and neither does an item scored above 0.8 (the probe
+asks) or at or below 0.4 (the probe answers).
+
+    mix gemma.system_one route --expert artifacts/system-one/round3 --input requests.jsonl --output routed.jsonl
+
+`--expert-band` (0.4) and `--expert-floor` (0.8) set the band's lower
+edge and the gate floor. The two pipelines share the prefix and the tail
+weights, so loading both takes 17 s. The band was chosen offline from
+recorded replies on the 200 held-out twins in the served rendering. Served
+(`--decide-only`, 2026-09-23), the numbers match that estimate exactly:
+
+| 100 + 100 held-out twins (served rendering) | needless asks | unclear asked | far (of 52) | near (of 48) |
+|---|---|---|---|---|
+| probe alone (ask > 0.8) | 6 | 67 | 29 | 38 |
+| expert alone (floor 0.8) | 32 | 79 | | |
+| probe + expert in 0.4–0.8 | 14 | 83 | 41 | 42 |
+
+On unclear twins the gain is mostly far-domain, where the probe is weak.
+A split-half estimate against the probe at the same number of needless
+asks puts it at +7.5 points, 95% CI [0, +14]. The price is 8 more
+needless asks. Most of them ask for a number that is already in the
+state, such as "How many users are affected?" or "What is the cat's
+weight?". One of them mixes languages ("How many came आए at the same time
+on Tuesday morning?").
+
+- **Band size:** the band holds 43 of the 200 twins (22 clear, 21
+  unclear). The expert asks on 16 of the unclear ones and answers the
+  other 5.
+- **Latency:** the expert reply takes a median of 1.8 s (p90 2.4 s,
+  max 14.6 s), or 0.45 s per twin averaged over all 200.
+- **Consistency:** its reply matches the round-3 `generate` run on 42 of
+  43 items. The exception is a Japanese question worded differently.
+- **Plain questions:** on the 200 GSM8K and ARC questions the expert
+  never runs, and the routes are unchanged.
+- **Parity without the expert:** without `--expert`, 40 rows rerun give
+  the same probe scores, direct replies and routes as the earlier parity
+  run.
+
+Neither approach dominates. The probe alone asks needlessly on 6% of
+clear items and misses a third of the unclear ones. With the expert
+added, it asks needlessly on 14% and misses 17%. Which is better depends
+on what a needless question costs compared with a guess.
+
+### Retraining the ask-back probe on your own requests
+
+The probe's weak spot is domains it has not seen, and 0.86 AUROC is the
+most a linear read got on the twins. So the practical lever is training
+rows from the domains it will actually serve. `scripts/system_one/retrain_ask_probe.sh`
+covers the whole loop:
+
+    scripts/system_one/retrain_ask_probe.sh OUT_DIR mine.jsonl [...] [-- my-eval.jsonl ...]
+
+Rows are the `--extra` format of `build_router_probe_set.py`. Each needs an
+`id`, then either a System One item (`state`, `question`, `options`) or a
+bare `prompt` (optionally with an `answer` form), then a boolean
+`decidable` (or a `label`, 1 = ask). Write twin pairs where you can: a
+request, and the same request with the one deciding detail removed. The
+script:
+
+1. Renders the rows as `route` serves them and checks them against
+   `Router.direct_prompt/1` (`check_router_render.exs`).
+2. Caches only the new rows through the job wrapper, reusing the 3,089
+   base rows. On first use it also caches the 400-row held-out set
+   (`data/system-one/router-probe-heldout.jsonl`, about 5 min).
+3. Exports `OUT_DIR/ask-probe` from base + new rows (`C`, `THRESHOLD`
+   from the environment).
+4. Scores the shipped probe and the new one side by side
+   (`eval_ask_probe.py`: AUROC, unclear asked and needless asks, per
+   source and split) on the held-out set, plus the eval files if given.
+
+A smoke run (80 training and 40 eval rows from unused round-3 pairs, so no
+new domains) took 2.3 min once the held-out cache existed. The shipped
+probe scores the held-out set exactly as `route` served it: 67/100 unclear
+twins asked, 6 needless, no asks on GSM/ARC, AUROC 0.885 in the served
+rendering. The retrained probe is within noise of it (65/100, 6 needless),
+which is what rows from domains the probe already knows should give.
+
+Serve the result with `route --ask-probe OUT_DIR/ask-probe`. Retraining
+changes the probe's scores, so the expert band's edges may need
+re-picking afterwards.
+
 ## 6. Opus workers
 
 Spawned with the Agent tool, `model: opus`. Two lanes:
